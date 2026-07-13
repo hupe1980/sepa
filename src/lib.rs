@@ -49,12 +49,14 @@
 
 pub mod bic;
 pub mod camt054;
+pub mod creditor_id;
 pub mod iban;
 pub mod pain001;
 pub mod pain008;
 
 pub use bic::{Bic, BicError, validate_bic};
 pub use camt054::{Camt054Entry, CreditDebitIndicator, ReturnInfo, UnknownIndicator};
+pub use creditor_id::{CreditorId, CreditorIdError, validate_creditor_id};
 pub use iban::{Iban, IbanError, validate_iban};
 pub use pain001::{CreditTransferEntry, Pain001Builder};
 pub use pain008::{DirectDebitEntry, Pain008Builder, SequenceType, UnknownSequenceType};

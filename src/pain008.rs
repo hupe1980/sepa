@@ -47,6 +47,7 @@
 
 use std::str::FromStr;
 
+use crate::creditor_id::CreditorId;
 use crate::{Bic, Iban, ct_to_eur_str};
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -199,6 +200,9 @@ pub struct Pain008Builder {
     creditor_name: String,
     creditor_iban: Iban,
     creditor_bic: Option<Bic>,
+    /// SEPA Creditor Identifier (EPC AT-02) — required by the EPC SEPA Core DD Rulebook.
+    /// Rendered as `PmtInf/CdtrSchmeId` in the generated XML.
+    creditor_id: Option<CreditorId>,
     msg_id: String,
     collection_date: String,
     sequence_type: SequenceType,
@@ -215,6 +219,7 @@ impl Pain008Builder {
             creditor_name: creditor_name.into(),
             creditor_iban: creditor_iban.clone(),
             creditor_bic: None,
+            creditor_id: None,
             msg_id: format!("sepa-{}", epoch_secs()),
             collection_date: default_collection_date(),
             sequence_type: SequenceType::Rcur,
@@ -251,6 +256,17 @@ impl Pain008Builder {
     #[must_use]
     pub fn creditor_bic(mut self, bic: Bic) -> Self {
         self.creditor_bic = Some(bic);
+        self
+    }
+
+    /// Set the SEPA Creditor Identifier (`CdtrSchmeId`, EPC AT-02).
+    ///
+    /// Required by the EPC SEPA Core Direct Debit Rulebook for all SDD batches.
+    /// Obtain your CI from your bank or national SEPA authority.
+    /// German format example: `DE74ZZZ09999999999`.
+    #[must_use]
+    pub fn creditor_id(mut self, id: CreditorId) -> Self {
+        self.creditor_id = Some(id);
         self
     }
 
@@ -294,6 +310,21 @@ impl Pain008Builder {
             .map_or("NOTPROVIDED", Bic::as_str);
         let seq_tp = self.sequence_type.as_code();
 
+        // CdtrSchmeId block (EPC AT-02 SEPA Creditor Identifier) — inserted when set.
+        // Per EPC SEPA Core DD Rulebook: MUST be present in production batches.
+        let creditor_scheme_id = self
+            .creditor_id
+            .as_ref()
+            .map(|ci| {
+                format!(
+                    "      <CdtrSchmeId><Id><PrvtId><Othr>\
+<Id>{id}</Id><SchmeNm><Prtry>SEPA</Prtry></SchmeNm>\
+</Othr></PrvtId></Id></CdtrSchmeId>\n",
+                    id = ci.as_str()
+                )
+            })
+            .unwrap_or_default();
+
         let transactions: String = self
             .entries
             .iter()
@@ -326,7 +357,7 @@ impl Pain008Builder {
       <Cdtr><Nm>{creditor_name}</Nm></Cdtr>\n\
       <CdtrAcct><Id><IBAN>{creditor_iban}</IBAN></Id></CdtrAcct>\n\
       <CdtrAgt><FinInstnId><BIC>{creditor_bic}</BIC></FinInstnId></CdtrAgt>\n\
-{transactions}\n\
+{creditor_scheme_id}{transactions}\n\
     </PmtInf>\n\
   </CstmrDrctDbtInitn>\n\
 </Document>",
@@ -339,6 +370,7 @@ impl Pain008Builder {
             collection_date = self.collection_date,
             creditor_iban = self.creditor_iban.as_str(),
             creditor_bic = creditor_bic,
+            creditor_scheme_id = creditor_scheme_id,
             transactions = transactions,
         )
     }
@@ -593,5 +625,41 @@ mod tests {
             + 13
             - 1; // Jan+Feb+Mar+Apr+May+Jun+13days - 1
         assert_eq!(days_to_ymd(days), (2026, 7, 13));
+    }
+
+    #[test]
+    fn creditor_scheme_id_in_xml_when_set() {
+        use crate::creditor_id::validate_creditor_id;
+        let ci = validate_creditor_id("DE74ZZZ09999999999").unwrap();
+        let xml = Pain008Builder::new("Test GmbH", &de_iban())
+            .msg_id("CI-TEST")
+            .creditor_id(ci)
+            .add_entry(entry("MND-CI", 5000))
+            .build_xml();
+        assert!(
+            xml.contains("<CdtrSchmeId>"),
+            "CdtrSchmeId must be present when creditor_id set"
+        );
+        assert!(
+            xml.contains("DE74ZZZ09999999999"),
+            "CI value must appear in XML"
+        );
+        assert!(
+            xml.contains("<Prtry>SEPA</Prtry>"),
+            "Scheme name must be SEPA"
+        );
+    }
+
+    #[test]
+    fn no_creditor_scheme_id_when_not_set() {
+        let xml = Pain008Builder::new("Test", &de_iban())
+            .msg_id("NO-CI")
+            .add_entry(entry("MND-1", 1000))
+            .build_xml();
+        // CdtrSchmeId is optional — absent when not configured
+        assert!(
+            !xml.contains("<CdtrSchmeId>"),
+            "CdtrSchmeId must be absent when creditor_id not set"
+        );
     }
 }

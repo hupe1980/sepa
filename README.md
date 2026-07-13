@@ -20,6 +20,7 @@
 | `pain008` | pain.008.003.02 XML builder — SEPA Core Direct Debit (Lastschrift) |
 | `pain001` | pain.001.003.03 XML builder — SEPA Credit Transfer (Überweisung) |
 | `camt054` | Typed CAMT.054 entry — Bank-to-Customer Notification (ISO 20022) |
+| `creditor_id` | SEPA Creditor Identifier validation — EPC AT-02 (mod-97) |
 | `ct_to_eur_str` | Integer-safe `i64 ct → "1234.56"` formatter, no f64 |
 
 ---
@@ -28,12 +29,13 @@
 
 ```toml
 [dependencies]
-sepa = "0.1"
+sepa = "0.2"
 ```
 
 ```rust
 use sepa::{validate_iban, validate_bic, Pain008Builder, Pain001Builder};
-use sepa::{DirectDebitEntry, CreditTransferEntry, SequenceType};
+use sepa::{DirectDebitEntry, CreditTransferEntry};
+use sepa::pain008::SequenceType;
 
 let iban = validate_iban("DE89 3704 0044 0532 0130 00").unwrap();
 assert_eq!(iban.as_str(), "DE89370400440532013000");
@@ -41,37 +43,37 @@ assert_eq!(iban.as_str(), "DE89370400440532013000");
 // pain.008 — Direct Debit (Lastschrift)
 let dd_xml = Pain008Builder::new("Creditor GmbH", &iban)
     .msg_id("DD-2026-07-001")
-    .add_entry(DirectDebitEntry {
-        mandate_ref: "MND-001".to_owned(),
-        mandate_signed_at: "2024-06-01".to_owned(),
-        sequence_type: SequenceType::Rcur,
-        debtor_name: "Max Mustermann".to_owned(),
-        debtor_iban: validate_iban("NL91ABNA0417164300").unwrap(),
-        debtor_bic: None,
-        amount_ct: 7_500,           // 75.00 EUR
-        end_to_end_id: "E2E-001".to_owned(),
-        description: Some("Abschlag Juli 2026".to_owned()),
-    })
+    .sequence_type(SequenceType::Rcur)
+    .add_entry(
+        DirectDebitEntry::new(
+            "MND-001",
+            "2024-06-01",
+            "Max Mustermann",
+            validate_iban("NL91ABNA0417164300").unwrap(),
+            7_500,          // 75.00 EUR
+            "E2E-001",
+        ).with_description("Abschlag Juli 2026"),
+    )
     .build_xml();
 
 // pain.001 — Credit Transfer (Überweisung)
 let ct_xml = Pain001Builder::new("Debtor GmbH", &iban)
     .msg_id("CT-2026-07-001")
-    .add_entry(CreditTransferEntry {
-        creditor_name: "Supplier AG".to_owned(),
-        creditor_iban: validate_iban("NL91ABNA0417164300").unwrap(),
-        creditor_bic: None,
-        amount_ct: 12_000,          // 120.00 EUR
-        end_to_end_id: "REFUND-001".to_owned(),
-        description: Some("Erstattung 2025".to_owned()),
-    })
+    .add_entry(
+        CreditTransferEntry::new(
+            "Supplier AG",
+            validate_iban("NL91ABNA0417164300").unwrap(),
+            12_000,         // 120.00 EUR
+            "REFUND-001",
+        ).with_description("Erstattung 2025"),
+    )
     .build_xml();
 ```
 
 ### CAMT.054 (`json` feature)
 
 ```toml
-sepa = { version = "0.1", features = ["json"] }
+sepa = { version = "0.2", features = ["json"] }
 ```
 
 ```rust
