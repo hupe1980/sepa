@@ -1,0 +1,33 @@
+[package]
+name         = "sepa"
+version      = "0.2.0"
+rust-version = "1.85"
+edition      = "2024"
+authors      = ["hupe1980"]
+description  = """\
+SEPA payment utilities: IBAN validation (ISO 13616), BIC validation (ISO 9362), \
+pain.008 direct-debit XML builder, pain.001 credit-transfer XML builder, \
+and CAMT.054 notification types (ISO 20022). \
+Zero I/O. No async. No domain assumptions.\
+"""
+repository   = "https://github.com/hupe1980/sepa"
+license      = "MIT OR Apache-2.0"
+keywords     = ["sepa", "iban", "iso20022", "payments", "banking"]
+categories   = ["finance", "encoding"]
+readme       = "README.md"
+
+[features]
+default = []
+## Enable serde Serialize / Deserialize on all public types.
+serde = ["dep:serde"]
+## Enable `camt054::parse_simple_json` — parses bank CSV/JSON export format.
+json  = ["dep:serde_json"]
+
+[dependencies]
+thiserror  = { version = "2", default-features = false }
+serde      = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
