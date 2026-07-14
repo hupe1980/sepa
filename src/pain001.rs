@@ -1,38 +1,113 @@
-//! ISO 20022 pain.001.003.03 — SEPA Credit Transfer (SCT) initiation.
+//! ISO 20022 pain.001 — SEPA Credit Transfer (SCT) initiation.
 //!
 //! Builds SEPA Credit Transfer XML for outgoing payments:
 //! supplier credits, refunds to customers, or any IBAN-to-IBAN EUR transfer.
+//! Supports both the DK legacy schema and the current EPC/SCT Inst schema.
+//!
+//! ## Schema versions
+//!
+//! | Schema | Namespace | Use |
+//! |---|---|---|
+//! | `pain.001.003.03` | `urn:iso:std:iso:20022:tech:xsd:pain.001.003.03` | DK V2.7, German banking default |
+//! | `pain.001.001.09` | `urn:iso:std:iso:20022:tech:xsd:pain.001.001.09` | EPC Rulebook 2021+, required for SCT Inst |
 //!
 //! ## References
 //!
-//! - ISO 20022 pain.001.003.03 schema
-//! - EPC SEPA Credit Transfer Rulebook (latest version)
+//! - ISO 20022 pain.001.003.03 / pain.001.001.09 schemas
+//! - EPC SEPA Credit Transfer Rulebook (SCT)
+//! - EPC SEPA Instant Credit Transfer Rulebook (SCT Inst)
+//! - Deutsche Kreditwirtschaft DFÜ-Abkommen V2.7
 //!
 //! ## Example
 //!
 //! ```rust
 //! use sepa::{validate_iban, Pain001Builder, CreditTransferEntry};
+//! use sepa::pain001::LocalInstrument;
 //!
 //! let debtor_iban   = validate_iban("DE89370400440532013000").unwrap();
 //! let creditor_iban = validate_iban("NL91ABNA0417164300").unwrap();
 //!
+//! // Standard SCT
 //! let xml = Pain001Builder::new("Acme GmbH", &debtor_iban)
 //!     .msg_id("CT-2026-07-001")
 //!     .execution_date("2026-07-20")
 //!     .add_entry(CreditTransferEntry::new(
 //!         "Max Mustermann",
-//!         creditor_iban,
+//!         creditor_iban.clone(),
 //!         12000,
 //!         "REFUND-2025",
 //!     ).with_description("Erstattung 2025"))
 //!     .build_xml();
 //!
 //! assert!(xml.contains("<InstdAmt Ccy=\"EUR\">120.00</InstdAmt>"));
-//! assert!(xml.contains("<Nm>Max Mustermann</Nm>"));
+//!
+//! // SCT Instant (10-second settlement, pain.001.001.09 namespace)
+//! let xml_inst = Pain001Builder::new("Acme GmbH", &debtor_iban)
+//!     .msg_id("CT-INST-001")
+//!     .local_instrument(LocalInstrument::Inst)
+//!     .add_entry(CreditTransferEntry::new(
+//!         "Max Mustermann",
+//!         creditor_iban,
+//!         5000,
+//!         "INSTANT-001",
+//!     ))
+//!     .build_xml();
+//!
+//! assert!(xml_inst.contains("<Cd>INST</Cd>"));
+//! assert!(xml_inst.contains("pain.001.001.09"));
 //! ```
 
-use crate::pain008::xml_escape;
 use crate::{Bic, Iban, ct_to_eur_str};
+
+// ── Schema version ────────────────────────────────────────────────────────────
+
+/// pain.001 XML schema version to emit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CreditTransferSchema {
+    /// `pain.001.003.03` — Deutsche Kreditwirtschaft DK V2.7 (2013).
+    ///
+    /// Default. Used by virtually all German corporate banking software (DATEV,
+    /// SAP, MultiCash, etc.) and accepted by all German banks via EBICS.
+    #[default]
+    DkV2_7,
+    /// `pain.001.001.09` — EPC SCT Rulebook 2021+ / SCT Instant.
+    ///
+    /// Required for SEPA Instant Credit Transfer (`LocalInstrument::Inst`).
+    /// Automatically selected when [`LocalInstrument::Inst`] is set.
+    IsoV9,
+}
+
+impl CreditTransferSchema {
+    /// The XML namespace URI for this schema version.
+    #[must_use]
+    pub const fn namespace(self) -> &'static str {
+        match self {
+            Self::DkV2_7 => "urn:iso:std:iso:20022:tech:xsd:pain.001.003.03",
+            Self::IsoV9 => "urn:iso:std:iso:20022:tech:xsd:pain.001.001.09",
+        }
+    }
+}
+
+// ── LocalInstrument ───────────────────────────────────────────────────────────
+
+/// SEPA Credit Transfer local instrument variant.
+///
+/// When set to [`Inst`](LocalInstrument::Inst), the builder:
+/// - Switches the schema to [`CreditTransferSchema::IsoV9`] automatically
+/// - Adds `<LclInstrm><Cd>INST</Cd></LclInstrm>` to `PmtTpInf`
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum LocalInstrument {
+    /// Standard SEPA Credit Transfer — no local instrument code (default).
+    #[default]
+    None,
+    /// SEPA Instant Credit Transfer — 10-second settlement window.
+    ///
+    /// EU Regulation 2024/886 mandates PSP support for SCT Inst in the eurozone.
+    Inst,
+}
 
 // ── CreditTransferEntry ───────────────────────────────────────────────────────
 
@@ -94,7 +169,10 @@ impl CreditTransferEntry {
 
 // ── Builder ───────────────────────────────────────────────────────────────────
 
-/// Builder for an ISO 20022 pain.001.003.03 (SEPA Credit Transfer) XML batch.
+/// Builder for an ISO 20022 pain.001 (SEPA Credit Transfer) XML batch.
+///
+/// Defaults to `pain.001.003.03` (DK V2.7). Use [`local_instrument(LocalInstrument::Inst)`](Self::local_instrument)
+/// for SCT Instant, which automatically selects `pain.001.001.09`.
 #[derive(Debug)]
 pub struct Pain001Builder {
     debtor_name: String,
@@ -102,6 +180,8 @@ pub struct Pain001Builder {
     debtor_bic: Option<Bic>,
     msg_id: String,
     execution_date: String,
+    schema: CreditTransferSchema,
+    local_instrument: LocalInstrument,
     entries: Vec<CreditTransferEntry>,
 }
 
@@ -114,6 +194,8 @@ impl Pain001Builder {
             debtor_bic: None,
             msg_id: format!("sct-{}", crate::pain008::epoch_secs()),
             execution_date: crate::pain008::default_collection_date(),
+            schema: CreditTransferSchema::DkV2_7,
+            local_instrument: LocalInstrument::None,
             entries: Vec::new(),
         }
     }
@@ -136,6 +218,29 @@ impl Pain001Builder {
     #[must_use]
     pub fn debtor_bic(mut self, bic: Bic) -> Self {
         self.debtor_bic = Some(bic);
+        self
+    }
+
+    /// Override the pain.001 XML schema version (default: [`CreditTransferSchema::DkV2_7`]).
+    ///
+    /// Setting [`LocalInstrument::Inst`] via [`local_instrument`](Self::local_instrument)
+    /// automatically overrides this to [`CreditTransferSchema::IsoV9`].
+    #[must_use]
+    pub fn schema(mut self, schema: CreditTransferSchema) -> Self {
+        self.schema = schema;
+        self
+    }
+
+    /// Set the local instrument (default: [`LocalInstrument::None`]).
+    ///
+    /// Setting [`LocalInstrument::Inst`] automatically switches the schema to
+    /// `pain.001.001.09` as required by the EPC SCT Inst Rulebook.
+    #[must_use]
+    pub fn local_instrument(mut self, li: LocalInstrument) -> Self {
+        self.local_instrument = li;
+        if li == LocalInstrument::Inst {
+            self.schema = CreditTransferSchema::IsoV9;
+        }
         self
     }
 
@@ -165,96 +270,144 @@ impl Pain001Builder {
         self.entries.iter().map(|e| e.amount_ct).sum()
     }
 
-    /// Generate the pain.001.003.03 XML string.
+    /// Generate the pain.001 XML string.
+    ///
+    /// The emitted namespace URI is determined by the configured [`CreditTransferSchema`].
+    /// `ChrgBr` is always `SLEV` (the only value permitted by the EPC SCT Rulebook).
+    ///
+    /// For streaming output use [`write_xml_to`](Self::write_xml_to).
     #[must_use]
     pub fn build_xml(&self) -> String {
+        // Estimate: ~850 B for header/footer + ~420 B per transaction.
+        let mut buf = String::with_capacity(850 + self.entries.len() * 420);
+        self.write_xml_to(&mut buf)
+            .expect("in-memory String write is infallible");
+        buf
+    }
+
+    /// Write the pain.001 XML to any [`fmt::Write`](std::fmt::Write) target.
+    ///
+    /// ```rust
+    /// use sepa::{Pain001Builder, validate_iban};
+    ///
+    /// let iban = validate_iban("DE89370400440532013000").unwrap();
+    /// let builder = Pain001Builder::new("Test", &iban).msg_id("X");
+    ///
+    /// let mut buf = String::new();
+    /// builder.write_xml_to(&mut buf).unwrap();
+    /// assert!(buf.contains("<PmtMtd>TRF</PmtMtd>"));
+    /// ```
+    pub fn write_xml_to<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+        use crate::xml_util::write_escaped;
+
         let now = crate::pain008::iso8601_now();
         let total_eur = ct_to_eur_str(self.total_ct());
         let nb = self.entries.len();
         let debtor_bic = self.debtor_bic.as_ref().map_or("NOTPROVIDED", Bic::as_str);
+        let namespace = self.schema.namespace();
+        let debtor_iban = self.debtor_iban.as_str();
+        let execution_date = &self.execution_date;
 
-        let transactions: String = self
-            .entries
-            .iter()
-            .map(Self::render_transaction)
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Each line written individually — no `\` continuation that silently strips indentation.
+        w.write_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
+        writeln!(w, "<Document xmlns=\"{namespace}\">")?;
+        w.write_str("  <CstmrCdtTrfInitn>\n    <GrpHdr>\n      <MsgId>")?;
+        write_escaped(w, &self.msg_id)?;
+        write!(w, "</MsgId>\n      <CreDtTm>{now}</CreDtTm>\n")?;
+        write!(
+            w,
+            "      <NbOfTxs>{nb}</NbOfTxs>\n      <CtrlSum>{total_eur}</CtrlSum>\n"
+        )?;
+        w.write_str("      <InitgPty><Nm>")?;
+        write_escaped(w, &self.debtor_name)?;
+        w.write_str("</Nm></InitgPty>\n    </GrpHdr>\n    <PmtInf>\n      <PmtInfId>")?;
+        write_escaped(w, &self.msg_id)?;
+        w.write_str("-1</PmtInfId>\n")?;
+        w.write_str("      <PmtMtd>TRF</PmtMtd>\n")?;
+        write!(
+            w,
+            "      <NbOfTxs>{nb}</NbOfTxs>\n      <CtrlSum>{total_eur}</CtrlSum>\n"
+        )?;
+        w.write_str("      <PmtTpInf>\n        <SvcLvl><Cd>SEPA</Cd></SvcLvl>\n")?;
+        if self.local_instrument == LocalInstrument::Inst {
+            w.write_str("        <LclInstrm><Cd>INST</Cd></LclInstrm>\n")?;
+        }
+        w.write_str("      </PmtTpInf>\n")?;
+        writeln!(w, "      <ReqdExctnDt>{execution_date}</ReqdExctnDt>")?;
+        w.write_str("      <Dbtr><Nm>")?;
+        write_escaped(w, &self.debtor_name)?;
+        w.write_str("</Nm></Dbtr>\n")?;
+        writeln!(
+            w,
+            "      <DbtrAcct><Id><IBAN>{debtor_iban}</IBAN></Id></DbtrAcct>"
+        )?;
+        writeln!(
+            w,
+            "      <DbtrAgt><FinInstnId><BIC>{debtor_bic}</BIC></FinInstnId></DbtrAgt>"
+        )?;
+        w.write_str("      <ChrgBr>SLEV</ChrgBr>\n")?;
 
-        format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:pain.001.003.03\">\n\
-  <CstmrCdtTrfInitn>\n\
-    <GrpHdr>\n\
-      <MsgId>{msg_id}</MsgId>\n\
-      <CreDtTm>{now}</CreDtTm>\n\
-      <NbOfTxs>{nb}</NbOfTxs>\n\
-      <CtrlSum>{total_eur}</CtrlSum>\n\
-      <InitgPty><Nm>{debtor_name}</Nm></InitgPty>\n\
-    </GrpHdr>\n\
-    <PmtInf>\n\
-      <PmtInfId>{msg_id}-1</PmtInfId>\n\
-      <PmtMtd>TRF</PmtMtd>\n\
-      <NbOfTxs>{nb}</NbOfTxs>\n\
-      <CtrlSum>{total_eur}</CtrlSum>\n\
-      <PmtTpInf>\n\
-        <SvcLvl><Cd>SEPA</Cd></SvcLvl>\n\
-      </PmtTpInf>\n\
-      <ReqdExctnDt>{execution_date}</ReqdExctnDt>\n\
-      <Dbtr><Nm>{debtor_name}</Nm></Dbtr>\n\
-      <DbtrAcct><Id><IBAN>{debtor_iban}</IBAN></Id></DbtrAcct>\n\
-      <DbtrAgt><FinInstnId><BIC>{debtor_bic}</BIC></FinInstnId></DbtrAgt>\n\
-{transactions}\n\
-    </PmtInf>\n\
-  </CstmrCdtTrfInitn>\n\
-</Document>",
-            msg_id = xml_escape(&self.msg_id),
-            now = now,
-            nb = nb,
-            total_eur = total_eur,
-            debtor_name = xml_escape(&self.debtor_name),
-            execution_date = self.execution_date,
-            debtor_iban = self.debtor_iban.as_str(),
-            debtor_bic = debtor_bic,
-            transactions = transactions,
-        )
+        for entry in &self.entries {
+            Self::write_transaction(w, entry)?;
+        }
+
+        w.write_str("    </PmtInf>\n  </CstmrCdtTrfInitn>\n</Document>")
     }
 
-    fn render_transaction(e: &CreditTransferEntry) -> String {
-        let amount_eur = ct_to_eur_str(e.amount_ct);
-        let creditor_bic = e.creditor_bic.as_ref().map_or("NOTPROVIDED", Bic::as_str);
-        let remittance = e
-            .description
-            .as_deref()
-            .map(|d| {
-                let truncated = if d.len() > 140 { &d[..140] } else { d };
-                format!(
-                    "\n      <RmtInf><Ustrd>{}</Ustrd></RmtInf>",
-                    xml_escape(truncated)
-                )
-            })
-            .unwrap_or_default();
+    /// Write the pain.001 XML to any [`io::Write`](std::io::Write) target.
+    ///
+    /// Streams directly to a `BufWriter<File>`, `TcpStream`, or `Vec<u8>`.
+    ///
+    /// ```rust
+    /// use sepa::{Pain001Builder, validate_iban};
+    ///
+    /// let iban = validate_iban("DE89370400440532013000").unwrap();
+    /// let mut buf: Vec<u8> = Vec::new();
+    /// Pain001Builder::new("Test", &iban).write_xml_to_io(&mut buf).unwrap();
+    /// assert!(buf.starts_with(b"<?xml"));
+    /// ```
+    pub fn write_xml_to_io<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        let mut bridge = crate::xml_util::IoWriterBridge {
+            inner: w,
+            error: None,
+        };
+        if self.write_xml_to(&mut bridge).is_err() {
+            if let Some(e) = bridge.error {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
 
-        format!(
-            "    <CdtTrfTxInf>\n\
-      <PmtId>\n\
-        <EndToEndId>{end_to_end_id}</EndToEndId>\n\
-      </PmtId>\n\
-      <Amt><InstdAmt Ccy=\"EUR\">{amount_eur}</InstdAmt></Amt>\n\
-      <CdtrAgt><FinInstnId><BIC>{creditor_bic}</BIC></FinInstnId></CdtrAgt>\n\
-      <Cdtr><Nm>{creditor_name}</Nm></Cdtr>\n\
-      <CdtrAcct><Id><IBAN>{creditor_iban}</IBAN></Id></CdtrAcct>{remittance}\n\
-    </CdtTrfTxInf>",
-            end_to_end_id = xml_escape(&e.end_to_end_id),
-            amount_eur = amount_eur,
-            creditor_bic = creditor_bic,
-            creditor_name = xml_escape(&e.creditor_name),
-            creditor_iban = e.creditor_iban.as_str(),
-            remittance = remittance,
-        )
+    fn write_transaction<W: std::fmt::Write>(
+        w: &mut W,
+        e: &CreditTransferEntry,
+    ) -> std::fmt::Result {
+        use crate::xml_util::{write_escaped, write_eur};
+        let creditor_bic = e.creditor_bic.as_ref().map_or("NOTPROVIDED", Bic::as_str);
+
+        w.write_str("    <CdtTrfTxInf>\n      <PmtId>\n        <EndToEndId>")?;
+        write_escaped(w, &e.end_to_end_id)?;
+        w.write_str("</EndToEndId>\n      </PmtId>\n      <Amt><InstdAmt Ccy=\"EUR\">")?;
+        write_eur(w, e.amount_ct)?;
+        w.write_str("</InstdAmt></Amt>\n      <CdtrAgt><FinInstnId><BIC>")?;
+        w.write_str(creditor_bic)?;
+        w.write_str("</BIC></FinInstnId></CdtrAgt>\n      <Cdtr><Nm>")?;
+        write_escaped(w, &e.creditor_name)?;
+        w.write_str("</Nm></Cdtr>\n      <CdtrAcct><Id><IBAN>")?;
+        w.write_str(e.creditor_iban.as_str())?;
+        w.write_str("</IBAN></Id></CdtrAcct>\n")?;
+
+        if let Some(desc) = &e.description {
+            let truncated = if desc.len() > 140 { &desc[..140] } else { desc };
+            w.write_str("      <RmtInf><Ustrd>")?;
+            write_escaped(w, truncated)?;
+            w.write_str("</Ustrd></RmtInf>\n")?;
+        }
+
+        w.write_str("    </CdtTrfTxInf>\n")
     }
 }
-
-// xml_escape is pub(crate) in pain008 — imported above
 
 #[cfg(test)]
 mod tests {
@@ -293,6 +446,36 @@ mod tests {
         assert!(xml.contains("<ReqdExctnDt>2026-07-20</ReqdExctnDt>"));
         assert!(xml.contains("Erstattung 2025"));
         assert!(xml.contains("<PmtMtd>TRF</PmtMtd>"));
+        // EPC SCT Rulebook mandatory: charge bearer must be SLEV
+        assert!(xml.contains("<ChrgBr>SLEV</ChrgBr>"));
+        // No LclInstrm for standard SCT
+        assert!(!xml.contains("<LclInstrm>"));
+    }
+
+    #[test]
+    fn sct_inst_uses_pain001_001_09() {
+        use crate::pain001::LocalInstrument;
+        let xml = Pain001Builder::new("Acme GmbH", &de_iban())
+            .msg_id("CT-INST-001")
+            .local_instrument(LocalInstrument::Inst)
+            .add_entry(entry(5_000))
+            .build_xml();
+
+        // Auto-selects IsoV9 namespace
+        assert!(xml.contains("urn:iso:std:iso:20022:tech:xsd:pain.001.001.09"));
+        assert!(!xml.contains("pain.001.003.03"));
+        // SCT Inst local instrument code
+        assert!(xml.contains("<LclInstrm><Cd>INST</Cd></LclInstrm>"));
+        assert!(xml.contains("<ChrgBr>SLEV</ChrgBr>"));
+    }
+
+    #[test]
+    fn explicit_iso_v9_schema() {
+        use crate::pain001::CreditTransferSchema;
+        let xml = Pain001Builder::new("Test", &de_iban())
+            .schema(CreditTransferSchema::IsoV9)
+            .build_xml();
+        assert!(xml.contains("pain.001.001.09"));
     }
 
     #[test]

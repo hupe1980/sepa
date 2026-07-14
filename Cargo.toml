@@ -1,14 +1,17 @@
 [package]
 name         = "sepa"
-version      = "0.2.0"
+version      = "0.3.0"
 rust-version = "1.85"
 edition      = "2024"
 authors      = ["hupe1980"]
 description  = """\
-SEPA payment utilities: IBAN validation (ISO 13616), BIC validation (ISO 9362), \
-pain.008 direct-debit XML builder, pain.001 credit-transfer XML builder, \
-and CAMT.054 notification types (ISO 20022). \
-Zero I/O. No async. No domain assumptions.\
+SEPA payment utilities: IBAN validation (ISO 13616 + country registry), \
+BIC validation (ISO 9362), \
+pain.001 SCT + SCT Inst XML builder (pain.001.003.03 / pain.001.001.09), \
+pain.008 SDD CORE + B2B XML builder (pain.008.003.02), \
+pain.002 status report parser, camt.053 statement parser, \
+camt.054 notification types. \
+Zero I/O. No async. No f64 in monetary arithmetic.\
 """
 repository   = "https://github.com/hupe1980/sepa"
 license      = "MIT OR Apache-2.0"

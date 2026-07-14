@@ -282,33 +282,7 @@ fn parse_amount_ct(val: &serde_json::Value) -> Option<i64> {
         serde_json::Value::Number(n) => n.to_string(),
         _ => return None,
     };
-    let trimmed = raw.trim();
-    let (sign, digits) = if let Some(rest) = trimmed.strip_prefix('-') {
-        (-1i64, rest)
-    } else {
-        (1i64, trimmed)
-    };
-
-    let ct: i64 = if let Some(dot) = digits.find('.') {
-        let euro_str = &digits[..dot];
-        let frac_str = &digits[dot + 1..];
-        let euros: i64 = if euro_str.is_empty() {
-            0
-        } else {
-            euro_str.parse().ok()?
-        };
-        // Truncate fractional part to 2 decimal places
-        let cents: i64 = match frac_str.len() {
-            0 => 0,
-            1 => frac_str.parse::<i64>().ok()?.checked_mul(10)?,
-            _ => frac_str[..2].parse().ok()?,
-        };
-        euros.checked_mul(100)?.checked_add(cents)?
-    } else {
-        digits.parse::<i64>().ok()?.checked_mul(100)?
-    };
-
-    ct.checked_mul(sign)
+    crate::ct_from_eur_str(&raw)
 }
 
 #[cfg(test)]

@@ -58,6 +58,15 @@ impl Iban {
     pub fn check_digits(&self) -> &str {
         &self.0[2..4]
     }
+
+    /// BBAN — Basic Bank Account Number: everything after the 4-character header.
+    ///
+    /// For `DE89370400440532013000` this is `370400440532013000`.
+    #[inline]
+    #[must_use]
+    pub fn bban(&self) -> &str {
+        &self.0[4..]
+    }
 }
 
 impl std::fmt::Display for Iban {
@@ -163,6 +172,113 @@ pub enum IbanError {
         /// The actual mod-97 remainder.
         remainder: u64,
     },
+
+    /// IBAN length is inconsistent with the country code (ISO 13616 registry).
+    #[error("IBAN for country {country} must be {expected} characters, got {actual}")]
+    WrongLengthForCountry {
+        /// The two-letter country code.
+        country: String,
+        /// Expected length per ISO 13616 registry.
+        expected: usize,
+        /// The actual length of the input.
+        actual: usize,
+    },
+}
+
+// ── Country-length registry (ISO 13616-1) ────────────────────────────────────
+
+/// Return the expected IBAN length for a given 2-letter country code,
+/// or `None` for countries not yet in the ISO 13616 registry.
+///
+/// Source: SWIFT IBAN Registry (updated periodically).
+#[must_use]
+pub fn iban_country_length(country: &str) -> Option<usize> {
+    // Sorted by country code for readability.
+    match country {
+        "AD" => Some(24),
+        "AE" => Some(23),
+        "AL" => Some(28),
+        "AT" => Some(20),
+        "AZ" => Some(28),
+        "BA" => Some(20),
+        "BE" => Some(16),
+        "BG" => Some(22),
+        "BH" => Some(22),
+        "BR" => Some(29),
+        "BY" => Some(28),
+        "CH" => Some(21),
+        "CR" => Some(22),
+        "CY" => Some(28),
+        "CZ" => Some(24),
+        "DE" => Some(22),
+        "DK" => Some(18),
+        "DO" => Some(28),
+        "EE" => Some(20),
+        "EG" => Some(29),
+        "ES" => Some(24),
+        "FI" => Some(18),
+        "FO" => Some(18),
+        "FR" => Some(27),
+        "GB" => Some(22),
+        "GE" => Some(22),
+        "GI" => Some(23),
+        "GL" => Some(18),
+        "GR" => Some(27),
+        "GT" => Some(28),
+        "HR" => Some(21),
+        "HU" => Some(28),
+        "IE" => Some(22),
+        "IL" => Some(23),
+        "IQ" => Some(23),
+        "IS" => Some(26),
+        "IT" => Some(27),
+        "JO" => Some(30),
+        "KW" => Some(30),
+        "KZ" => Some(20),
+        "LB" => Some(28),
+        "LC" => Some(32),
+        "LI" => Some(21),
+        "LT" => Some(20),
+        "LU" => Some(20),
+        "LY" => Some(25),
+        "MC" => Some(27),
+        "MD" => Some(24),
+        "ME" => Some(22),
+        "MK" => Some(19),
+        "MN" => Some(20),
+        "MR" => Some(27),
+        "MT" => Some(31),
+        "MU" => Some(30),
+        "NI" => Some(28),
+        "NL" => Some(18),
+        "NO" => Some(15),
+        "PK" => Some(24),
+        "PL" => Some(28),
+        "PS" => Some(29),
+        "PT" => Some(25),
+        "QA" => Some(29),
+        "RO" => Some(24),
+        "RS" => Some(22),
+        "SA" => Some(24),
+        "SC" => Some(31),
+        "SD" => Some(18),
+        "SE" => Some(24),
+        "SI" => Some(19),
+        "SK" => Some(24),
+        "SM" => Some(27),
+        "SO" => Some(23),
+        "ST" => Some(25),
+        "SV" => Some(28),
+        "TL" => Some(23),
+        "TN" => Some(24),
+        "TR" => Some(26),
+        "UA" => Some(29),
+        "VA" => Some(22),
+        "VG" => Some(24),
+        "XK" => Some(20),
+        "YE" => Some(30),
+        _ => None,
+    }
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -172,21 +288,38 @@ pub enum IbanError {
 /// Accepts IBANs with or without spaces.  Input is uppercased before validation.
 /// Returns the normalised [`Iban`] on success.
 ///
+/// Validation order:
+/// 1. Strip whitespace, uppercase.
+/// 2. Check overall length range (15–34).
+/// 3. Check all characters are ASCII alphanumeric.
+/// 4. Check country-specific length against the ISO 13616 registry
+///    (only for known country codes; unknown countries skip this step).
+/// 5. Compute mod-97 checksum — must equal 1.
+///
 /// # Errors
 ///
-/// Returns [`IbanError::InvalidLength`] when the input is not 15–34 characters,
-/// [`IbanError::InvalidCharacter`] when a non-alphanumeric character is found,
-/// or [`IbanError::InvalidChecksum`] when the mod-97 check fails.
+/// | Error | Condition |
+/// |---|---|
+/// | [`IbanError::InvalidLength`] | Length outside 15–34 |
+/// | [`IbanError::InvalidCharacter`] | Non-alphanumeric character |
+/// | [`IbanError::WrongLengthForCountry`] | Length wrong for known country |
+/// | [`IbanError::InvalidChecksum`] | Mod-97 remainder ≠ 1 |
 ///
 /// # Examples
 ///
 /// ```
 /// use sepa::validate_iban;
+/// use sepa::iban::IbanError;
 ///
 /// let iban = validate_iban("DE89 3704 0044 0532 0130 00").unwrap();
 /// assert_eq!(iban.as_str(), "DE89370400440532013000");
-/// assert_eq!(iban.country_code(), "DE");
-/// assert!(validate_iban("INVALID").is_err());
+/// assert_eq!(iban.bban(), "370400440532013000");
+///
+/// // Too short for Germany (DE IBANs are exactly 22 chars; this is 19)
+/// assert!(matches!(
+///     validate_iban("DE891234567890123456"),
+///     Err(IbanError::WrongLengthForCountry { .. })
+/// ));
 /// ```
 #[must_use = "ignoring a validated IBAN loses the result"]
 pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
@@ -204,6 +337,18 @@ pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
     for c in normalised.chars() {
         if !c.is_ascii_alphanumeric() {
             return Err(IbanError::InvalidCharacter { ch: c });
+        }
+    }
+
+    // Country-specific length check (step 4)
+    let country = &normalised[..2];
+    if let Some(expected) = iban_country_length(country) {
+        if len != expected {
+            return Err(IbanError::WrongLengthForCountry {
+                country: country.to_owned(),
+                expected,
+                actual: len,
+            });
         }
     }
 
@@ -286,6 +431,59 @@ mod tests {
     fn wrong_checksum() {
         let err = validate_iban("DE89370400440532013001").unwrap_err();
         assert!(matches!(err, IbanError::InvalidChecksum { .. }));
+    }
+
+    #[test]
+    fn bban_accessor() {
+        let iban = validate_iban("DE89370400440532013000").unwrap();
+        assert_eq!(iban.bban(), "370400440532013000");
+    }
+
+    #[test]
+    fn wrong_length_for_de() {
+        // DE IBANs are exactly 22 chars; 20 chars fails country-length check
+        let err = validate_iban("DE89370400440532013").unwrap_err();
+        assert!(matches!(
+            err,
+            IbanError::WrongLengthForCountry {
+                expected: 22,
+                actual: 19,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn wrong_length_for_nl() {
+        // NL IBANs are exactly 18 chars
+        let err = validate_iban("NL91ABNA041716430099").unwrap_err();
+        assert!(matches!(
+            err,
+            IbanError::WrongLengthForCountry { expected: 18, .. }
+        ));
+    }
+
+    #[test]
+    fn unknown_country_skips_length_check() {
+        // XX is not in the registry — only mod-97 applies
+        // Construct a valid mod-97 XX IBAN (20 chars, valid checksum)
+        // We just verify no WrongLengthForCountry is returned for an unknown country.
+        let result = validate_iban("XX89370400440532013000");
+        assert!(!matches!(
+            result,
+            Err(IbanError::WrongLengthForCountry { .. })
+        ));
+    }
+
+    #[test]
+    fn country_length_registry_spot_checks() {
+        use super::iban_country_length;
+        assert_eq!(iban_country_length("DE"), Some(22));
+        assert_eq!(iban_country_length("NL"), Some(18));
+        assert_eq!(iban_country_length("GB"), Some(22));
+        assert_eq!(iban_country_length("FR"), Some(27));
+        assert_eq!(iban_country_length("NO"), Some(15));
+        assert_eq!(iban_country_length("XX"), None);
     }
 
     #[test]

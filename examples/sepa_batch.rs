@@ -59,7 +59,7 @@ fn main() {
 
     println!("\n── pain.008 Direct Debit batch ──");
     println!("Entries:   2");
-    println!("Total:     {}", sepa::ct_to_eur_str(8_500 + 12_300)); // "207.00"
+    println!("Total:     {}", sepa::ct_to_eur_str(8_500 + 12_300)); // "208.00"
     // In production, write pain008_xml to file or POST to bank API.
     assert!(pain008_xml.contains("<SeqTp>RCUR</SeqTp>"));
     assert!(pain008_xml.contains("<CtrlSum>208.00</CtrlSum>"));

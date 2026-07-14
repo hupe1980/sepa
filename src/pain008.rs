@@ -1,7 +1,15 @@
-//! ISO 20022 pain.008.003.02 — SEPA Core Direct Debit initiation.
+//! ISO 20022 pain.008.003.02 — SEPA Direct Debit initiation.
 //!
-//! Builds standards-compliant pain.008 XML for SEPA Core Direct Debit (SDD Core).
+//! Builds standards-compliant pain.008 XML for SEPA Direct Debit (SDD).
+//! Supports both CORE (consumer) and B2B (business) scheme variants.
 //! All monetary amounts use integer cents (1 ct = 0.01 EUR) — no f64.
+//!
+//! ## Scheme variants
+//!
+//! | Scheme | Code | Use |
+//! |---|---|---|
+//! | [`DirectDebitScheme::Core`] | `CORE` | Consumer accounts, default |
+//! | [`DirectDebitScheme::B2b`] | `B2B` | Business accounts only, shorter cycles |
 //!
 //! ## Sequence type and batch homogeneity
 //!
@@ -13,18 +21,20 @@
 //! ## References
 //!
 //! - ISO 20022 pain.008.003.02 schema
-//! - EPC SEPA Core Direct Debit Rulebook (latest version)
-//! - Deutsche Bundesbank pain.008 implementation guide
+//! - EPC SEPA Core Direct Debit Rulebook
+//! - EPC SEPA Business-to-Business Direct Debit Rulebook
+//! - Deutsche Bundesbank pain.008 implementation guide (DFÜ-Abkommen V2.7)
 //!
 //! ## Example
 //!
 //! ```rust
 //! use sepa::{validate_iban, Pain008Builder, DirectDebitEntry};
-//! use sepa::pain008::SequenceType;
+//! use sepa::pain008::{SequenceType, DirectDebitScheme};
 //!
 //! let creditor_iban = validate_iban("DE89370400440532013000").unwrap();
 //! let debtor_iban   = validate_iban("NL91ABNA0417164300").unwrap();
 //!
+//! // SEPA Core Direct Debit (default)
 //! let xml = Pain008Builder::new("Creditor GmbH", &creditor_iban)
 //!     .msg_id("BATCH-2026-07-001")
 //!     .sequence_type(SequenceType::Rcur)
@@ -40,15 +50,62 @@
 //!     ).with_description("Abschlag Juli 2026"))
 //!     .build_xml();
 //!
-//! assert!(xml.contains("<InstdAmt Ccy=\"EUR\">75.00</InstdAmt>"));
-//! assert!(xml.contains("<MndtId>MND-00042</MndtId>"));
-//! assert!(xml.contains("<SeqTp>RCUR</SeqTp>"));
+//! assert!(xml.contains("<Cd>CORE</Cd>"));
+//! assert!(xml.contains("<ChrgBr>SLEV</ChrgBr>"));
+//!
+//! // SEPA B2B Direct Debit
+//! let debtor_b2b = validate_iban("DE29100500005001065004").unwrap();
+//! let xml_b2b = Pain008Builder::new("Creditor GmbH", &creditor_iban)
+//!     .scheme(DirectDebitScheme::B2b)
+//!     .add_entry(DirectDebitEntry::new(
+//!         "MND-B2B-001", "2024-01-01", "Corporate AG", debtor_b2b, 50000, "INV-001",
+//!     ))
+//!     .build_xml();
+//! assert!(xml_b2b.contains("<Cd>B2B</Cd>"));
 //! ```
 
 use std::str::FromStr;
 
 use crate::creditor_id::CreditorId;
 use crate::{Bic, Iban, ct_to_eur_str};
+
+// ── DirectDebitScheme ─────────────────────────────────────────────────────────
+
+/// SEPA Direct Debit scheme variant.
+///
+/// Determines the `<LclInstrm><Cd>…</Cd></LclInstrm>` value in the XML.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum DirectDebitScheme {
+    /// SEPA Core Direct Debit — consumer accounts (default).
+    ///
+    /// Pre-notification deadlines: 5 banking days for FRST/OOFF, 2 days for RCUR/FNAL.
+    #[default]
+    Core,
+    /// SEPA Business-to-Business Direct Debit — business accounts only.
+    ///
+    /// Shorter settlement: 1 banking day. Mandate must be confirmed with debtor's bank.
+    B2b,
+}
+
+impl DirectDebitScheme {
+    /// ISO 20022 local instrument code (`"CORE"` or `"B2B"`).
+    #[inline]
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Core => "CORE",
+            Self::B2b => "B2B",
+        }
+    }
+}
+
+impl std::fmt::Display for DirectDebitScheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_code())
+    }
+}
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -191,10 +248,10 @@ impl DirectDebitEntry {
 
 // ── Builder ───────────────────────────────────────────────────────────────────
 
-/// Builder for an ISO 20022 pain.008.003.02 (SEPA Core Direct Debit) XML batch.
+/// Builder for an ISO 20022 pain.008.003.02 (SEPA Direct Debit) XML batch.
 ///
-/// All entries share the same sequence type (see [`sequence_type`](Self::sequence_type)).
-/// For mixed lifecycle collections, use multiple builders.
+/// All entries share the same sequence type and scheme.
+/// For mixed lifecycle collections or mixed schemes, use multiple builders.
 #[derive(Debug)]
 pub struct Pain008Builder {
     creditor_name: String,
@@ -206,13 +263,14 @@ pub struct Pain008Builder {
     msg_id: String,
     collection_date: String,
     sequence_type: SequenceType,
+    scheme: DirectDebitScheme,
     entries: Vec<DirectDebitEntry>,
 }
 
 impl Pain008Builder {
     /// Create a new builder.
     ///
-    /// Defaults: `sequence_type = Rcur`, `msg_id = "sepa-<timestamp>"`,
+    /// Defaults: `scheme = Core`, `sequence_type = Rcur`, `msg_id = "sepa-<timestamp>"`,
     /// `collection_date = today + 5 calendar days`.
     pub fn new(creditor_name: impl Into<String>, creditor_iban: &Iban) -> Self {
         Self {
@@ -223,6 +281,7 @@ impl Pain008Builder {
             msg_id: format!("sepa-{}", epoch_secs()),
             collection_date: default_collection_date(),
             sequence_type: SequenceType::Rcur,
+            scheme: DirectDebitScheme::Core,
             entries: Vec::new(),
         }
     }
@@ -231,6 +290,15 @@ impl Pain008Builder {
     #[must_use]
     pub fn msg_id(mut self, id: impl Into<String>) -> Self {
         self.msg_id = id.into();
+        self
+    }
+
+    /// Set the SEPA Direct Debit scheme (default: [`DirectDebitScheme::Core`]).
+    ///
+    /// Use [`DirectDebitScheme::B2b`] for business-to-business direct debits.
+    #[must_use]
+    pub fn scheme(mut self, scheme: DirectDebitScheme) -> Self {
+        self.scheme = scheme;
         self
     }
 
@@ -298,9 +366,37 @@ impl Pain008Builder {
 
     /// Generate the pain.008.003.02 XML string.
     ///
-    /// Returns a valid empty-batch document (`NbOfTxs` = 0) when no entries have been added.
+    /// For streaming output (to a file, socket, or `Vec<u8>`), use
+    /// [`write_xml_to`](Self::write_xml_to) directly to avoid the final
+    /// `String` allocation.
     #[must_use]
     pub fn build_xml(&self) -> String {
+        // Estimate: ~900 B for header/footer + ~480 B per transaction.
+        let mut buf = String::with_capacity(900 + self.entries.len() * 480);
+        // String::write_fmt is infallible — it can only fail on OOM, which panics.
+        self.write_xml_to(&mut buf)
+            .expect("in-memory String write is infallible");
+        buf
+    }
+
+    /// Write the pain.008.003.02 XML to any [`fmt::Write`](std::fmt::Write) target.
+    ///
+    /// Use this to stream directly into a `BufWriter<File>`, a `Vec<u8>`, or
+    /// any other writer without allocating a final `String`.
+    ///
+    /// ```rust
+    /// use sepa::{Pain008Builder, validate_iban};
+    ///
+    /// let iban = validate_iban("DE89370400440532013000").unwrap();
+    /// let builder = Pain008Builder::new("Test", &iban).msg_id("X");
+    ///
+    /// let mut buf = String::new();
+    /// builder.write_xml_to(&mut buf).unwrap();
+    /// assert!(buf.contains("<PmtMtd>DD</PmtMtd>"));
+    /// ```
+    pub fn write_xml_to<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+        use crate::xml_util::write_escaped;
+
         let now = iso8601_now();
         let total_eur = ct_to_eur_str(self.total_ct());
         let nb = self.entries.len();
@@ -308,126 +404,132 @@ impl Pain008Builder {
             .creditor_bic
             .as_ref()
             .map_or("NOTPROVIDED", Bic::as_str);
+        let scheme_code = self.scheme.as_code();
         let seq_tp = self.sequence_type.as_code();
+        let creditor_iban = self.creditor_iban.as_str();
+        let collection_date = &self.collection_date;
 
-        // CdtrSchmeId block (EPC AT-02 SEPA Creditor Identifier) — inserted when set.
-        // Per EPC SEPA Core DD Rulebook: MUST be present in production batches.
-        let creditor_scheme_id = self
-            .creditor_id
-            .as_ref()
-            .map(|ci| {
-                format!(
-                    "      <CdtrSchmeId><Id><PrvtId><Othr>\
-<Id>{id}</Id><SchmeNm><Prtry>SEPA</Prtry></SchmeNm>\
-</Othr></PrvtId></Id></CdtrSchmeId>\n",
-                    id = ci.as_str()
-                )
-            })
-            .unwrap_or_default();
+        // Each line written individually — no `\` continuation that silently strips indentation.
+        w.write_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
+        writeln!(
+            w,
+            "<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:pain.008.003.02\">"
+        )?;
+        w.write_str("  <CstmrDrctDbtInitn>\n    <GrpHdr>\n      <MsgId>")?;
+        write_escaped(w, &self.msg_id)?;
+        write!(w, "</MsgId>\n      <CreDtTm>{now}</CreDtTm>\n")?;
+        write!(
+            w,
+            "      <NbOfTxs>{nb}</NbOfTxs>\n      <CtrlSum>{total_eur}</CtrlSum>\n"
+        )?;
+        w.write_str("      <InitgPty><Nm>")?;
+        write_escaped(w, &self.creditor_name)?;
+        w.write_str("</Nm></InitgPty>\n    </GrpHdr>\n    <PmtInf>\n      <PmtInfId>")?;
+        write_escaped(w, &self.msg_id)?;
+        w.write_str("-1</PmtInfId>\n")?;
+        w.write_str("      <PmtMtd>DD</PmtMtd>\n")?;
+        write!(
+            w,
+            "      <NbOfTxs>{nb}</NbOfTxs>\n      <CtrlSum>{total_eur}</CtrlSum>\n"
+        )?;
+        w.write_str("      <PmtTpInf>\n        <SvcLvl><Cd>SEPA</Cd></SvcLvl>\n")?;
+        writeln!(w, "        <LclInstrm><Cd>{scheme_code}</Cd></LclInstrm>")?;
+        write!(w, "        <SeqTp>{seq_tp}</SeqTp>\n      </PmtTpInf>\n")?;
+        writeln!(w, "      <ReqdColltnDt>{collection_date}</ReqdColltnDt>")?;
+        w.write_str("      <Cdtr><Nm>")?;
+        write_escaped(w, &self.creditor_name)?;
+        w.write_str("</Nm></Cdtr>\n")?;
+        writeln!(
+            w,
+            "      <CdtrAcct><Id><IBAN>{creditor_iban}</IBAN></Id></CdtrAcct>"
+        )?;
+        writeln!(
+            w,
+            "      <CdtrAgt><FinInstnId><BIC>{creditor_bic}</BIC></FinInstnId></CdtrAgt>"
+        )?;
+        w.write_str("      <ChrgBr>SLEV</ChrgBr>\n")?;
 
-        let transactions: String = self
-            .entries
-            .iter()
-            .map(Self::render_transaction)
-            .collect::<Vec<_>>()
-            .join("\n");
+        if let Some(ci) = &self.creditor_id {
+            w.write_str("      <CdtrSchmeId><Id><PrvtId><Othr><Id>")?;
+            w.write_str(ci.as_str())?;
+            w.write_str(
+                "</Id><SchmeNm><Prtry>SEPA</Prtry></SchmeNm></Othr></PrvtId></Id></CdtrSchmeId>\n",
+            )?;
+        }
 
-        format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:pain.008.003.02\">\n\
-  <CstmrDrctDbtInitn>\n\
-    <GrpHdr>\n\
-      <MsgId>{msg_id}</MsgId>\n\
-      <CreDtTm>{now}</CreDtTm>\n\
-      <NbOfTxs>{nb}</NbOfTxs>\n\
-      <CtrlSum>{total_eur}</CtrlSum>\n\
-      <InitgPty><Nm>{creditor_name}</Nm></InitgPty>\n\
-    </GrpHdr>\n\
-    <PmtInf>\n\
-      <PmtInfId>{msg_id}-1</PmtInfId>\n\
-      <PmtMtd>DD</PmtMtd>\n\
-      <NbOfTxs>{nb}</NbOfTxs>\n\
-      <CtrlSum>{total_eur}</CtrlSum>\n\
-      <PmtTpInf>\n\
-        <SvcLvl><Cd>SEPA</Cd></SvcLvl>\n\
-        <LclInstrm><Cd>CORE</Cd></LclInstrm>\n\
-        <SeqTp>{seq_tp}</SeqTp>\n\
-      </PmtTpInf>\n\
-      <ReqdColltnDt>{collection_date}</ReqdColltnDt>\n\
-      <Cdtr><Nm>{creditor_name}</Nm></Cdtr>\n\
-      <CdtrAcct><Id><IBAN>{creditor_iban}</IBAN></Id></CdtrAcct>\n\
-      <CdtrAgt><FinInstnId><BIC>{creditor_bic}</BIC></FinInstnId></CdtrAgt>\n\
-{creditor_scheme_id}{transactions}\n\
-    </PmtInf>\n\
-  </CstmrDrctDbtInitn>\n\
-</Document>",
-            msg_id = xml_escape(&self.msg_id),
-            now = now,
-            nb = nb,
-            total_eur = total_eur,
-            creditor_name = xml_escape(&self.creditor_name),
-            seq_tp = seq_tp,
-            collection_date = self.collection_date,
-            creditor_iban = self.creditor_iban.as_str(),
-            creditor_bic = creditor_bic,
-            creditor_scheme_id = creditor_scheme_id,
-            transactions = transactions,
-        )
+        for entry in &self.entries {
+            Self::write_transaction(w, entry)?;
+        }
+
+        w.write_str("    </PmtInf>\n  </CstmrDrctDbtInitn>\n</Document>")
     }
 
-    fn render_transaction(e: &DirectDebitEntry) -> String {
-        let amount_eur = ct_to_eur_str(e.amount_ct);
-        let debtor_bic = e.debtor_bic.as_ref().map_or("NOTPROVIDED", Bic::as_str);
-        let remittance = e
-            .description
-            .as_deref()
-            .map(|d| {
-                let truncated = if d.len() > 140 { &d[..140] } else { d };
-                format!(
-                    "\n      <RmtInf><Ustrd>{}</Ustrd></RmtInf>",
-                    xml_escape(truncated)
-                )
-            })
-            .unwrap_or_default();
+    /// Write the pain.008.003.02 XML to any [`io::Write`](std::io::Write) target.
+    ///
+    /// Streams directly to a `BufWriter<File>`, `TcpStream`, or `Vec<u8>` without
+    /// building an intermediate `String` — ideal for large batches or EBICS uploads.
+    ///
+    /// ```rust
+    /// use sepa::{Pain008Builder, validate_iban};
+    ///
+    /// let iban = validate_iban("DE89370400440532013000").unwrap();
+    /// let builder = Pain008Builder::new("Test", &iban).msg_id("X");
+    ///
+    /// let mut buf: Vec<u8> = Vec::new();
+    /// builder.write_xml_to_io(&mut buf).unwrap();
+    /// assert!(buf.starts_with(b"<?xml"));
+    /// ```
+    pub fn write_xml_to_io<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        let mut bridge = crate::xml_util::IoWriterBridge {
+            inner: w,
+            error: None,
+        };
+        if self.write_xml_to(&mut bridge).is_err() {
+            if let Some(e) = bridge.error {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
 
-        format!(
-            "    <DrctDbtTxInf>\n\
-      <PmtId>\n\
-        <EndToEndId>{end_to_end_id}</EndToEndId>\n\
-      </PmtId>\n\
-      <InstdAmt Ccy=\"EUR\">{amount_eur}</InstdAmt>\n\
-      <DrctDbtTx>\n\
-        <MndtRltdInf>\n\
-          <MndtId>{mandate_ref}</MndtId>\n\
-          <DtOfSgntr>{mandate_signed_at}</DtOfSgntr>\n\
-        </MndtRltdInf>\n\
-      </DrctDbtTx>\n\
-      <DbtrAgt><FinInstnId><BIC>{debtor_bic}</BIC></FinInstnId></DbtrAgt>\n\
-      <Dbtr><Nm>{debtor_name}</Nm></Dbtr>\n\
-      <DbtrAcct><Id><IBAN>{debtor_iban}</IBAN></Id></DbtrAcct>{remittance}\n\
-    </DrctDbtTxInf>",
-            end_to_end_id = xml_escape(&e.end_to_end_id),
-            amount_eur = amount_eur,
-            mandate_ref = xml_escape(&e.mandate_ref),
-            mandate_signed_at = e.mandate_signed_at,
-            debtor_bic = debtor_bic,
-            debtor_name = xml_escape(&e.debtor_name),
-            debtor_iban = e.debtor_iban.as_str(),
-            remittance = remittance,
-        )
+    /// Zero-allocation transaction writer.
+    ///
+    /// All dynamic fields are written directly into `w` via [`write_escaped`] and
+    /// [`write_eur`] — no intermediate `String` allocations.
+    fn write_transaction<W: std::fmt::Write>(w: &mut W, e: &DirectDebitEntry) -> std::fmt::Result {
+        use crate::xml_util::{write_escaped, write_eur};
+
+        let debtor_bic = e.debtor_bic.as_ref().map_or("NOTPROVIDED", Bic::as_str);
+
+        w.write_str("    <DrctDbtTxInf>\n      <PmtId>\n        <EndToEndId>")?;
+        write_escaped(w, &e.end_to_end_id)?;
+        w.write_str("</EndToEndId>\n      </PmtId>\n      <InstdAmt Ccy=\"EUR\">")?;
+        write_eur(w, e.amount_ct)?;
+        w.write_str("</InstdAmt>\n      <DrctDbtTx>\n        <MndtRltdInf>\n          <MndtId>")?;
+        write_escaped(w, &e.mandate_ref)?;
+        w.write_str("</MndtId>\n          <DtOfSgntr>")?;
+        w.write_str(&e.mandate_signed_at)?;
+        w.write_str("</DtOfSgntr>\n        </MndtRltdInf>\n      </DrctDbtTx>\n")?;
+        w.write_str("      <DbtrAgt><FinInstnId><BIC>")?;
+        w.write_str(debtor_bic)?;
+        w.write_str("</BIC></FinInstnId></DbtrAgt>\n      <Dbtr><Nm>")?;
+        write_escaped(w, &e.debtor_name)?;
+        w.write_str("</Nm></Dbtr>\n      <DbtrAcct><Id><IBAN>")?;
+        w.write_str(e.debtor_iban.as_str())?;
+        w.write_str("</IBAN></Id></DbtrAcct>\n")?;
+
+        if let Some(desc) = &e.description {
+            let truncated = if desc.len() > 140 { &desc[..140] } else { desc };
+            w.write_str("      <RmtInf><Ustrd>")?;
+            write_escaped(w, truncated)?;
+            w.write_str("</Ustrd></RmtInf>\n")?;
+        }
+
+        w.write_str("    </DrctDbtTxInf>\n")
     }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-#[inline]
-pub(crate) fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
 
 pub(crate) fn iso8601_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -525,6 +627,15 @@ mod tests {
         assert!(xml.contains("<SeqTp>RCUR</SeqTp>"));
         assert!(xml.contains("<IBAN>NL91ABNA0417164300</IBAN>"));
         assert!(xml.contains("<ReqdColltnDt>2026-07-20</ReqdColltnDt>"));
+        // Indentation: GrpHdr children must have exactly 6 spaces
+        assert!(
+            xml.contains("      <NbOfTxs>1</NbOfTxs>"),
+            "NbOfTxs must be indented 6 spaces"
+        );
+        assert!(
+            xml.contains("      <InitgPty>"),
+            "InitgPty must be indented 6 spaces"
+        );
     }
 
     #[test]
@@ -661,5 +772,72 @@ mod tests {
             !xml.contains("<CdtrSchmeId>"),
             "CdtrSchmeId must be absent when creditor_id not set"
         );
+    }
+
+    #[test]
+    fn chrgbr_slev_always_present() {
+        // EPC SDD Rulebook §2.8: ChrgBr must be SLEV
+        let xml = Pain008Builder::new("Test", &de_iban())
+            .msg_id("CHRGBR")
+            .add_entry(entry("M1", 1000))
+            .build_xml();
+        assert!(
+            xml.contains("<ChrgBr>SLEV</ChrgBr>"),
+            "ChrgBr SLEV is mandatory per EPC SDD Rulebook"
+        );
+    }
+
+    #[test]
+    fn core_scheme_default() {
+        let xml = Pain008Builder::new("Test", &de_iban())
+            .add_entry(entry("M1", 1000))
+            .build_xml();
+        assert!(xml.contains("<Cd>CORE</Cd>"));
+        assert!(!xml.contains("<Cd>B2B</Cd>"));
+    }
+
+    #[test]
+    fn b2b_scheme() {
+        let xml = Pain008Builder::new("Test", &de_iban())
+            .scheme(DirectDebitScheme::B2b)
+            .add_entry(entry("M1", 1000))
+            .build_xml();
+        assert!(xml.contains("<Cd>B2B</Cd>"));
+        assert!(!xml.contains("<Cd>CORE</Cd>"));
+        // ChrgBr still required for B2B
+        assert!(xml.contains("<ChrgBr>SLEV</ChrgBr>"));
+    }
+
+    #[test]
+    fn direct_debit_scheme_display() {
+        assert_eq!(DirectDebitScheme::Core.to_string(), "CORE");
+        assert_eq!(DirectDebitScheme::B2b.to_string(), "B2B");
+    }
+
+    #[test]
+    fn write_xml_to_io_matches_build_xml() {
+        let xml = Pain008Builder::new("Test GmbH", &de_iban())
+            .msg_id("IO-TEST")
+            .add_entry(entry("M1", 5000))
+            .build_xml();
+
+        let mut buf: Vec<u8> = Vec::new();
+        Pain008Builder::new("Test GmbH", &de_iban())
+            .msg_id("IO-TEST")
+            .add_entry(entry("M1", 5000))
+            .write_xml_to_io(&mut buf)
+            .unwrap();
+
+        assert_eq!(xml, String::from_utf8(buf).unwrap());
+    }
+
+    #[test]
+    fn xml_escape_in_name_via_write_escaped() {
+        // Verify that names with XML special chars are correctly escaped in output
+        let xml = Pain008Builder::new("AT&T \"Corp\" <GmbH>", &de_iban())
+            .msg_id("ESC2")
+            .add_entry(entry("M1", 100))
+            .build_xml();
+        assert!(xml.contains("AT&amp;T &quot;Corp&quot; &lt;GmbH&gt;"));
     }
 }
