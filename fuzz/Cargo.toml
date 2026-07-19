@@ -1,0 +1,37 @@
+[package]
+name         = "sepa-fuzz"
+version      = "0.0.0"
+publish      = false
+edition      = "2024"
+rust-version = "1.85"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sepa          = { path = "..", features = ["serde", "json"] }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc  = false
+bench = false
+
+[[bin]]
+name = "identifiers"
+path = "fuzz_targets/identifiers.rs"
+test = false
+doc  = false
+bench = false
+
+[[bin]]
+name = "build"
+path = "fuzz_targets/build.rs"
+test = false
+doc  = false
+bench = false
+
+[profile.release]
+debug = 1

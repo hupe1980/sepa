@@ -79,12 +79,39 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}-${{ matrix.rust }}
+      - name: Install xmllint (XSD validation tests)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+      - name: Install xmllint (XSD validation tests)
+        if: runner.os == 'macOS'
+        run: echo "xmllint ships with macOS"
       - name: Test — default features
         run: cargo test --all-targets
       - name: Test — all features
         run: cargo test --all-targets --all-features
       - name: Test — no default features
         run: cargo test --all-targets --no-default-features
+
+  features:
+    name: Feature combinations
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "--no-default-features"
+          - ""
+          - "--features serde"
+          - "--features json"
+          - "--features serde,json"
+          - "--all-features"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install xmllint
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+      - run: cargo test --all-targets ${{ matrix.features }}
 
   deny:
     name: cargo-deny (licenses + advisories)

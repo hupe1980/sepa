@@ -192,6 +192,7 @@ pub enum IbanError {
 ///
 /// Source: SWIFT IBAN Registry (updated periodically).
 #[must_use]
+#[allow(clippy::match_same_arms, reason = "a data table, not control flow")]
 pub fn iban_country_length(country: &str) -> Option<usize> {
     // Sorted by country code for readability.
     match country {
@@ -204,6 +205,7 @@ pub fn iban_country_length(country: &str) -> Option<usize> {
         "BE" => Some(16),
         "BG" => Some(22),
         "BH" => Some(22),
+        "BI" => Some(27),
         "BR" => Some(29),
         "BY" => Some(28),
         "CH" => Some(21),
@@ -211,12 +213,14 @@ pub fn iban_country_length(country: &str) -> Option<usize> {
         "CY" => Some(28),
         "CZ" => Some(24),
         "DE" => Some(22),
+        "DJ" => Some(27),
         "DK" => Some(18),
         "DO" => Some(28),
         "EE" => Some(20),
         "EG" => Some(29),
         "ES" => Some(24),
         "FI" => Some(18),
+        "FK" => Some(18),
         "FO" => Some(18),
         "FR" => Some(27),
         "GB" => Some(22),
@@ -225,6 +229,7 @@ pub fn iban_country_length(country: &str) -> Option<usize> {
         "GL" => Some(18),
         "GR" => Some(27),
         "GT" => Some(28),
+        "HN" => Some(28),
         "HR" => Some(21),
         "HU" => Some(28),
         "IE" => Some(22),
@@ -240,6 +245,7 @@ pub fn iban_country_length(country: &str) -> Option<usize> {
         "LI" => Some(21),
         "LT" => Some(20),
         "LU" => Some(20),
+        "LV" => Some(21),
         "LY" => Some(25),
         "MC" => Some(27),
         "MD" => Some(24),
@@ -252,6 +258,7 @@ pub fn iban_country_length(country: &str) -> Option<usize> {
         "NI" => Some(28),
         "NL" => Some(18),
         "NO" => Some(15),
+        "OM" => Some(23),
         "PK" => Some(24),
         "PL" => Some(28),
         "PS" => Some(29),
@@ -259,6 +266,7 @@ pub fn iban_country_length(country: &str) -> Option<usize> {
         "QA" => Some(29),
         "RO" => Some(24),
         "RS" => Some(22),
+        "RU" => Some(33),
         "SA" => Some(24),
         "SC" => Some(31),
         "SD" => Some(18),
@@ -278,6 +286,83 @@ pub fn iban_country_length(country: &str) -> Option<usize> {
         "XK" => Some(20),
         "YE" => Some(30),
         _ => None,
+    }
+}
+
+/// Country codes in the SEPA scheme area (42 entries).
+///
+/// Source: EPC409-09 "EPC List of SEPA Scheme Countries" v8.0 (24 December 2025).
+///
+/// These are **IBAN** country codes, not geographic ISO 3166 codes. Two
+/// distinctions bite in practice:
+///
+/// - **Faroe Islands (`FO`) and Greenland (`GL`) are *not* in SEPA**, despite
+///   being Danish and holding their own IBAN country codes. Gibraltar (`GI`)
+///   *is* in SEPA, despite being a UK territory.
+/// - SEPA is **not** the eurozone. `DK`, `SE`, `PL`, `CZ`, `HU`, `RO`, `BG`,
+///   `GB`, `CH`, `NO`, `IS`, `AL`, `MD`, `MK` and `RS` are SEPA countries with
+///   non-EUR national currencies. SEPA membership never implies EUR.
+const SEPA_COUNTRIES: [&str; 42] = [
+    "AD", "AL", "AT", "BE", "BG", "CH", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB", "GI",
+    "GR", "HR", "HU", "IE", "IS", "IT", "LI", "LT", "LU", "LV", "MC", "MD", "ME", "MK", "MT", "NL",
+    "NO", "PL", "PT", "RO", "RS", "SE", "SI", "SK", "SM", "VA",
+];
+
+/// Returns `true` when `country` is an IBAN country code inside the SEPA scheme area.
+///
+/// Takes the two-letter **IBAN** country code — the first two characters of an
+/// IBAN, e.g. [`Iban::country_code`]. Comparison is case-insensitive.
+///
+/// Source: EPC409-09 v8.0 (24 December 2025), which added Albania, Moldova,
+/// Montenegro, North Macedonia and Serbia.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::iban::is_sepa_country;
+///
+/// assert!(is_sepa_country("DE"));
+/// assert!(is_sepa_country("gi")); // Gibraltar is SEPA
+/// assert!(is_sepa_country("RS")); // Serbia joined in 2025
+///
+/// // SEPA is not the eurozone — these use their own currencies:
+/// assert!(is_sepa_country("SE"));
+/// assert!(is_sepa_country("CH"));
+///
+/// // Danish territories with their own IBAN codes are NOT in SEPA:
+/// assert!(!is_sepa_country("FO"));
+/// assert!(!is_sepa_country("GL"));
+/// assert!(!is_sepa_country("US"));
+/// ```
+#[must_use]
+pub fn is_sepa_country(country: &str) -> bool {
+    let mut buf = [0u8; 2];
+    if country.len() != 2 || !country.is_ascii() {
+        return false;
+    }
+    buf.copy_from_slice(country.as_bytes());
+    buf.make_ascii_uppercase();
+    let upper = std::str::from_utf8(&buf).unwrap_or("");
+    SEPA_COUNTRIES.contains(&upper)
+}
+
+impl Iban {
+    /// Returns `true` when this IBAN's country is in the SEPA scheme area.
+    ///
+    /// See [`is_sepa_country`] — note that SEPA membership does **not** imply
+    /// the account is denominated in EUR.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::validate_iban;
+    ///
+    /// assert!(validate_iban("DE89370400440532013000").unwrap().is_sepa());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn is_sepa(&self) -> bool {
+        is_sepa_country(self.country_code())
     }
 }
 
@@ -473,6 +558,67 @@ mod tests {
             result,
             Err(IbanError::WrongLengthForCountry { .. })
         ));
+    }
+
+    #[test]
+    fn latvia_is_registered() {
+        // Regression: LV sits between LU and LV alphabetically and was missing
+        // from the table, so every Latvian IBAN failed validation.
+        assert_eq!(iban_country_length("LV"), Some(21));
+        assert!(validate_iban("LV80BANK0000435195001").is_ok());
+    }
+
+    #[test]
+    fn registry_has_full_swift_entry_count() {
+        // SWIFT IBAN Registry currently lists 89 countries/territories. Bump
+        // this deliberately when the registry changes — it catches silent drift.
+        let count = (b'A'..=b'Z')
+            .flat_map(|a| (b'A'..=b'Z').map(move |b| [a, b]))
+            .filter(|cc| iban_country_length(std::str::from_utf8(cc).unwrap()).is_some())
+            .count();
+        assert_eq!(count, 89, "IBAN country registry entry count drifted");
+    }
+
+    #[test]
+    fn sepa_membership() {
+        assert!(is_sepa_country("DE"));
+        assert!(is_sepa_country("gi")); // case-insensitive; Gibraltar is SEPA
+        assert!(is_sepa_country("RS")); // added by EPC409-09 v8.0
+        // Danish territories with their own IBAN codes are NOT in SEPA
+        assert!(!is_sepa_country("FO"));
+        assert!(!is_sepa_country("GL"));
+        assert!(!is_sepa_country("XK")); // Kosovo: in the registry, not in SEPA
+        assert!(!is_sepa_country("US"));
+        assert!(!is_sepa_country("D")); // malformed input must not panic
+        assert!(!is_sepa_country("DEU"));
+        assert!(!is_sepa_country("Ü!"));
+        assert!(validate_iban("DE89370400440532013000").unwrap().is_sepa());
+    }
+
+    #[test]
+    fn every_sepa_country_is_in_the_length_registry() {
+        for cc in SEPA_COUNTRIES {
+            assert!(
+                iban_country_length(cc).is_some(),
+                "{cc} is a SEPA country but has no registry length"
+            );
+        }
+    }
+
+    #[test]
+    fn territories_are_not_iban_prefixes() {
+        // French collectivities use FR IBANs; Crown Dependencies use GB IBANs.
+        // None of these are IBAN country codes in their own right.
+        for t in [
+            "GP", "MQ", "RE", "YT", "GF", "BL", "MF", "PM", "PF", "TF", "NC", "WF", "JE", "GG",
+            "IM",
+        ] {
+            assert_eq!(
+                iban_country_length(t),
+                None,
+                "{t} is a territory, not an IBAN country code"
+            );
+        }
     }
 
     #[test]

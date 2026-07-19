@@ -1,6 +1,15 @@
-//! CAMT.054 — Bank-to-Customer Debit/Credit Notification (ISO 20022).
+//! ISO 20022 camt.054 — Bank-to-Customer Debit/Credit Notification.
 //!
-//! Typed structures for CAMT.054 entries as produced by German bank exports.
+//! camt.054 notifies an account holder of specific debit and credit events. It
+//! carries **no balances** — for an account position use
+//! [`camt.053`](crate::camt053) (end-of-day) or
+//! [`camt.052`](crate::camt052) (intraday).
+//!
+//! Its most important use is **returns**: this is where a bank reports that a
+//! direct debit collection came back. See [`Camt054Notification::returns`].
+//!
+//! Entries use the shared [`CashEntry`](crate::camt::CashEntry) model, so the
+//! same reconciliation code works across camt.052, camt.053 and camt.054.
 //!
 //! ## What CAMT.054 contains
 //!
@@ -207,6 +216,161 @@ impl Camt054Entry {
     pub fn amount_eur_str(&self) -> String {
         ct_to_eur_str(self.amount_ct)
     }
+}
+
+// ── camt.054 XML document ─────────────────────────────────────────────────────
+
+/// A single notification within a camt.054 document.
+///
+/// camt.054 carries no balances — it notifies about specific debit/credit
+/// events rather than reporting an account position.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Camt054Notification {
+    /// Notification identifier (`Id`).
+    pub notification_id: String,
+    /// Account IBAN.
+    pub account_iban: String,
+    /// BIC of the account servicing institution (`Acct/Svcr`), if reported.
+    pub account_servicer_bic: Option<String>,
+    /// Notification period start, ISO 8601.
+    pub from_date: Option<String>,
+    /// Notification period end, ISO 8601.
+    pub to_date: Option<String>,
+    /// The notified entries.
+    pub entries: Vec<crate::camt::CashEntry>,
+}
+
+impl Camt054Notification {
+    /// Net movement in ct across all entries.
+    #[must_use]
+    pub fn net_movement_ct(&self) -> i64 {
+        self.entries
+            .iter()
+            .fold(0i64, |acc, e| acc.saturating_add(e.signed_ct()))
+    }
+
+    /// Entries that are SEPA returns (Rückläufer) — a returned direct debit or
+    /// credit transfer.
+    ///
+    /// This is the main reason to consume camt.054: it is where a bank reports
+    /// that a collection came back.
+    pub fn returns(&self) -> impl Iterator<Item = &crate::camt::CashEntry> {
+        self.entries.iter().filter(|e| e.is_return())
+    }
+}
+
+/// A parsed camt.054 Bank-to-Customer Debit/Credit Notification document.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Camt054Document {
+    /// Document message ID.
+    pub msg_id: String,
+    /// Document creation timestamp.
+    pub created_at: String,
+    /// Detected XML namespace URI.
+    pub namespace: Option<String>,
+    /// One or more notifications.
+    pub notifications: Vec<Camt054Notification>,
+}
+
+/// Error returned when camt.054 XML cannot be parsed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Camt054ParseError {
+    /// The input is not well-formed XML.
+    #[error(transparent)]
+    Xml(#[from] crate::xml::XmlError),
+
+    /// Root element `BkToCstmrDbtCdtNtfctn` not found — not a camt.054 document.
+    #[error("not a camt.054 document: root element <BkToCstmrDbtCdtNtfctn> not found")]
+    NotCamt054,
+}
+
+/// Parse a camt.054 Bank-to-Customer Debit/Credit Notification XML string.
+///
+/// Accepts every ISO version from `.001.02` to `.001.13`, including the
+/// `.001.07` reshaping of `Ntry/Sts` and of the party elements, and both the
+/// default-namespace and prefixed document shapes.
+///
+/// # Errors
+///
+/// Returns [`Camt054ParseError::NotCamt054`] when the root element is missing,
+/// or [`Camt054ParseError::Xml`] when the input is not well-formed.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::camt054::parse_camt054;
+///
+/// let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+/// <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.054.001.08">
+///   <BkToCstmrDbtCdtNtfctn>
+///     <GrpHdr><MsgId>NTF-1</MsgId><CreDtTm>2026-07-14T12:00:00</CreDtTm></GrpHdr>
+///     <Ntfctn>
+///       <Id>N-1</Id>
+///       <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+///       <Ntry>
+///         <Amt Ccy="EUR">75.00</Amt>
+///         <CdtDbtInd>DBIT</CdtDbtInd>
+///         <NtryDtls><TxDtls>
+///           <RtrInf><Rsn><Cd>MD01</Cd></Rsn></RtrInf>
+///         </TxDtls></NtryDtls>
+///       </Ntry>
+///     </Ntfctn>
+///   </BkToCstmrDbtCdtNtfctn>
+/// </Document>"#;
+///
+/// let doc = parse_camt054(xml)?;
+/// let returned: Vec<_> = doc.notifications[0].returns().collect();
+/// assert_eq!(returned.len(), 1);
+/// assert_eq!(returned[0].return_reason_code(), Some("MD01"));
+/// # Ok::<(), sepa::Camt054ParseError>(())
+/// ```
+pub fn parse_camt054(xml: &str) -> Result<Camt054Document, Camt054ParseError> {
+    use crate::camt;
+    use crate::xml::{Document, Node};
+
+    fn parse_notification(n: &Node) -> Camt054Notification {
+        let (from_date, to_date) = camt::period(n);
+        Camt054Notification {
+            notification_id: n.text_of("Id").unwrap_or_default().to_owned(),
+            account_iban: camt::account_iban(n),
+            account_servicer_bic: n
+                .path(&["Acct", "Svcr"])
+                .and_then(camt::agent_bic)
+                .map(str::to_owned),
+            from_date,
+            to_date,
+            entries: camt::entries_of(n),
+        }
+    }
+
+    let doc = Document::parse(xml)?;
+    let root = doc
+        .root
+        .child("BkToCstmrDbtCdtNtfctn")
+        .ok_or(Camt054ParseError::NotCamt054)?;
+
+    let grp_hdr = root.child("GrpHdr");
+    let text = |tag: &str| {
+        grp_hdr
+            .and_then(|h| h.text_of(tag))
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    Ok(Camt054Document {
+        msg_id: text("MsgId"),
+        created_at: text("CreDtTm"),
+        namespace: doc.namespace,
+        notifications: root
+            .children_named("Ntfctn")
+            .map(parse_notification)
+            .collect(),
+    })
 }
 
 // ── parse_simple_json ─────────────────────────────────────────────────────────

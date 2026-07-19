@@ -48,7 +48,7 @@
 //! assert!(doc.group_status.unwrap().is_accepted());
 //! ```
 
-use crate::xml_util::{normalize_ns, xml_detect_ns, xml_each_iter, xml_inner, xml_text};
+use crate::xml::{Document, Node, XmlError};
 
 // ── known namespaces ──────────────────────────────────────────────────────────
 
@@ -167,7 +167,7 @@ impl std::str::FromStr for PaymentStatus {
 ///
 /// Appears in `StsRsnInf/Rsn/Cd` within a rejected transaction.
 ///
-/// References: ISO 20022 ExternalStatusReason1Code, EPC SCT/SDD Rulebooks.
+/// References: ISO 20022 `ExternalStatusReason1Code`, EPC SCT/SDD Rulebooks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -398,7 +398,7 @@ impl PaymentInfoStatus {
     #[must_use]
     pub fn has_rejections(&self) -> bool {
         self.transactions.iter().any(|t| t.status.is_rejected())
-            || self.status.as_ref().is_some_and(|s| s.is_rejected())
+            || self.status.as_ref().is_some_and(PaymentStatus::is_rejected)
     }
 
     /// Collect all reason codes from rejected transactions.
@@ -466,7 +466,7 @@ impl Pain002Document {
             || self
                 .payment_info_statuses
                 .iter()
-                .any(|p| p.has_rejections())
+                .any(PaymentInfoStatus::has_rejections)
     }
 
     /// Collect all rejected transactions across all payment info blocks.
@@ -486,6 +486,10 @@ impl Pain002Document {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Pain002ParseError {
+    /// The input is not well-formed XML.
+    #[error(transparent)]
+    Xml(#[from] XmlError),
+
     /// The root element `CstmrPmtStsRpt` was not found — not a pain.002 document.
     #[error("not a pain.002 document: root element <CstmrPmtStsRpt> not found")]
     NotPain002,
@@ -516,45 +520,56 @@ pub enum Pain002ParseError {
 /// Returns [`Pain002ParseError::NotPain002`] when the root element is missing,
 /// or [`Pain002ParseError::MissingElement`] for absent mandatory elements.
 pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
-    let namespace = xml_detect_ns(xml);
-    // Normalize namespace prefixes so we can search by bare element names.
-    let xml = normalize_ns(xml);
+    let doc = Document::parse(xml)?;
+    let namespace = doc.namespace;
 
-    let root = xml_inner(&xml, "CstmrPmtStsRpt").ok_or(Pain002ParseError::NotPain002)?;
+    let root = doc
+        .root
+        .child("CstmrPmtStsRpt")
+        .ok_or(Pain002ParseError::NotPain002)?;
 
-    let grp_hdr =
-        xml_inner(root, "GrpHdr").ok_or(Pain002ParseError::MissingElement { tag: "GrpHdr" })?;
+    let grp_hdr = root
+        .child("GrpHdr")
+        .ok_or(Pain002ParseError::MissingElement { tag: "GrpHdr" })?;
 
-    let msg_id = xml_text(grp_hdr, "MsgId")
+    let msg_id = grp_hdr
+        .text_of("MsgId")
         .ok_or(Pain002ParseError::MissingElement { tag: "MsgId" })?
         .to_owned();
 
-    let created_at = xml_text(grp_hdr, "CreDtTm").unwrap_or("").to_owned();
+    let created_at = grp_hdr.text_of("CreDtTm").unwrap_or_default().to_owned();
 
-    // Forwarding agent BIC: DbtrAgt (SCT) or CdtrAgt (SDD)
-    let forwarding_agent_bic = xml_inner(grp_hdr, "DbtrAgt")
-        .or_else(|| xml_inner(grp_hdr, "CdtrAgt"))
-        .and_then(|a| xml_text(a, "BIC").map(str::to_owned));
+    // Forwarding agent BIC: DbtrAgt (SCT) or CdtrAgt (SDD). ISO renamed the
+    // element from `BIC` to `BICFI` in the 2019 maintenance release, so accept
+    // both rather than silently dropping the BIC on newer messages.
+    let forwarding_agent_bic = grp_hdr
+        .child("DbtrAgt")
+        .or_else(|| grp_hdr.child("CdtrAgt"))
+        .and_then(bic_of_agent)
+        .map(str::to_owned);
 
-    let orig_grp =
-        xml_inner(root, "OrgnlGrpInfAndSts").ok_or(Pain002ParseError::MissingElement {
+    let orig_grp = root
+        .child("OrgnlGrpInfAndSts")
+        .ok_or(Pain002ParseError::MissingElement {
             tag: "OrgnlGrpInfAndSts",
         })?;
 
-    let original_msg_id = xml_text(orig_grp, "OrgnlMsgId")
+    let original_msg_id = orig_grp
+        .text_of("OrgnlMsgId")
         .ok_or(Pain002ParseError::MissingElement { tag: "OrgnlMsgId" })?
         .to_owned();
 
-    let original_msg_type = xml_text(orig_grp, "OrgnlMsgNmId")
-        .map(OriginalMessageType::from_msg_name_id)
-        .unwrap_or(OriginalMessageType::Other(String::new()));
+    let original_msg_type = orig_grp.text_of("OrgnlMsgNmId").map_or_else(
+        || OriginalMessageType::Other(String::new()),
+        OriginalMessageType::from_msg_name_id,
+    );
 
-    let group_status = xml_text(orig_grp, "GrpSts").map(PaymentStatus::from_code);
+    let group_status = orig_grp.text_of("GrpSts").map(PaymentStatus::from_code);
 
-    // Parse zero or more OrgnlPmtInfAndSts blocks — zero-alloc via iterator
-    let payment_info_statuses = xml_each_iter(root, "OrgnlPmtInfAndSts")
+    let payment_info_statuses = root
+        .children_named("OrgnlPmtInfAndSts")
         .map(parse_payment_info_status)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
 
     Ok(Pain002Document {
         msg_id,
@@ -568,82 +583,76 @@ pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
     })
 }
 
-fn parse_payment_info_status(block: &str) -> Result<PaymentInfoStatus, Pain002ParseError> {
-    let original_payment_info_id = xml_text(block, "OrgnlPmtInfId")
-        .unwrap_or("NOTPROVIDED")
-        .to_owned();
-
-    let status = xml_text(block, "PmtInfSts").map(PaymentStatus::from_code);
-
-    // Zero-alloc iteration over TxInfAndSts blocks
-    let transactions = xml_each_iter(block, "TxInfAndSts")
-        .map(parse_transaction_status)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(PaymentInfoStatus {
-        original_payment_info_id,
-        status,
-        transactions,
-    })
+/// `FinInstnId/BIC` (pre-2019) or `FinInstnId/BICFI` (2019 onwards).
+fn bic_of_agent(agent: &Node) -> Option<&str> {
+    let fin = agent.child("FinInstnId")?;
+    fin.text_of("BIC").or_else(|| fin.text_of("BICFI"))
 }
 
-fn parse_transaction_status(tx: &str) -> Result<TransactionStatus, Pain002ParseError> {
-    let original_end_to_end_id = xml_text(tx, "OrgnlEndToEndId")
+fn parse_payment_info_status(block: &Node) -> PaymentInfoStatus {
+    PaymentInfoStatus {
+        original_payment_info_id: block
+            .text_of("OrgnlPmtInfId")
+            .unwrap_or("NOTPROVIDED")
+            .to_owned(),
+        status: block.text_of("PmtInfSts").map(PaymentStatus::from_code),
+        transactions: block
+            .children_named("TxInfAndSts")
+            .map(parse_transaction_status)
+            .collect(),
+    }
+}
+
+fn parse_transaction_status(tx: &Node) -> TransactionStatus {
+    let original_end_to_end_id = tx
+        .text_of("OrgnlEndToEndId")
         .unwrap_or("NOTPROVIDED")
         .to_owned();
 
-    let status = xml_text(tx, "TxSts")
-        .map(PaymentStatus::from_code)
-        .unwrap_or(PaymentStatus::Other("UNKNOWN".to_owned()));
+    let status = tx.text_of("TxSts").map_or_else(
+        || PaymentStatus::Other("UNKNOWN".to_owned()),
+        PaymentStatus::from_code,
+    );
 
-    // Collect StsRsnInf blocks.
-    // ISO 20022 schema: StsRsnInf/Rsn/Cd (typed code) or StsRsnInf/Rsn/Prtry (free-text).
-    // Both are checked per-block so multiple blocks are handled independently.
+    // One reason code per StsRsnInf block. `Rsn` is a choice between a typed
+    // `Cd` and a bank-proprietary `Prtry`; each block is inspected separately so
+    // a proprietary code in a later block is not masked by a typed code in an
+    // earlier one.
     let mut reason_codes = Vec::new();
     let mut additional_info: Option<String> = None;
-    for rsn_block in xml_each_iter(tx, "StsRsnInf") {
-        let rsn = xml_inner(rsn_block, "Rsn");
-        if let Some(cd) = rsn.and_then(|r| xml_text(r, "Cd")) {
-            reason_codes.push(ReasonCode::from_code(cd));
-        } else if let Some(prtry) = rsn.and_then(|r| xml_text(r, "Prtry")) {
-            // Proprietary code (bank-specific, not in ISO standard code list)
-            reason_codes.push(ReasonCode::Other(prtry.to_owned()));
+    for rsn_block in tx.children_named("StsRsnInf") {
+        if let Some(code) = rsn_block.child("Rsn").and_then(Node::code) {
+            reason_codes.push(ReasonCode::from_code(code));
         }
         if additional_info.is_none() {
-            if let Some(info) = xml_text(rsn_block, "AddtlInf") {
-                additional_info = Some(info.to_owned());
-            }
+            additional_info = rsn_block.text_of("AddtlInf").map(str::to_owned);
         }
     }
 
-    // Parse OrgnlTxRef once and reuse for all three sub-extractions.
-    let orig_tx_ref = xml_inner(tx, "OrgnlTxRef");
+    let orig_tx_ref = tx.child("OrgnlTxRef");
 
+    // `Amt` is an AmountType4Choice: InstdAmt or EqvtAmt/Amt. Some banks also
+    // place InstdAmt directly under OrgnlTxRef, so fall back to a deep search.
     let original_amount_ct = orig_tx_ref
-        .and_then(|r| xml_text(r, "InstdAmt"))
+        .and_then(|r| {
+            r.text_at(&["Amt", "InstdAmt"])
+                .or_else(|| r.text_of_descendant("InstdAmt"))
+        })
         .and_then(crate::ct_from_eur_str);
 
-    let (original_debtor_name, original_debtor_iban) = orig_tx_ref.map_or((None, None), |r| {
-        let name = xml_inner(r, "Dbtr")
-            .and_then(|d| xml_text(d, "Nm"))
-            .map(str::to_owned);
-        let iban = xml_inner(r, "DbtrAcct")
-            .and_then(|a| xml_text(a, "IBAN"))
-            .map(str::to_owned);
-        (name, iban)
-    });
+    let party = |tags: [&str; 2]| -> (Option<String>, Option<String>) {
+        orig_tx_ref.map_or((None, None), |r| {
+            (
+                r.text_at(&[tags[0], "Nm"]).map(str::to_owned),
+                r.text_at(&[tags[1], "Id", "IBAN"]).map(str::to_owned),
+            )
+        })
+    };
 
-    let (original_creditor_name, original_creditor_iban) = orig_tx_ref.map_or((None, None), |r| {
-        let name = xml_inner(r, "Cdtr")
-            .and_then(|d| xml_text(d, "Nm"))
-            .map(str::to_owned);
-        let iban = xml_inner(r, "CdtrAcct")
-            .and_then(|a| xml_text(a, "IBAN"))
-            .map(str::to_owned);
-        (name, iban)
-    });
+    let (original_debtor_name, original_debtor_iban) = party(["Dbtr", "DbtrAcct"]);
+    let (original_creditor_name, original_creditor_iban) = party(["Cdtr", "CdtrAcct"]);
 
-    Ok(TransactionStatus {
+    TransactionStatus {
         original_end_to_end_id,
         status,
         reason_codes,
@@ -653,7 +662,7 @@ fn parse_transaction_status(tx: &str) -> Result<TransactionStatus, Pain002ParseE
         original_debtor_iban,
         original_creditor_name,
         original_creditor_iban,
-    })
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

@@ -1,23 +1,30 @@
 [package]
 name         = "sepa"
-version      = "0.3.0"
+version      = "0.5.0"
 rust-version = "1.85"
 edition      = "2024"
 authors      = ["hupe1980"]
 description  = """\
-SEPA payment utilities: IBAN validation (ISO 13616 + country registry), \
-BIC validation (ISO 9362), \
-pain.001 SCT + SCT Inst XML builder (pain.001.003.03 / pain.001.001.09), \
-pain.008 SDD CORE + B2B XML builder (pain.008.003.02), \
-pain.002 status report parser, camt.053 statement parser, \
-camt.054 notification types. \
+SEPA payment utilities: IBAN validation (ISO 13616 + 89-country registry), \
+BIC validation (ISO 9362), SEPA Creditor Identifier (EPC AT-02), \
+pain.001 SCT + SCT Inst XML builder (pain.001.001.09 / .003.03), \
+pain.008 SDD CORE + B2B XML builder (pain.008.001.08 / .003.02), \
+pain.002 status report parser, camt.052/053/054 parsers, \
+ISO 11649 RF creditor references, EPC field validation and SEPA charset \
+transliteration. Output is XSD-validated in CI. \
 Zero I/O. No async. No f64 in monetary arithmetic.\
 """
 repository   = "https://github.com/hupe1980/sepa"
 license      = "MIT OR Apache-2.0"
 keywords     = ["sepa", "iban", "iso20022", "payments", "banking"]
+exclude      = ["/.github", "/justfile", "/deny.toml", "/fuzz"]
 categories   = ["finance", "encoding"]
 readme       = "README.md"
+
+# The fuzz crate is standalone: it needs nightly and must not be pulled
+# into `cargo test`/`cargo build` for the library.
+[workspace]
+exclude = ["fuzz"]
 
 [features]
 default = []
@@ -28,8 +35,36 @@ json  = ["dep:serde_json"]
 
 [dependencies]
 thiserror  = { version = "2", default-features = false }
+quick-xml  = { version = "0.41", default-features = false }
 serde      = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+
+# `serde_json` is used by the `serde` round-trip unit tests. Declaring it as a
+# dev-dependency keeps `--features serde` (without `json`) compiling — the tests
+# are gated on `serde` alone, so relying on the optional `json` dependency to
+# supply the crate made that feature combination fail to build.
+# A payments library parsing untrusted bank input warrants a strict lint floor.
+[lints.rust]
+missing_docs                = "deny"
+unsafe_code                 = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub             = "warn"
+rust_2018_idioms            = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic         = { level = "warn", priority = -1 }
+cargo            = { level = "warn", priority = -1 }
+# Panics and truncation are the failure modes that matter most here.
+indexing_slicing = "warn"
+unwrap_used      = "warn"
+expect_used      = "warn"
+panic            = "warn"
+missing_panics_doc = "warn"
+missing_errors_doc = "warn"
+multiple_crate_versions = "allow"
+
+[dev-dependencies]
+serde_json = "1"
 
 [[test]]
 name = "integration"

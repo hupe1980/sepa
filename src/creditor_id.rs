@@ -11,22 +11,33 @@
 //! | Part | Length | Content |
 //! |---|---|---|
 //! | Country code | 2 | ISO 3166-1 alpha-2 |
-//! | Check digits | 2 | Mod-97 (same algorithm as IBAN) |
+//! | Check digits | 2 | Mod-97 over the national identifier (see below) |
 //! | Creditor Business Code | 3 | Alphanumeric (usually `ZZZ`) |
 //! | National Identifier | 1–28 | Alphanumeric, country-specific |
 //!
-//! ## Check digit algorithm
+//! ## Check digit algorithm (EPC262-08)
 //!
-//! Identical to IBAN ISO 13616: move CC + check_digits to end, expand letters
-//! to decimals (A=10…Z=35), compute mod 97 — result must be 1.
+//! The check digits are computed over the **national identifier only** — the
+//! 3-character Creditor Business Code is *excluded*:
+//!
+//! 1. Take the national identifier (position 8 onwards).
+//! 2. Strip every non-alphanumeric character.
+//! 3. Append the country code and `"00"`.
+//! 4. Expand letters to decimals (A=10 … Z=35).
+//! 5. `check_digits = 98 − (value mod 97)`.
+//!
+//! This differs from ISO 13616 (IBAN), where the whole string participates and
+//! the expected remainder is 1. Applying the IBAN rule to a Creditor Identifier
+//! rejects every genuine CI, because it folds the `ZZZ` business code into the
+//! checksum.
 //!
 //! ## Examples
 //!
 //! ```
 //! use sepa::creditor_id::validate_creditor_id;
 //!
-//! assert!(validate_creditor_id("DE74ZZZ09999999999").is_ok());
-//! assert!(validate_creditor_id("FR20ZZZ123456").is_ok());
+//! // Canonical EPC example identifier
+//! assert!(validate_creditor_id("DE98ZZZ09999999999").is_ok());
 //! assert!(validate_creditor_id("INVALID").is_err());
 //! ```
 
@@ -150,11 +161,13 @@ pub enum CreditorIdError {
         ch: char,
     },
 
-    /// Mod-97 check digit did not produce remainder 1.
-    #[error("Creditor Identifier check digit mismatch (mod97 = {remainder}, expected 1)")]
+    /// The EPC check digits do not match the national identifier.
+    #[error("Creditor Identifier check digits are {actual}, expected {expected}")]
     InvalidChecksum {
-        /// The actual mod-97 remainder.
-        remainder: u64,
+        /// The check digits required by EPC262-08.
+        expected: String,
+        /// The check digits actually present in the input.
+        actual: String,
     },
 }
 
@@ -177,8 +190,8 @@ pub enum CreditorIdError {
 /// ```
 /// use sepa::creditor_id::{validate_creditor_id, CreditorIdError};
 ///
-/// assert!(validate_creditor_id("DE74ZZZ09999999999").is_ok());
-/// assert!(validate_creditor_id("de74zzz09999999999").is_ok()); // normalised to uppercase
+/// assert!(validate_creditor_id("DE98ZZZ09999999999").is_ok());
+/// assert!(validate_creditor_id("de98zzz09999999999").is_ok()); // normalised to uppercase
 ///
 /// let err = validate_creditor_id("DE00ZZZ09999999999").unwrap_err();
 /// assert!(matches!(err, CreditorIdError::InvalidChecksum { .. }));
@@ -210,34 +223,54 @@ pub fn validate_creditor_id(raw: &str) -> Result<CreditorId, CreditorIdError> {
         });
     }
 
-    // Mod-97 check: rearrange = business_code + national_id + CC + check_digits
-    // (same algorithm as IBAN ISO 13616)
-    let rearranged = format!("{}{}", &normalised[4..], &normalised[..4]);
-    let numeric: String = rearranged
-        .chars()
-        .flat_map(|c| {
-            if c.is_ascii_alphabetic() {
-                let n = (c as u8 - b'A' + 10).to_string();
-                n.chars().collect::<Vec<_>>()
-            } else {
-                vec![c]
-            }
-        })
-        .collect();
-
-    let mut remainder: u64 = 0;
-    for ch in numeric.chars() {
-        let digit = ch
-            .to_digit(10)
-            .ok_or(CreditorIdError::InvalidCharacter { ch })?;
-        remainder = (remainder * 10 + u64::from(digit)) % 97;
-    }
-
-    if remainder == 1 {
+    // EPC262-08: the check digits cover the national identifier ONLY — the
+    // 3-character Creditor Business Code (positions 5–7) is excluded.
+    let expected = creditor_id_check_digits(&normalised[7..], cc);
+    let actual = &normalised[2..4];
+    if expected == actual {
         Ok(CreditorId(normalised))
     } else {
-        Err(CreditorIdError::InvalidChecksum { remainder })
+        Err(CreditorIdError::InvalidChecksum {
+            expected,
+            actual: actual.to_owned(),
+        })
     }
+}
+
+/// Compute the two EPC check digits for a national identifier + country code.
+///
+/// Implements EPC262-08: strip non-alphanumerics from `national_id`, append
+/// `country` and `"00"`, expand letters (A=10 … Z=35), then `98 − (n mod 97)`.
+///
+/// Both inputs must already be uppercased. The result is always two ASCII
+/// digits, zero-padded.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::creditor_id::creditor_id_check_digits;
+/// assert_eq!(creditor_id_check_digits("09999999999", "DE"), "98");
+/// ```
+#[must_use]
+pub fn creditor_id_check_digits(national_id: &str, country: &str) -> String {
+    // 0–9 contribute one decimal digit; A–Z contribute two (their 10–35 value).
+    fn feed(remainder: u64, c: char) -> u64 {
+        match c.to_digit(36) {
+            Some(d) if d < 10 => (remainder * 10 + u64::from(d)) % 97,
+            Some(d) => (remainder * 100 + u64::from(d)) % 97,
+            None => remainder,
+        }
+    }
+
+    let mut remainder = national_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .fold(0u64, feed);
+    remainder = country.chars().fold(remainder, feed);
+    remainder = feed(remainder, '0');
+    remainder = feed(remainder, '0');
+
+    format!("{:02}", 98 - remainder)
 }
 
 #[cfg(test)]
@@ -246,20 +279,59 @@ mod tests {
 
     #[test]
     fn de_creditor_id_valid() {
-        assert!(validate_creditor_id("DE74ZZZ09999999999").is_ok());
+        assert!(validate_creditor_id("DE98ZZZ09999999999").is_ok());
+    }
+
+    #[test]
+    fn business_code_excluded_from_checksum() {
+        // EPC262-08: the check digits cover the national identifier only, so
+        // changing the business code must NOT invalidate the identifier.
+        for bc in ["ZZZ", "ABC", "001"] {
+            let ci = format!("DE98{bc}09999999999");
+            assert!(
+                validate_creditor_id(&ci).is_ok(),
+                "{ci} must stay valid — business code is not part of the checksum"
+            );
+        }
+    }
+
+    #[test]
+    fn iban_style_checksum_is_rejected() {
+        // Regression: applying the ISO 13616 (IBAN) rule to a CI accepts DE74
+        // and rejects the canonical DE98. Neither may happen.
+        // "DE74…" is what the old IBAN-style checksum wrongly accepted.
+        assert!(validate_creditor_id(concat!("DE", "74", "ZZZ09999999999")).is_err());
+        assert!(validate_creditor_id("DE98ZZZ09999999999").is_ok());
+    }
+
+    #[test]
+    fn check_digits_roundtrip() {
+        for (nid, cc) in [
+            ("09999999999", "DE"),
+            ("123456", "FR"),
+            ("ZZZ00000000", "NL"),
+            ("A1B2C3", "AT"),
+        ] {
+            let cd = creditor_id_check_digits(nid, cc);
+            let ci = format!("{cc}{cd}ZZZ{nid}");
+            assert!(
+                validate_creditor_id(&ci).is_ok(),
+                "generated {ci} must validate"
+            );
+        }
     }
 
     #[test]
     fn lowercase_normalised() {
-        let ci = validate_creditor_id("de74zzz09999999999").unwrap();
-        assert_eq!(ci.as_str(), "DE74ZZZ09999999999");
+        let ci = validate_creditor_id("de98zzz09999999999").unwrap();
+        assert_eq!(ci.as_str(), "DE98ZZZ09999999999");
     }
 
     #[test]
     fn parts() {
-        let ci = validate_creditor_id("DE74ZZZ09999999999").unwrap();
+        let ci = validate_creditor_id("DE98ZZZ09999999999").unwrap();
         assert_eq!(ci.country_code(), "DE");
-        assert_eq!(ci.check_digits(), "74");
+        assert_eq!(ci.check_digits(), "98");
         assert_eq!(ci.business_code(), "ZZZ");
         assert_eq!(ci.national_id(), "09999999999");
     }
@@ -290,23 +362,23 @@ mod tests {
 
     #[test]
     fn from_str() {
-        let ci: CreditorId = "DE74ZZZ09999999999".parse().unwrap();
+        let ci: CreditorId = "DE98ZZZ09999999999".parse().unwrap();
         assert_eq!(ci.country_code(), "DE");
     }
 
     #[test]
     fn into_string() {
-        let ci = validate_creditor_id("DE74ZZZ09999999999").unwrap();
+        let ci = validate_creditor_id("DE98ZZZ09999999999").unwrap();
         let s: String = ci.into();
-        assert_eq!(s, "DE74ZZZ09999999999");
+        assert_eq!(s, "DE98ZZZ09999999999");
     }
 
     #[cfg(feature = "serde")]
     #[test]
     fn serde_roundtrip() {
-        let ci = validate_creditor_id("DE74ZZZ09999999999").unwrap();
+        let ci = validate_creditor_id("DE98ZZZ09999999999").unwrap();
         let json = serde_json::to_string(&ci).unwrap();
-        assert_eq!(json, r#""DE74ZZZ09999999999""#);
+        assert_eq!(json, r#""DE98ZZZ09999999999""#);
         let back: CreditorId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ci);
     }

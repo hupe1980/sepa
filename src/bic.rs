@@ -63,14 +63,60 @@ impl Bic {
         }
     }
 
-    /// Returns `true` if this is a Test BIC.
+    /// Returns `true` if this is a Test & Training BIC.
     ///
-    /// Per ISO 9362, a BIC is a test BIC when the **first** character of the
-    /// location code (position 7, 1-indexed) is `'0'`.
+    /// A test BIC is marked by the **second** character of the location code —
+    /// position 8, 1-indexed — being `'0'`. Such BICs never address a live
+    /// institution.
+    ///
+    /// This is a SWIFT network convention rather than an ISO 9362 rule: the
+    /// standard defines only the structure `4!c 2!a 2!c 3!c` and says nothing
+    /// about test codes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::validate_bic;
+    ///
+    /// // Location code "F0" — second character '0' → test BIC
+    /// assert!(validate_bic("DEUTDEF0").unwrap().is_test());
+    /// // Location code "FF" — second character 'F' → NOT a test BIC
+    /// assert!(!validate_bic("COBADEFF").unwrap().is_test());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_test(&self) -> bool {
-        self.0.as_bytes()[6] == b'0'
+        self.location_suffix() == Some(b'0')
+    }
+
+    /// Returns `true` if the institution is a **passive** SWIFT participant.
+    ///
+    /// Indicated by `'1'` as the second character of the location code.
+    #[inline]
+    #[must_use]
+    pub fn is_passive(&self) -> bool {
+        self.location_suffix() == Some(b'1')
+    }
+
+    /// The second character of the location code (position 8), which carries
+    /// the test/passive/reverse-billing marker.
+    ///
+    /// Always `Some` for a constructed [`Bic`] — validation guarantees a length
+    /// of 8 or 11 — but expressed fallibly so no code path can index out of
+    /// bounds.
+    #[inline]
+    fn location_suffix(&self) -> Option<u8> {
+        self.0.as_bytes().get(7).copied()
+    }
+
+    /// Returns `true` if this BIC addresses the institution's primary office.
+    ///
+    /// True for 8-character BICs (which implicitly mean the head office) and for
+    /// 11-character BICs whose branch code is `XXX`.
+    #[inline]
+    #[must_use]
+    pub fn is_primary_office(&self) -> bool {
+        matches!(self.branch_code(), None | Some("XXX"))
     }
 }
 
@@ -163,20 +209,6 @@ pub enum BicError {
         pos: usize,
     },
 
-    /// The institution code (chars 1–4) must be letters only.
-    #[error("BIC institution code must be 4 ASCII letters (A–Z), got: {code:?}")]
-    InvalidInstitutionCode {
-        /// The institution code that was rejected.
-        code: String,
-    },
-
-    /// The country code (chars 5–6) must be two ASCII uppercase letters.
-    #[error("BIC country code must be 2 ASCII letters (A–Z), got: {code:?}")]
-    InvalidCountryCode {
-        /// The country code that was rejected.
-        code: String,
-    },
-
     /// The input is the EPC `"NOTPROVIDED"` placeholder, not a real BIC.
     ///
     /// Use `Option<Bic>` with `None` when the BIC is unknown.
@@ -198,9 +230,8 @@ pub enum BicError {
 ///
 /// Returns [`BicError::Placeholder`] for the EPC `"NOTPROVIDED"` sentinel,
 /// [`BicError::InvalidLength`] when not 8 or 11 characters,
-/// [`BicError::InvalidCharacter`] for non-alphanumeric input,
-/// [`BicError::InvalidInstitutionCode`] when chars 1–4 are not all letters, or
-/// [`BicError::InvalidCountryCode`] when chars 5–6 are not letters.
+/// [`BicError::InvalidCharacter`] for any character that violates the SEPA
+/// pattern, with the zero-based position of the offender.
 ///
 /// # Examples
 ///
@@ -231,23 +262,19 @@ pub fn validate_bic(raw: &str) -> Result<Bic, BicError> {
     }
 
     for (pos, ch) in upper.chars().enumerate() {
-        if !ch.is_ascii_alphanumeric() {
+        let ok = match pos {
+            // Institution and country code: letters only.
+            0..=5 => ch.is_ascii_uppercase(),
+            // Location code, 1st char: no '0' or '1'.
+            6 => ch.is_ascii_uppercase() || ('2'..='9').contains(&ch),
+            // Location code, 2nd char: digits allowed, but not the letter 'O'.
+            7 => (ch.is_ascii_uppercase() && ch != 'O') || ch.is_ascii_digit(),
+            // Branch code: alphanumeric.
+            _ => ch.is_ascii_alphanumeric(),
+        };
+        if !ok {
             return Err(BicError::InvalidCharacter { ch, pos });
         }
-    }
-
-    let institution = &upper[..4];
-    if !institution.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Err(BicError::InvalidInstitutionCode {
-            code: institution.to_owned(),
-        });
-    }
-
-    let country = &upper[4..6];
-    if !country.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Err(BicError::InvalidCountryCode {
-            code: country.to_owned(),
-        });
     }
 
     Ok(Bic(upper))
@@ -302,24 +329,76 @@ mod tests {
     }
 
     #[test]
-    fn invalid_institution_code_with_digit() {
+    fn iso_only_prefixes_are_rejected_for_sepa() {
+        // ISO 9362:2014 types the prefix as 4!c and offers WG11US335AB as an
+        // example, but SEPA schemas require [A-Z]{6}, so these must not pass.
+        assert!(validate_bic("WG11US335AB").is_err());
+        assert!(validate_bic("C0BADEFF").is_err());
+    }
+
+    #[test]
+    fn location_code_character_restrictions() {
+        // Position 7 may not be '0' or '1'.
         assert!(matches!(
-            validate_bic("C0BADEFF").unwrap_err(),
-            BicError::InvalidInstitutionCode { .. }
+            validate_bic("DEUTDE0B").unwrap_err(),
+            BicError::InvalidCharacter { ch: '0', pos: 6 }
+        ));
+        assert!(matches!(
+            validate_bic("DEUTDE1B").unwrap_err(),
+            BicError::InvalidCharacter { ch: '1', pos: 6 }
+        ));
+        // Position 8 may not be the letter 'O' (reserved against '0').
+        assert!(matches!(
+            validate_bic("DEUTDEFO").unwrap_err(),
+            BicError::InvalidCharacter { ch: 'O', pos: 7 }
+        ));
+        // …but digits are fine at position 8.
+        assert!(validate_bic("DEUTDEF0").is_ok());
+        assert!(validate_bic("DEUTDEF2").is_ok());
+    }
+
+    #[test]
+    fn test_bic_is_marked_by_second_location_character() {
+        // Regression: the rule is position 8 (index 7), not position 7.
+        assert!(validate_bic("DEUTDEF0").unwrap().is_test());
+        assert!(!validate_bic("COBADEFF").unwrap().is_test());
+    }
+
+    #[test]
+    fn passive_participant_flag() {
+        assert!(validate_bic("DEUTDEF1").unwrap().is_passive());
+        assert!(!validate_bic("COBADEFF").unwrap().is_passive());
+    }
+
+    #[test]
+    fn primary_office_detection() {
+        assert!(validate_bic("COBADEFF").unwrap().is_primary_office());
+        assert!(validate_bic("COBADEFFXXX").unwrap().is_primary_office());
+        assert!(!validate_bic("COBADEFF123").unwrap().is_primary_office());
+    }
+
+    #[test]
+    fn country_code_must_be_letters() {
+        assert!(matches!(
+            validate_bic("COBA1EFF").unwrap_err(),
+            BicError::InvalidCharacter { ch: '1', pos: 4 }
         ));
     }
 
     #[test]
-    fn test_bic_is_test_when_location_starts_with_zero() {
-        // Location code "0B" — first character is '0' → test BIC
-        let bic = validate_bic("DEUTDE0B").unwrap();
-        assert!(bic.is_test());
-    }
-
-    #[test]
-    fn production_bic_is_not_test() {
-        let bic = validate_bic("COBADEFF").unwrap();
-        assert!(!bic.is_test()); // location "FF" — first char 'F', not '0'
+    fn real_world_sepa_bics_are_accepted() {
+        for b in [
+            "COBADEFFXXX", // Commerzbank
+            "DEUTDEFF",    // Deutsche Bank
+            "PBNKDEFF",    // Postbank
+            "GENODEF1S04", // Volksbank
+            "ABNANL2A",    // ABN AMRO
+            "BNPAFRPP",    // BNP Paribas
+            "UNCRITMM",    // UniCredit
+            "CRESCHZZ80A", // Credit Suisse
+        ] {
+            assert!(validate_bic(b).is_ok(), "{b} must validate");
+        }
     }
 
     #[test]

@@ -68,3 +68,20 @@ doc-build:
 # Audit dependencies for known vulnerabilities (requires `cargo install cargo-audit`).
 audit:
     cargo audit
+
+# Check licenses and advisories (requires `cargo install cargo-deny`).
+deny:
+    cargo deny --all-features check
+
+# ── Fuzzing ───────────────────────────────────────────────────────────────────
+
+# Fuzz a target (requires nightly + `cargo install cargo-fuzz`).
+# Targets: parse, identifiers, build
+fuzz TARGET="parse" SECS="60":
+    cargo +nightly fuzz run {{ TARGET }} -- -max_total_time={{ SECS }}
+
+# ── Schema validation ─────────────────────────────────────────────────────────
+
+# Validate generated XML against the pinned ISO 20022 XSDs (requires xmllint).
+xsd:
+    cargo test --all-features --test integration xsd:: -- --nocapture
