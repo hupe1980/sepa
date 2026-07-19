@@ -40,7 +40,7 @@ All commonly used types are re-exported at the crate root (`sepa::SequenceType`,
 
 ```toml
 [dependencies]
-sepa = "0.5"
+sepa = "0.4"
 ```
 
 ### 📤 Building payment files
@@ -294,7 +294,7 @@ for entry in &stmt.entries {
 **camt.054 — Intraday Notifications** (`json` feature)
 
 ```toml
-sepa = { version = "0.5", features = ["json"] }
+sepa = { version = "0.4", features = ["json"] }
 ```
 
 ```rust
