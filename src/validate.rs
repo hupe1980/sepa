@@ -13,8 +13,13 @@
 //! | `Nm` (any party) | 1–70 chars (XSD permits 140) | EPC IG |
 //! | `Ustrd` | 1–140 chars, one occurrence | EPC IG |
 //! | `InstdAmt` | 0.01 – 999,999,999.99 EUR, 2 decimals | EPC IG §2.95 |
-//! | Dates | `YYYY-MM-DD`, real calendar date | `ISODate` |
 //! | Batch | at least one transaction | `CdtTrfTxInf`/`DrctDbtTxInf` are `1..n` |
+//!
+//! Dates are absent from that table on purpose: they are [`IsoDate`] values,
+//! validated where they are constructed, so a malformed `ReqdColltnDt` cannot
+//! reach a builder in the first place.
+//!
+//! [`IsoDate`]: crate::IsoDate
 //!
 //! The amount ceiling is uniform across SCT, SCT Inst, SDD Core and SDD B2B.
 //! The old 100,000 EUR SCT Inst cap was removed from the scheme on
@@ -103,15 +108,6 @@ pub enum ValidationError {
     #[error("batch control sum overflows i64")]
     ControlSumOverflow,
 
-    /// A date was not a valid `YYYY-MM-DD` calendar date.
-    #[error("{field} must be a valid YYYY-MM-DD date, got {value:?}")]
-    InvalidDate {
-        /// ISO 20022 element path of the offending field.
-        field: &'static str,
-        /// The rejected value.
-        value: String,
-    },
-
     /// The same element was set at both payment-information and transaction
     /// level, where the rules permit one or the other.
     #[error("{field} must be set at either payment-information or transaction level, not both")]
@@ -120,12 +116,183 @@ pub enum ValidationError {
         field: &'static str,
     },
 
-    /// A SEPA Direct Debit batch had no Creditor Identifier.
+    /// The selected schema version cannot carry a requested feature.
     ///
-    /// `CdtrSchmeId` is mandatory for SDD — the EPC guidelines require it at
-    /// either payment-information or transaction level.
-    #[error("SEPA Direct Debit requires a Creditor Identifier (CdtrSchmeId)")]
-    MissingCreditorId,
+    /// The older schemas are not merely renamed: `pain.001.003.03` has no
+    /// `LclInstrm` element at all, so an SCT Instant batch built against it
+    /// would be schema-invalid rather than merely unusual.
+    #[error("{feature} is not available in {schema}")]
+    UnsupportedBySchema {
+        /// What the batch asked for, named as its ISO 20022 element.
+        feature: &'static str,
+        /// The message identifier of the selected schema, e.g. `pain.001.003.03`.
+        schema: &'static str,
+    },
+}
+
+/// Error returned when a schema version cannot be parsed from a string.
+///
+/// Produced by `CreditTransferSchema::from_str` and
+/// `DirectDebitSchema::from_str`, which is how a bank-specific target version
+/// gets read out of a configuration file.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown schema {value:?}: expected one of {supported}")]
+pub struct UnknownSchema {
+    /// The unrecognised text.
+    pub value: String,
+    /// The message identifiers this builder can emit.
+    pub supported: &'static str,
+}
+
+// ── location ──────────────────────────────────────────────────────────────────
+
+/// Where in a message a validation error occurred.
+///
+/// A collection run is thousands of transactions long, so "`Dbtr/Nm` is too
+/// long" only becomes actionable once it says *which* one. Both indices are
+/// zero-based and refer to the order the groups and entries were added.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Location {
+    /// Index of the `PmtInf` group, or `None` for a message-level error.
+    pub group: Option<usize>,
+    /// Index of the transaction within that group, or `None` for a group-level
+    /// error.
+    pub transaction: Option<usize>,
+}
+
+impl Location {
+    /// A message-level location — neither group nor transaction.
+    #[must_use]
+    pub const fn message() -> Self {
+        Self {
+            group: None,
+            transaction: None,
+        }
+    }
+
+    /// A group-level location.
+    #[must_use]
+    pub const fn group(index: usize) -> Self {
+        Self {
+            group: Some(index),
+            transaction: None,
+        }
+    }
+
+    /// A transaction-level location.
+    #[must_use]
+    pub const fn transaction(group: usize, transaction: usize) -> Self {
+        Self {
+            group: Some(group),
+            transaction: Some(transaction),
+        }
+    }
+}
+
+impl std::fmt::Display for Location {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.group, self.transaction) {
+            (None, _) => f.write_str("message"),
+            (Some(g), None) => write!(f, "PmtInf[{g}]"),
+            (Some(g), Some(t)) => write!(f, "PmtInf[{g}]/Tx[{t}]"),
+        }
+    }
+}
+
+// ── build error ───────────────────────────────────────────────────────────────
+
+/// A validation failure, with the position in the message that caused it.
+///
+/// Returned by `Pain001Builder::build` and `Pain008Builder::build`. Match on
+/// [`kind`](Self::kind) to react to the rule that was broken and read
+/// [`location`](Self::location) to tell the operator which transaction to fix.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::{
+///     DirectDebitEntry, DirectDebitGroup, IsoDate, Pain008Builder, ValidationError,
+///     validate_creditor_id, validate_iban,
+/// };
+///
+/// let iban = validate_iban("DE89370400440532013000")?;
+/// let ci = validate_creditor_id("DE98ZZZ09999999999")?;
+/// let date = IsoDate::new(2026, 7, 20)?;
+///
+/// let err = Pain008Builder::new("Stadtwerke GmbH")
+///     .msg_id("DD-1")
+///     .add_group(
+///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
+///             .collection_date(date)
+///             .add_entry(DirectDebitEntry::new(
+///                 "MND-1", date, "Erste Kundin", iban.clone(), 100, "E2E-1",
+///             ))
+///             // The second collection has a zero amount.
+///             .add_entry(DirectDebitEntry::new(
+///                 "MND-2", date, "Zweiter Kunde", iban.clone(), 0, "E2E-2",
+///             )),
+///     )
+///     .build()
+///     .unwrap_err();
+///
+/// assert_eq!(err.location.group, Some(0));
+/// assert_eq!(err.location.transaction, Some(1));
+/// assert!(matches!(err.kind, ValidationError::AmountOutOfRange { .. }));
+/// assert_eq!(
+///     err.to_string(),
+///     "PmtInf[0]/Tx[1]: DrctDbtTxInf/InstdAmt is 0 ct, outside the permitted 1 \u{2013} 99999999999 ct",
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{location}: {kind}")]
+pub struct BuildError {
+    /// Which group and transaction the failure belongs to.
+    pub location: Location,
+    /// The rule that was broken.
+    #[source]
+    pub kind: ValidationError,
+}
+
+impl BuildError {
+    /// A message-level failure.
+    #[must_use]
+    pub const fn message(kind: ValidationError) -> Self {
+        Self {
+            location: Location::message(),
+            kind,
+        }
+    }
+
+    /// A group-level failure.
+    #[must_use]
+    pub const fn group(index: usize, kind: ValidationError) -> Self {
+        Self {
+            location: Location::group(index),
+            kind,
+        }
+    }
+
+    /// A transaction-level failure.
+    #[must_use]
+    pub const fn transaction(group: usize, transaction: usize, kind: ValidationError) -> Self {
+        Self {
+            location: Location::transaction(group, transaction),
+            kind,
+        }
+    }
+}
+
+/// Attach a [`Location`] to a `Result<_, ValidationError>`.
+pub(crate) trait Locate<T> {
+    fn at(self, location: Location) -> Result<T, BuildError>;
+}
+
+impl<T> Locate<T> for Result<T, ValidationError> {
+    fn at(self, location: Location) -> Result<T, BuildError> {
+        self.map_err(|kind| BuildError { location, kind })
+    }
 }
 
 /// Error returned when streaming a batch to an [`io::Write`](std::io::Write) target.
@@ -134,7 +301,7 @@ pub enum ValidationError {
 pub enum WriteError {
     /// The batch violates an EPC rule; nothing was written.
     #[error(transparent)]
-    Validation(#[from] ValidationError),
+    Validation(#[from] BuildError),
 
     /// The underlying writer failed.
     #[error(transparent)]
@@ -260,54 +427,6 @@ pub fn check_amount(field: &'static str, amount_ct: i64) -> Result<(), Validatio
     Ok(())
 }
 
-/// Validate an ISO 8601 `YYYY-MM-DD` calendar date.
-///
-/// Rejects malformed strings and impossible dates such as `2026-02-30`.
-///
-/// # Errors
-///
-/// Returns [`ValidationError::InvalidDate`].
-pub fn check_date(field: &'static str, value: &str) -> Result<(), ValidationError> {
-    if is_valid_iso_date(value) {
-        return Ok(());
-    }
-    Err(ValidationError::InvalidDate {
-        field,
-        value: value.to_owned(),
-    })
-}
-
-fn is_valid_iso_date(s: &str) -> bool {
-    // Destructure the exact `YYYY-MM-DD` shape: this rejects any other length,
-    // separator or non-digit without a single fallible index.
-    let [y0, y1, y2, y3, b'-', m0, m1, b'-', d0, d1] = *s.as_bytes() else {
-        return false;
-    };
-    let digits = [y0, y1, y2, y3, m0, m1, d0, d1];
-    if !digits.iter().all(u8::is_ascii_digit) {
-        return false;
-    }
-    let val = |bytes: &[u8]| -> u32 {
-        bytes
-            .iter()
-            .fold(0u32, |acc, b| acc * 10 + u32::from(b - b'0'))
-    };
-    let (y, m, d) = (val(&[y0, y1, y2, y3]), val(&[m0, m1]), val(&[d0, d1]));
-    // `xs:date` has no year zero, so "0000-01-01" is schema-invalid even though
-    // it parses — and year 0 would otherwise test as a leap year.
-    if y < 1 || !(1..=12).contains(&m) || d < 1 {
-        return false;
-    }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let max_day = match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        _ if leap => 29,
-        _ => 28,
-    };
-    d <= max_day
-}
-
 /// Truncate `s` to at most `max` **characters**, never splitting one.
 ///
 /// Slicing by byte index (`&s[..140]`) panics whenever the boundary lands
@@ -405,30 +524,6 @@ mod tests {
     }
 
     #[test]
-    fn dates_must_be_real_calendar_dates() {
-        for good in ["2026-07-20", "2024-02-29", "2000-02-29", "2026-12-31"] {
-            assert!(check_date("ReqdExctnDt", good).is_ok(), "{good} is valid");
-        }
-        for bad in [
-            "2026-02-30",
-            "2026-13-01",
-            "2026-00-10",
-            "2026-07-00",
-            "2026-07-32",
-            "2023-02-29",
-            "1900-02-29", // 1900 is not a leap year
-            "2026-7-20",
-            "20260720",
-            "2026/07/20",
-            "",
-            "not-a-date",
-            "2026-07-20T00:00:00",
-        ] {
-            assert!(check_date("ReqdExctnDt", bad).is_err(), "{bad} is invalid");
-        }
-    }
-
-    #[test]
     fn identifiers_reject_non_sepa_characters_under_every_policy() {
         // An identifier is a reconciliation key: it must round-trip exactly, so
         // it is never transliterated, even under the default policy.
@@ -455,11 +550,26 @@ mod tests {
     }
 
     #[test]
-    fn year_zero_is_rejected() {
-        // "0000-01-01" parses but is not a valid xs:date.
-        assert!(check_date("Dt", "0000-01-01").is_err());
-        assert!(check_date("Dt", "0000-02-29").is_err());
-        assert!(check_date("Dt", "0001-01-01").is_ok());
+    fn locations_read_as_element_paths() {
+        assert_eq!(Location::message().to_string(), "message");
+        assert_eq!(Location::group(0).to_string(), "PmtInf[0]");
+        assert_eq!(Location::transaction(1, 42).to_string(), "PmtInf[1]/Tx[42]");
+    }
+
+    #[test]
+    fn build_errors_carry_both_the_rule_and_the_position() {
+        let err = BuildError::transaction(
+            2,
+            7,
+            ValidationError::AmountOutOfRange {
+                field: "InstdAmt",
+                amount_ct: 0,
+            },
+        );
+        assert_eq!(err.location, Location::transaction(2, 7));
+        assert!(err.to_string().starts_with("PmtInf[2]/Tx[7]: "));
+        // The rule stays matchable through the wrapper.
+        assert!(matches!(err.kind, ValidationError::AmountOutOfRange { .. }));
     }
 
     #[test]

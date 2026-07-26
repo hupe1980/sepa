@@ -9,7 +9,14 @@
 //! | Schema | Status |
 //! |---|---|
 //! | [`DirectDebitSchema::IsoV8`] — `pain.008.001.08` | Current SEPA version (**default**) |
+//! | [`DirectDebitSchema::IsoV2`] — `pain.008.001.02` | EPC version until Nov 2023; still accepted by many banks |
 //! | [`DirectDebitSchema::DkV2_7`] — `pain.008.003.02` | Legacy DK, end-of-life since Nov 2022 |
+//!
+//! Which one a bank requires varies by bank and by regulatory cutover date, so
+//! it is a per-message choice rather than a crate-wide constant. Select it with
+//! [`Pain008Builder::schema`], or parse it from configuration — the enum
+//! implements [`FromStr`] over both the message identifier
+//! (`"pain.008.001.02"`) and the full namespace URN.
 //!
 //! ## Scheme variants
 //!
@@ -37,7 +44,7 @@
 //!
 //! ```rust
 //! use sepa::{
-//!     DirectDebitEntry, DirectDebitGroup, Pain008Builder, SequenceType,
+//!     DirectDebitEntry, DirectDebitGroup, IsoDate, Pain008Builder, SequenceType,
 //!     validate_creditor_id, validate_iban,
 //! };
 //! use sepa::pain008::DirectDebitScheme;
@@ -47,27 +54,31 @@
 //! // The Creditor Identifier is mandatory for every direct debit.
 //! let ci       = validate_creditor_id("DE98ZZZ09999999999")?;
 //!
+//! let collect = IsoDate::new(2026, 7, 20)?;
+//!
 //! let xml = Pain008Builder::new("Creditor GmbH")
 //!     .msg_id("BATCH-2026-07-001")
 //!     .add_group(
-//!         DirectDebitGroup::new("Creditor GmbH", &creditor, ci.clone())
+//!         DirectDebitGroup::new("Creditor GmbH", &creditor, &ci)
 //!             .sequence_type(SequenceType::Rcur)
-//!             .collection_date("2026-07-20")
+//!             .collection_date(collect)
 //!             .creditor_bic("COBADEFFXXX".parse()?)
 //!             .add_entry(
 //!                 DirectDebitEntry::new(
-//!                     "MND-00042", "2024-06-01", "Max Mustermann", debtor.clone(), 7_500, "R-001",
+//!                     "MND-00042", "2024-06-01".parse()?, "Max Mustermann",
+//!                     debtor.clone(), 7_500, "R-001",
 //!                 )
 //!                 .with_description("Abschlag Juli 2026"),
 //!             ),
 //!     )
 //!     // A B2B collection in the same file, as its own group.
 //!     .add_group(
-//!         DirectDebitGroup::new("Creditor GmbH", &creditor, ci)
+//!         DirectDebitGroup::new("Creditor GmbH", &creditor, &ci)
 //!             .scheme(DirectDebitScheme::B2b)
-//!             .collection_date("2026-07-20")
+//!             .collection_date(collect)
 //!             .add_entry(DirectDebitEntry::new(
-//!                 "MND-B2B-001", "2024-01-01", "Corporate AG", debtor, 50_000, "INV-001",
+//!                 "MND-B2B-001", "2024-01-01".parse()?, "Corporate AG",
+//!                 debtor, 50_000, "INV-001",
 //!             )),
 //!     )
 //!     .build()?;
@@ -81,18 +92,36 @@
 use std::str::FromStr;
 
 use crate::creditor_id::CreditorId;
+use crate::date::IsoDate;
 use crate::party::Party;
 use crate::purpose::{CategoryPurpose, Purpose};
 use crate::reference::RemittanceInfo;
 use crate::validate::{
-    CharsetPolicy, MAX_ID_LEN, ValidationError, WriteError, check_amount, check_date, check_id,
-    check_name, check_remittance, truncate_chars,
+    BuildError, CharsetPolicy, Locate, Location, MAX_ID_LEN, UnknownSchema, ValidationError,
+    WriteError, check_amount, check_id, check_name, check_remittance, truncate_chars,
 };
-use crate::{Bic, Iban, ct_to_eur_str};
+use crate::{Bic, Iban, IsoDateTime, ct_to_eur_str};
 
 // ── DirectDebitSchema ─────────────────────────────────────────────────────────
 
 /// pain.008 XML schema version to emit.
+///
+/// Which version a bank requires varies by bank and by regulatory cutover, so
+/// this is a per-message choice. [`FromStr`] accepts the message identifier
+/// (`"pain.008.001.02"`) and the full namespace URN, which is what makes the
+/// target version configurable rather than compiled in.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::pain008::DirectDebitSchema;
+///
+/// let from_config: DirectDebitSchema = "pain.008.001.02".parse()?;
+/// assert_eq!(from_config, DirectDebitSchema::IsoV2);
+/// assert_eq!(from_config.to_string(), "pain.008.001.02");
+/// assert_eq!(DirectDebitSchema::default(), DirectDebitSchema::IsoV8);
+/// # Ok::<(), sepa::UnknownSchema>(())
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DirectDebitSchema {
@@ -103,25 +132,49 @@ pub enum DirectDebitSchema {
     ///
     /// Names the agent BIC element `BICFI`. Unlike pain.001.001.09, the
     /// collection date stays a bare `ISODate` — SDD did **not** move to a
-    /// date/time choice, so `ReqdColltnDt` is written the same way in both
-    /// versions.
+    /// date/time choice, so `ReqdColltnDt` is written the same way in every
+    /// version here.
     #[default]
     IsoV8,
+
+    /// `pain.008.001.02` — the EPC version in force from 2009 to 19 Nov 2023.
+    ///
+    /// Superseded by [`IsoV8`](Self::IsoV8) but still the version many banks
+    /// and corporate channels accept — and some still mandate. Names the agent
+    /// BIC element `BIC`; otherwise structurally identical to `IsoV8` for
+    /// everything this builder emits.
+    IsoV2,
 
     /// `pain.008.003.02` — legacy Deutsche Kreditwirtschaft DK V2.7 (2013).
     ///
     /// **End-of-life** since DK Anlage 3 V3.6 (November 2022). Retained for
-    /// systems still pinned to it. Names the agent BIC element `BIC`.
+    /// systems still pinned to it. Names the agent BIC element `BIC`, and
+    /// places the `SMNDA` amendment marker in its pre-2016 position — see
+    /// [`MandateAmendment`].
     DkV2_7,
 }
 
 impl DirectDebitSchema {
+    /// Every schema version this builder can emit, newest first.
+    pub const ALL: &'static [Self] = &[Self::IsoV8, Self::IsoV2, Self::DkV2_7];
+
+    /// The ISO 20022 message identifier, e.g. `"pain.008.001.08"`.
+    #[must_use]
+    pub const fn message_id(self) -> &'static str {
+        match self {
+            Self::IsoV8 => "pain.008.001.08",
+            Self::IsoV2 => "pain.008.001.02",
+            Self::DkV2_7 => "pain.008.003.02",
+        }
+    }
+
     /// The XML namespace URI for this schema version.
     #[must_use]
     pub const fn namespace(self) -> &'static str {
         match self {
-            Self::DkV2_7 => "urn:iso:std:iso:20022:tech:xsd:pain.008.003.02",
             Self::IsoV8 => "urn:iso:std:iso:20022:tech:xsd:pain.008.001.08",
+            Self::IsoV2 => "urn:iso:std:iso:20022:tech:xsd:pain.008.001.02",
+            Self::DkV2_7 => "urn:iso:std:iso:20022:tech:xsd:pain.008.003.02",
         }
     }
 
@@ -129,9 +182,47 @@ impl DirectDebitSchema {
     #[must_use]
     const fn bic_element(self) -> &'static str {
         match self {
-            Self::DkV2_7 => "BIC",
             Self::IsoV8 => "BICFI",
+            Self::IsoV2 | Self::DkV2_7 => "BIC",
         }
+    }
+
+    /// Whether the `SMNDA` marker belongs under `OrgnlDbtrAgt` rather than
+    /// `OrgnlDbtrAcct`.
+    ///
+    /// True only for the DK schema, whose `OrgnlDbtrAcct/Id` admits nothing but
+    /// an `IBAN` — see [`MandateAmendment`] for the history.
+    #[must_use]
+    const fn smnda_in_original_agent(self) -> bool {
+        matches!(self, Self::DkV2_7)
+    }
+}
+
+impl std::fmt::Display for DirectDebitSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message_id())
+    }
+}
+
+impl FromStr for DirectDebitSchema {
+    type Err = UnknownSchema;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let key = s.trim().to_ascii_lowercase();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|schema| key == schema.message_id() || key == schema.namespace())
+            .ok_or_else(|| UnknownSchema {
+                value: s.to_owned(),
+                supported: "pain.008.001.08, pain.008.001.02, pain.008.003.02",
+            })
+    }
+}
+
+impl TryFrom<&str> for DirectDebitSchema {
+    type Error = UnknownSchema;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 
@@ -260,9 +351,16 @@ impl TryFrom<&str> for SequenceType {
 /// before EPC IG v9.0 (effective November 2016) it went in
 /// `OrgnlDbtrAgt/FinInstnId/Othr/Id` and meant "new debtor **agent**"; since
 /// v9.0 it goes in `OrgnlDbtrAcct/Id/Othr/Id` and means "new debtor
-/// **account**". This is an implementation-guideline change, not a schema one —
-/// both forms are schema-valid in `pain.008.001.02`, so only the effective IG
-/// version distinguishes them. This crate emits the current form.
+/// **account**".
+///
+/// For the ISO schemas that is an implementation-guideline change rather than a
+/// schema one — both forms are structurally legal in `pain.008.001.02` — so the
+/// builder emits the current form. The DK schema `pain.008.003.02` predates the
+/// change and encodes the old placement in its types: `OrgnlDbtrAcct/Id` admits
+/// nothing but an `IBAN`, and `SMNDA` is an enumerated value of
+/// `OrgnlDbtrAgt/FinInstnId/Othr/Id`. Selecting
+/// [`DirectDebitSchema::DkV2_7`] therefore moves the marker; anything else
+/// would be schema-invalid.
 ///
 /// ## Sequence types are unaffected
 ///
@@ -398,7 +496,12 @@ impl MandateAmendment {
     }
 
     /// Write `AmdmntInd` and `AmdmntInfDtls` inside `MndtRltdInf`.
-    fn write_xml<W: std::fmt::Write>(&self, w: &mut W, charset: CharsetPolicy) -> std::fmt::Result {
+    fn write_xml<W: std::fmt::Write>(
+        &self,
+        w: &mut W,
+        charset: CharsetPolicy,
+        schema: DirectDebitSchema,
+    ) -> std::fmt::Result {
         use crate::xml_util::write_escaped;
 
         w.write_str("          <AmdmntInd>true</AmdmntInd>\n")?;
@@ -429,8 +532,15 @@ impl MandateAmendment {
         }
 
         // SMNDA and an explicit previous IBAN are alternatives, not siblings.
+        // The marker's element differs by schema — see the type-level docs.
         if self.same_mandate_new_account {
-            w.write_str("<OrgnlDbtrAcct><Id><Othr><Id>SMNDA</Id></Othr></Id></OrgnlDbtrAcct>")?;
+            if schema.smnda_in_original_agent() {
+                w.write_str(
+                    "<OrgnlDbtrAgt><FinInstnId><Othr><Id>SMNDA</Id></Othr></FinInstnId></OrgnlDbtrAgt>",
+                )?;
+            } else {
+                w.write_str("<OrgnlDbtrAcct><Id><Othr><Id>SMNDA</Id></Othr></Id></OrgnlDbtrAcct>")?;
+            }
         } else if let Some(iban) = &self.original_debtor_iban {
             w.write_str("<OrgnlDbtrAcct><Id><IBAN>")?;
             w.write_str(iban.as_str())?;
@@ -452,8 +562,8 @@ impl MandateAmendment {
 pub struct DirectDebitEntry {
     /// SEPA mandate reference (`MndtId`) — creditor-assigned unique ID.
     pub mandate_ref: String,
-    /// Date the mandate was signed (ISO 8601: `"YYYY-MM-DD"`).
-    pub mandate_signed_at: String,
+    /// Date the mandate was signed (`DtOfSgntr`).
+    pub mandate_signed_at: IsoDate,
     /// Debtor's full name (`Dbtr/Nm`).
     pub debtor_name: String,
     /// Debtor's IBAN (validated).
@@ -484,9 +594,28 @@ impl DirectDebitEntry {
     ///
     /// Optional fields default to `None`.  Chain [`with_bic`](Self::with_bic) and
     /// [`with_description`](Self::with_description) to set them.
+    ///
+    /// `mandate_signed_at` is an [`IsoDate`], not a string: like the [`Iban`]
+    /// beside it, the value is validated where it is constructed, so no
+    /// hand-formatted date can reach a batch.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::{DirectDebitEntry, IsoDate, validate_iban};
+    ///
+    /// let iban = validate_iban("NL91ABNA0417164300")?;
+    /// let signed = IsoDate::new(2024, 6, 1)?;          // from your own date type
+    /// let also_signed: IsoDate = "2024-06-01".parse()?; // or from stored text
+    /// assert_eq!(signed, also_signed);
+    ///
+    /// let entry = DirectDebitEntry::new("MND-1", signed, "Max", iban, 7_500, "E2E-1");
+    /// assert_eq!(entry.mandate_signed_at.year(), 2024);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn new(
         mandate_ref: impl Into<String>,
-        mandate_signed_at: impl Into<String>,
+        mandate_signed_at: IsoDate,
         debtor_name: impl Into<String>,
         debtor_iban: Iban,
         amount_ct: i64,
@@ -494,7 +623,7 @@ impl DirectDebitEntry {
     ) -> Self {
         Self {
             mandate_ref: mandate_ref.into(),
-            mandate_signed_at: mandate_signed_at.into(),
+            mandate_signed_at,
             debtor_name: debtor_name.into(),
             debtor_iban,
             amount_ct,
@@ -594,16 +723,19 @@ impl DirectDebitEntry {
 /// ## Examples
 ///
 /// ```
-/// use sepa::{DirectDebitEntry, DirectDebitGroup, SequenceType, validate_creditor_id, validate_iban};
+/// use sepa::{
+///     DirectDebitEntry, DirectDebitGroup, IsoDate, SequenceType, validate_creditor_id,
+///     validate_iban,
+/// };
 ///
 /// let iban = validate_iban("DE89370400440532013000")?;
 /// let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 ///
-/// let first = DirectDebitGroup::new("Stadtwerke GmbH", &iban, ci)
+/// let first = DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
 ///     .sequence_type(SequenceType::Frst)
-///     .collection_date("2026-07-20")
+///     .collection_date(IsoDate::new(2026, 7, 20)?)
 ///     .add_entry(DirectDebitEntry::new(
-///         "MND-1", "2026-06-01", "Neu Kunde", iban.clone(), 5_000, "E2E-1",
+///         "MND-1", "2026-06-01".parse()?, "Neu Kunde", iban.clone(), 5_000, "E2E-1",
 ///     ));
 /// assert_eq!(first.entry_count(), 1);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -618,7 +750,7 @@ pub struct DirectDebitGroup {
     creditor_id: CreditorId,
     sequence_type: SequenceType,
     scheme: DirectDebitScheme,
-    collection_date: String,
+    collection_date: IsoDate,
     batch_booking: Option<bool>,
     category_purpose: Option<CategoryPurpose>,
     ultimate_creditor: Option<Party>,
@@ -630,18 +762,20 @@ impl DirectDebitGroup {
     ///
     /// The Creditor Identifier is required up front — the EPC mandates
     /// `CdtrSchmeId` for every direct debit, so there is no valid group without
-    /// one.
+    /// one. It is borrowed, like the IBAN beside it: a collection run building
+    /// one group per sequence type reuses the same creditor identity for all of
+    /// them.
     pub fn new(
         creditor_name: impl Into<String>,
         creditor_iban: &Iban,
-        creditor_id: CreditorId,
+        creditor_id: &CreditorId,
     ) -> Self {
         Self {
             payment_info_id: None,
             creditor_name: creditor_name.into(),
             creditor_iban: creditor_iban.clone(),
             creditor_bic: None,
-            creditor_id,
+            creditor_id: creditor_id.clone(),
             sequence_type: SequenceType::Rcur,
             scheme: DirectDebitScheme::Core,
             collection_date: default_collection_date(),
@@ -676,11 +810,20 @@ impl DirectDebitGroup {
         self
     }
 
-    /// Set the requested collection date (`ReqdColltnDt`), `YYYY-MM-DD`.
+    /// Set the requested collection date (`ReqdColltnDt`).
+    ///
+    /// Defaults to five days out, the SDD Core pre-notification floor for a
+    /// first or one-off collection.
     #[must_use]
-    pub fn collection_date(mut self, date: impl Into<String>) -> Self {
-        self.collection_date = date.into();
+    pub fn collection_date(mut self, date: IsoDate) -> Self {
+        self.collection_date = date;
         self
+    }
+
+    /// The requested collection date.
+    #[must_use]
+    pub const fn requested_collection_date(&self) -> IsoDate {
+        self.collection_date
     }
 
     /// Set the creditor's BIC (`CdtrAgt`).
@@ -757,7 +900,7 @@ impl DirectDebitGroup {
 pub struct Pain008Builder {
     initiating_party: String,
     msg_id: String,
-    created_at: Option<String>,
+    created_at: Option<IsoDateTime>,
     schema: DirectDebitSchema,
     charset: CharsetPolicy,
     groups: Vec<DirectDebitGroup>,
@@ -785,12 +928,26 @@ impl Pain008Builder {
 
     /// Pin the creation timestamp (`CreDtTm`), making output reproducible.
     #[must_use]
-    pub fn created_at(mut self, timestamp: impl Into<String>) -> Self {
-        self.created_at = Some(timestamp.into());
+    pub fn created_at(mut self, timestamp: IsoDateTime) -> Self {
+        self.created_at = Some(timestamp);
         self
     }
 
-    /// Override the pain.008 schema version.
+    /// Select the pain.008 schema version (default
+    /// [`DirectDebitSchema::IsoV8`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::pain008::DirectDebitSchema;
+    /// use sepa::Pain008Builder;
+    ///
+    /// // A bank still on the pre-2023 version, read from configuration.
+    /// let schema: DirectDebitSchema = "pain.008.001.02".parse()?;
+    /// let builder = Pain008Builder::new("Stadtwerke GmbH").schema(schema);
+    /// # let _ = builder;
+    /// # Ok::<(), sepa::UnknownSchema>(())
+    /// ```
     #[must_use]
     pub fn schema(mut self, schema: DirectDebitSchema) -> Self {
         self.schema = schema;
@@ -852,66 +1009,88 @@ impl Pain008Builder {
     ///
     /// # Errors
     ///
-    /// See [`ValidationError`].
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.groups.is_empty() || self.entry_count() == 0 {
-            return Err(ValidationError::EmptyBatch);
+    /// A [`BuildError`] naming both the broken rule ([`ValidationError`]) and
+    /// the group and transaction it belongs to.
+    pub fn validate(&self) -> Result<(), BuildError> {
+        // `PmtInf` is 1..n at message level; `CdtTrfTxInf` / `DrctDbtTxInf` are
+        // 1..n inside each group, and the loop below reports which group is
+        // empty rather than blaming the message for it.
+        if self.groups.is_empty() {
+            return Err(BuildError::message(ValidationError::EmptyBatch));
         }
-        check_id("GrpHdr/MsgId", &self.msg_id)?;
+        let msg = Location::message();
+        check_id("GrpHdr/MsgId", &self.msg_id).at(msg)?;
         check_name(
             "InitgPty/Nm",
-            &self.charset.apply("InitgPty/Nm", &self.initiating_party)?,
-        )?;
+            &self
+                .charset
+                .apply("InitgPty/Nm", &self.initiating_party)
+                .at(msg)?,
+        )
+        .at(msg)?;
 
         let mut total: i64 = 0;
         for (i, g) in self.groups.iter().enumerate() {
+            let at = Location::group(i);
             if g.entries.is_empty() {
-                return Err(ValidationError::EmptyBatch);
+                return Err(BuildError::group(i, ValidationError::EmptyBatch));
             }
-            check_id("PmtInf/PmtInfId", &self.payment_info_id(i))?;
-            check_date("PmtInf/ReqdColltnDt", &g.collection_date)?;
-            check_name("Cdtr/Nm", &self.charset.apply("Cdtr/Nm", &g.creditor_name)?)?;
+            check_id("PmtInf/PmtInfId", &self.payment_info_id(i)).at(at)?;
+            check_name(
+                "Cdtr/Nm",
+                &self.charset.apply("Cdtr/Nm", &g.creditor_name).at(at)?,
+            )
+            .at(at)?;
             if let Some(p) = &g.category_purpose {
-                p.validate("PmtTpInf/CtgyPurp/Cd")?;
+                p.validate("PmtTpInf/CtgyPurp/Cd").at(at)?;
             }
             if let Some(p) = &g.ultimate_creditor {
-                p.validate("PmtInf/UltmtCdtr", self.charset)?;
+                p.validate("PmtInf/UltmtCdtr", self.charset).at(at)?;
             }
 
-            for e in &g.entries {
+            for (j, e) in g.entries.iter().enumerate() {
+                let at = Location::transaction(i, j);
                 if g.ultimate_creditor.is_some() && e.ultimate_creditor.is_some() {
-                    return Err(ValidationError::ConflictingLevels { field: "UltmtCdtr" });
+                    return Err(BuildError {
+                        location: at,
+                        kind: ValidationError::ConflictingLevels { field: "UltmtCdtr" },
+                    });
                 }
-                check_id("DrctDbtTxInf/PmtId/EndToEndId", &e.end_to_end_id)?;
-                check_id("MndtRltdInf/MndtId", &e.mandate_ref)?;
-                check_date("MndtRltdInf/DtOfSgntr", &e.mandate_signed_at)?;
-                check_amount("DrctDbtTxInf/InstdAmt", e.amount_ct)?;
-                check_name("Dbtr/Nm", &self.charset.apply("Dbtr/Nm", &e.debtor_name)?)?;
+                check_id("DrctDbtTxInf/PmtId/EndToEndId", &e.end_to_end_id).at(at)?;
+                check_id("MndtRltdInf/MndtId", &e.mandate_ref).at(at)?;
+                check_amount("DrctDbtTxInf/InstdAmt", e.amount_ct).at(at)?;
+                check_name(
+                    "Dbtr/Nm",
+                    &self.charset.apply("Dbtr/Nm", &e.debtor_name).at(at)?,
+                )
+                .at(at)?;
                 if let Some(p) = &e.ultimate_creditor {
-                    p.validate("DrctDbtTxInf/UltmtCdtr", self.charset)?;
+                    p.validate("DrctDbtTxInf/UltmtCdtr", self.charset).at(at)?;
                 }
                 if let Some(p) = &e.ultimate_debtor {
-                    p.validate("DrctDbtTxInf/UltmtDbtr", self.charset)?;
+                    p.validate("DrctDbtTxInf/UltmtDbtr", self.charset).at(at)?;
                 }
                 if let Some(p) = &e.purpose {
-                    p.validate("DrctDbtTxInf/Purp/Cd")?;
+                    p.validate("DrctDbtTxInf/Purp/Cd").at(at)?;
                 }
                 if let Some(a) = &e.amendment {
-                    a.validate(self.charset)?;
+                    a.validate(self.charset).at(at)?;
                 }
                 if let Some(r) = &e.remittance {
                     if let RemittanceInfo::Unstructured(text) = r {
                         check_remittance(
                             "RmtInf/Ustrd",
-                            &self.charset.apply("RmtInf/Ustrd", text)?,
-                        )?;
+                            &self.charset.apply("RmtInf/Ustrd", text).at(at)?,
+                        )
+                        .at(at)?;
                     } else {
-                        r.validate("RmtInf/Strd")?;
+                        r.validate("RmtInf/Strd").at(at)?;
                     }
                 }
-                total = total
-                    .checked_add(e.amount_ct)
-                    .ok_or(ValidationError::ControlSumOverflow)?;
+                total = total.checked_add(e.amount_ct).ok_or(BuildError {
+                    location: at,
+                    kind: ValidationError::ControlSumOverflow,
+                })?;
             }
         }
         Ok(())
@@ -929,7 +1108,7 @@ impl Pain008Builder {
     ///
     /// ```
     /// use sepa::{
-    ///     DirectDebitEntry, DirectDebitGroup, Pain008Builder, SequenceType,
+    ///     DirectDebitEntry, DirectDebitGroup, IsoDate, Pain008Builder, SequenceType,
     ///     validate_creditor_id, validate_iban,
     /// };
     ///
@@ -939,19 +1118,19 @@ impl Pain008Builder {
     /// let xml = Pain008Builder::new("Stadtwerke GmbH")
     ///     .msg_id("DD-2026-07")
     ///     .add_group(
-    ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, ci.clone())
+    ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
     ///             .sequence_type(SequenceType::Frst)
-    ///             .collection_date("2026-07-20")
+    ///             .collection_date(IsoDate::new(2026, 7, 20)?)
     ///             .add_entry(DirectDebitEntry::new(
-    ///                 "MND-1", "2026-06-01", "Neu Kunde", iban.clone(), 5_000, "E2E-1",
+    ///                 "MND-1", "2026-06-01".parse()?, "Neu Kunde", iban.clone(), 5_000, "E2E-1",
     ///             )),
     ///     )
     ///     .add_group(
-    ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, ci)
+    ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
     ///             .sequence_type(SequenceType::Rcur)
-    ///             .collection_date("2026-07-18")
+    ///             .collection_date(IsoDate::new(2026, 7, 18)?)
     ///             .add_entry(DirectDebitEntry::new(
-    ///                 "MND-2", "2024-06-01", "Alt Kunde", iban.clone(), 7_500, "E2E-2",
+    ///                 "MND-2", "2024-06-01".parse()?, "Alt Kunde", iban.clone(), 7_500, "E2E-2",
     ///             )),
     ///     )
     ///     .build()?;
@@ -961,7 +1140,7 @@ impl Pain008Builder {
     /// assert!(xml.contains("<NbOfTxs>2</NbOfTxs>")); // group header total
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn build(&self) -> Result<String, ValidationError> {
+    pub fn build(&self) -> Result<String, BuildError> {
         self.validate()?;
         let mut buf = String::with_capacity(900 + self.entry_count() * 480);
         let _ = self.write_xml_to(&mut buf);
@@ -991,7 +1170,7 @@ impl Pain008Builder {
     fn write_xml_to<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
         use crate::xml_util::write_escaped;
 
-        let now = self.created_at.clone().unwrap_or_else(iso8601_now);
+        let now = self.created_at.unwrap_or_else(IsoDateTime::now);
         let namespace = self.schema.namespace();
         let initiating = self
             .charset
@@ -1058,6 +1237,8 @@ impl Pain008Builder {
             writeln!(w, "        <CtgyPurp><Cd>{}</Cd></CtgyPurp>", p.as_code())?;
         }
         w.write_str("      </PmtTpInf>\n")?;
+        // SDD kept `ReqdColltnDt` a bare `ISODate` in every version — unlike
+        // pain.001.001.09's `ReqdExctnDt`, which became a date/time choice.
         writeln!(
             w,
             "      <ReqdColltnDt>{}</ReqdColltnDt>",
@@ -1117,10 +1298,10 @@ impl Pain008Builder {
         w.write_str("</InstdAmt>\n      <DrctDbtTx>\n        <MndtRltdInf>\n          <MndtId>")?;
         write_escaped(w, &e.mandate_ref)?;
         w.write_str("</MndtId>\n          <DtOfSgntr>")?;
-        w.write_str(&e.mandate_signed_at)?;
+        write!(w, "{}", e.mandate_signed_at)?;
         w.write_str("</DtOfSgntr>\n")?;
         if let Some(amendment) = &e.amendment {
-            amendment.write_xml(w, self.charset)?;
+            amendment.write_xml(w, self.charset, self.schema)?;
         }
         w.write_str("        </MndtRltdInf>\n      </DrctDbtTx>\n")?;
 
@@ -1159,19 +1340,6 @@ impl Pain008Builder {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-pub(crate) fn iso8601_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let (y, mo, d) = days_to_ymd(secs / 86400);
-    let ss = secs % 60;
-    let mm = (secs / 60) % 60;
-    let hh = (secs / 3600) % 24;
-    format!("{y:04}-{mo:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}")
-}
-
 pub(crate) fn epoch_secs() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -1180,46 +1348,24 @@ pub(crate) fn epoch_secs() -> u64 {
         .as_secs()
 }
 
-pub(crate) fn default_collection_date() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let (y, m, d) = days_to_ymd(secs / 86400 + 5);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-// SAFETY of the casts in `days_to_ymd`:
-//   `days` fits in i64 for any representable calendar date (< 2^62 years from epoch).
-//   `doe` = z - era*146097 is always 0..146096 — fits in u32, is non-negative.
-//   `yoe` is a u32, losslessly widened to i64 via From.
-//   The final year `y` is always positive for years after 0 AD; fits in u32.
-#[allow(
-    clippy::cast_possible_wrap,       // days fits in i64 for any calendar date
-    clippy::cast_possible_truncation, // doe is 0..146096, fits u32
-    clippy::cast_sign_loss,           // doe is always non-negative
-)]
-fn days_to_ymd(days: u64) -> (u32, u32, u32) {
-    // Algorithm: https://howardhinnant.github.io/date_algorithms.html
-    let z = days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u32; // 0 ≤ doe < 146_097
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = i64::from(yoe) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (u32::try_from(y).unwrap_or(0), m, d)
+/// Five days out — the SDD Core pre-notification floor for `FRST`/`OOFF`.
+///
+/// This is only the placeholder for a group whose date was never set; a real
+/// collection run derives its date from its own banking calendar.
+pub(crate) fn default_collection_date() -> IsoDate {
+    let today = IsoDate::today();
+    today.plus_days(5).unwrap_or(today)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::iban::validate_iban;
-    use crate::validate::{CharsetPolicy, ValidationError};
+    use crate::validate::{CharsetPolicy, Location, ValidationError};
+
+    fn d(s: &str) -> IsoDate {
+        s.parse().unwrap()
+    }
 
     fn de_iban() -> Iban {
         validate_iban("DE89370400440532013000").unwrap()
@@ -1233,7 +1379,7 @@ mod tests {
     fn entry(mandate: &str, amount_ct: i64) -> DirectDebitEntry {
         DirectDebitEntry::new(
             mandate,
-            "2024-01-01",
+            d("2024-01-01"),
             "Max Mustermann",
             nl_iban(),
             amount_ct,
@@ -1241,7 +1387,7 @@ mod tests {
         )
     }
     fn group(name: &str) -> DirectDebitGroup {
-        DirectDebitGroup::new(name, &de_iban(), ci()).collection_date("2026-07-20")
+        DirectDebitGroup::new(name, &de_iban(), &ci()).collection_date(d("2026-07-20"))
     }
     fn one_group(name: &str) -> Pain008Builder {
         Pain008Builder::new(name)
@@ -1273,13 +1419,13 @@ mod tests {
             .add_group(
                 group("Stadtwerke GmbH")
                     .sequence_type(SequenceType::Frst)
-                    .collection_date("2026-07-20")
+                    .collection_date(d("2026-07-20"))
                     .add_entry(entry("MND-NEW", 5_000)),
             )
             .add_group(
                 group("Stadtwerke GmbH")
                     .sequence_type(SequenceType::Rcur)
-                    .collection_date("2026-07-18")
+                    .collection_date(d("2026-07-18"))
                     .add_entry(entry("MND-OLD", 7_500))
                     .add_entry(entry("MND-OLD-2", 2_500)),
             )
@@ -1374,8 +1520,10 @@ mod tests {
                     group("Test")
                         .add_entry(entry("M1", 1_000).with_amendment(MandateAmendment::default()),)
                 )
-                .build(),
-            Err(ValidationError::Empty { .. })
+                .build()
+                .unwrap_err()
+                .kind,
+            ValidationError::Empty { .. }
         ));
     }
 
@@ -1388,7 +1536,11 @@ mod tests {
         );
         assert_eq!(
             b.build(),
-            Err(ValidationError::ConflictingLevels { field: "UltmtCdtr" })
+            Err(BuildError::transaction(
+                0,
+                0,
+                ValidationError::ConflictingLevels { field: "UltmtCdtr" }
+            ))
         );
     }
 
@@ -1401,16 +1553,22 @@ mod tests {
                 .msg_id("DD-1")
                 .add_group(group("Test").add_entry(DirectDebitEntry::new(
                     "MND-Ü",
-                    "2024-01-01",
+                    d("2024-01-01"),
                     "Max",
                     nl_iban(),
                     100,
                     "E2E"
                 )))
                 .build(),
-            Err(ValidationError::InvalidCharacter {
-                field: "MndtRltdInf/MndtId",
-                ch: 'Ü'
+            Err(BuildError {
+                location: Location {
+                    group: Some(0),
+                    transaction: Some(0)
+                },
+                kind: ValidationError::InvalidCharacter {
+                    field: "MndtRltdInf/MndtId",
+                    ch: 'Ü'
+                }
             })
         ));
     }
@@ -1419,49 +1577,59 @@ mod tests {
     fn empty_message_and_empty_group_are_both_rejected() {
         assert_eq!(
             Pain008Builder::new("Test").msg_id("E").build(),
-            Err(ValidationError::EmptyBatch)
+            Err(BuildError::message(ValidationError::EmptyBatch))
         );
         assert_eq!(
             Pain008Builder::new("Test")
                 .msg_id("E")
                 .add_group(group("Test"))
                 .build(),
-            Err(ValidationError::EmptyBatch)
+            Err(BuildError::group(0, ValidationError::EmptyBatch))
         );
     }
 
     #[test]
     fn validation_rejects_bad_fields() {
         let b = || Pain008Builder::new("Test").msg_id("OK");
+        let err = b()
+            .add_group(group("Test").add_entry(entry("M1", 0)))
+            .build()
+            .unwrap_err();
+        assert!(matches!(err.kind, ValidationError::AmountOutOfRange { .. }));
         assert!(matches!(
-            b().add_group(group("Test").add_entry(entry("M1", 0)))
-                .build(),
-            Err(ValidationError::AmountOutOfRange { .. })
+            b().msg_id("X".repeat(36))
+                .add_group(group("Test").add_entry(entry("M1", 100)))
+                .build()
+                .unwrap_err()
+                .kind,
+            ValidationError::TooLong { .. }
         ));
-        assert!(matches!(
-            b().add_group(
-                DirectDebitGroup::new("Test", &de_iban(), ci())
-                    .collection_date("2026-02-30")
-                    .add_entry(entry("M1", 100))
+    }
+
+    #[test]
+    fn a_malformed_date_cannot_reach_a_batch() {
+        // `ReqdColltnDt` and `DtOfSgntr` are `IsoDate`s, so an impossible date
+        // is rejected where it is written, not on submission day.
+        assert!("2026-02-30".parse::<IsoDate>().is_err());
+        assert!("01.06.2024".parse::<IsoDate>().is_err());
+    }
+
+    #[test]
+    fn errors_name_the_group_and_transaction_that_failed() {
+        // A collection run is thousands of rows long; "Dbtr/Nm is too long" is
+        // only actionable once it says which row.
+        let err = Pain008Builder::new("Test")
+            .msg_id("DD-LOC")
+            .add_group(group("Test").add_entry(entry("M1", 100)))
+            .add_group(
+                group("Test")
+                    .add_entry(entry("M2", 100))
+                    .add_entry(entry("M3", 0)),
             )
-            .build(),
-            Err(ValidationError::InvalidDate { .. })
-        ));
-        assert!(matches!(
-            b().add_group(group("Test").add_entry(DirectDebitEntry::new(
-                "M1",
-                "01.06.2024",
-                "Max",
-                nl_iban(),
-                100,
-                "E2E"
-            )))
-            .build(),
-            Err(ValidationError::InvalidDate {
-                field: "MndtRltdInf/DtOfSgntr",
-                ..
-            })
-        ));
+            .build()
+            .unwrap_err();
+        assert_eq!(err.location, Location::transaction(1, 1));
+        assert!(err.to_string().starts_with("PmtInf[1]/Tx[1]: "));
     }
 
     #[test]
@@ -1480,12 +1648,12 @@ mod tests {
         let xml = Pain008Builder::new("Müller & Söhne GmbH")
             .msg_id("DD-UML")
             .add_group(
-                DirectDebitGroup::new("Müller & Söhne GmbH", &de_iban(), ci())
-                    .collection_date("2026-07-20")
+                DirectDebitGroup::new("Müller & Söhne GmbH", &de_iban(), &ci())
+                    .collection_date(d("2026-07-20"))
                     .add_entry(
                         DirectDebitEntry::new(
                             "MND-001",
-                            "2024-01-01",
+                            d("2024-01-01"),
                             "Jörg Groß",
                             nl_iban(),
                             100,
@@ -1512,7 +1680,7 @@ mod tests {
 
     #[test]
     fn streaming_matches_the_in_memory_build() {
-        let make = || one_group("Test").created_at("2026-07-19T12:00:00");
+        let make = || one_group("Test").created_at("2026-07-19T12:00:00".parse().unwrap());
         let direct = make().build().unwrap();
         let mut buf: Vec<u8> = Vec::new();
         make().write_to(&mut buf).unwrap();
@@ -1524,13 +1692,84 @@ mod tests {
         assert!(matches!(
             one_group("Müller GmbH")
                 .charset(CharsetPolicy::Strict)
-                .build(),
-            Err(ValidationError::InvalidCharacter { ch: 'ü', .. })
+                .build()
+                .unwrap_err()
+                .kind,
+            ValidationError::InvalidCharacter { ch: 'ü', .. }
         ));
     }
 
     #[test]
-    fn days_to_ymd_epoch() {
-        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    fn the_default_collection_date_is_five_days_out() {
+        assert_eq!(
+            default_collection_date(),
+            IsoDate::today().plus_days(5).unwrap()
+        );
+    }
+
+    #[test]
+    fn schema_versions_round_trip_through_their_identifiers() {
+        for schema in DirectDebitSchema::ALL {
+            assert_eq!(
+                schema.message_id().parse::<DirectDebitSchema>(),
+                Ok(*schema)
+            );
+            assert_eq!(schema.namespace().parse::<DirectDebitSchema>(), Ok(*schema));
+            assert!(schema.namespace().ends_with(schema.message_id()));
+        }
+        assert!("pain.008.001.99".parse::<DirectDebitSchema>().is_err());
+        assert_eq!(
+            "PAIN.008.001.02".parse::<DirectDebitSchema>(),
+            Ok(DirectDebitSchema::IsoV2)
+        );
+    }
+
+    #[test]
+    fn the_epc_legacy_schema_uses_the_pre_2019_bic_element() {
+        let xml = Pain008Builder::new("Test")
+            .schema(DirectDebitSchema::IsoV2)
+            .msg_id("DD-V2")
+            .add_group(
+                group("Test")
+                    .creditor_bic("COBADEFF".parse().unwrap())
+                    .add_entry(entry("M1", 1_000)),
+            )
+            .build()
+            .unwrap();
+        assert!(xml.contains("pain.008.001.02"));
+        assert!(xml.contains("<BIC>COBADEFF</BIC>"));
+        assert!(!xml.contains("BICFI"));
+    }
+
+    #[test]
+    fn smnda_moves_to_the_original_agent_under_the_dk_schema() {
+        // Regression: pain.008.003.02 admits nothing but an IBAN under
+        // OrgnlDbtrAcct, and enumerates SMNDA under OrgnlDbtrAgt instead — so
+        // the current placement is schema-invalid there.
+        let build = |schema| {
+            Pain008Builder::new("Test")
+                .schema(schema)
+                .msg_id("DD-AMD")
+                .add_group(group("Test").add_entry(
+                    entry("M1", 1_000).with_amendment(MandateAmendment::debtor_account_changed()),
+                ))
+                .build()
+                .unwrap()
+        };
+
+        let dk = build(DirectDebitSchema::DkV2_7);
+        assert!(dk.contains(
+            "<OrgnlDbtrAgt><FinInstnId><Othr><Id>SMNDA</Id></Othr></FinInstnId></OrgnlDbtrAgt>"
+        ));
+        assert!(!dk.contains("OrgnlDbtrAcct"));
+
+        for iso in [DirectDebitSchema::IsoV8, DirectDebitSchema::IsoV2] {
+            let xml = build(iso);
+            assert!(
+                xml.contains("<OrgnlDbtrAcct><Id><Othr><Id>SMNDA</Id></Othr></Id></OrgnlDbtrAcct>"),
+                "{iso} must use the post-2016 placement"
+            );
+            assert!(!xml.contains("OrgnlDbtrAgt"));
+        }
     }
 }

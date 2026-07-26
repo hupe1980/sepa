@@ -30,6 +30,13 @@ fuzz_target!(|data: &[u8]| {
                 let _ = entry.is_return();
                 let _ = entry.end_to_end_id();
                 let _ = entry.counterparty_iban();
+                // Detail amounts are resolved from three different places and
+                // summed, so overflow must saturate into `None`, not panic.
+                let _ = entry.details_signed_sum_ct();
+                let _ = entry.details_reconcile();
+                for detail in &entry.details {
+                    let _ = detail.signed_ct();
+                }
             }
         }
     }

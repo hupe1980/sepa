@@ -227,10 +227,11 @@ impl FromStr for RfReference {
             .collect();
 
         // Shortest useful reference is "RF" + 2 check digits + 1 char.
-        if !(5..=MAX_RF_LEN).contains(&normalised.len()) {
-            return Err(RfReferenceError::InvalidLength {
-                len: normalised.len(),
-            });
+        // Counted in characters: a non-ASCII character is rejected just below,
+        // but the length reported for one must not be its UTF-8 byte count.
+        let len = normalised.chars().count();
+        if !(5..=MAX_RF_LEN).contains(&len) {
+            return Err(RfReferenceError::InvalidLength { len });
         }
         if let Some(ch) = normalised.chars().find(|c| !c.is_ascii_alphanumeric()) {
             return Err(RfReferenceError::InvalidCharacter { ch });

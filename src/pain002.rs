@@ -638,7 +638,7 @@ fn parse_transaction_status(tx: &Node) -> TransactionStatus {
             r.text_at(&["Amt", "InstdAmt"])
                 .or_else(|| r.text_of_descendant("InstdAmt"))
         })
-        .and_then(crate::ct_from_eur_str);
+        .and_then(|raw| crate::ct_from_eur_str(raw).ok());
 
     let party = |tags: [&str; 2]| -> (Option<String>, Option<String>) {
         orig_tx_ref.map_or((None, None), |r| {

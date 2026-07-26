@@ -208,6 +208,7 @@ fn parse_statement(s: &Node) -> Camt053Statement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IsoDate;
     use crate::camt054::CreditDebitIndicator;
     use crate::{BalanceType, EntryStatus};
 
@@ -281,11 +282,12 @@ mod tests {
 
         let opening = stmt.opening_balance().unwrap();
         assert_eq!(opening.amount_ct, 100_000);
-        assert_eq!(opening.date, "2026-07-13");
+        assert_eq!(opening.date_raw, "2026-07-13");
+        assert_eq!(opening.date(), Some(IsoDate::new(2026, 7, 13).unwrap()));
 
         let closing = stmt.closing_balance().unwrap();
         assert_eq!(closing.amount_ct, 115_542);
-        assert_eq!(closing.date, "2026-07-14");
+        assert_eq!(closing.date(), Some(IsoDate::new(2026, 7, 14).unwrap()));
     }
 
     #[test]
@@ -298,7 +300,7 @@ mod tests {
         assert_eq!(e.amount_ct, 15_542);
         assert_eq!(e.indicator, CreditDebitIndicator::Credit);
         assert_eq!(e.status, EntryStatus::Booked);
-        assert_eq!(e.booking_date.as_deref(), Some("2026-07-14"));
+        assert_eq!(e.booking_date(), Some(IsoDate::new(2026, 7, 14).unwrap()));
         assert_eq!(e.account_servicer_ref.as_deref(), Some("SVCRREF-001"));
         assert_eq!(e.end_to_end_id(), Some("E2E-INV-2026"));
         assert_eq!(e.reference(), Some("Invoice 2026-07-001"));

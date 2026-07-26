@@ -16,6 +16,14 @@ fuzz_target!(|data: &[u8]| {
     let _ = sepa::validate_creditor_id(s);
     let _ = sepa::creditor_id_check_digits(s, "DE");
     let _ = sepa::ct_from_eur_str(s);
+    let _ = s.parse::<sepa::IsoDate>();
+    let _ = s.parse::<sepa::IsoDateTime>();
+    // Takes the first ten *bytes* of bank-supplied text, so a multi-byte
+    // character straddling the boundary must not panic.
+    let _ = sepa::IsoDate::parse_date_part(s);
+    let _ = sepa::is_bic_country_code(s);
+    let _ = sepa::iban_bban_format(s);
+    let _ = sepa::iban_country_length(s);
     let _ = s.parse::<sepa::RfReference>();
     let _ = sepa::RfReference::generate(s);
     let _ = sepa::is_sepa_country(s);
@@ -34,9 +42,34 @@ fuzz_target!(|data: &[u8]| {
         let _ = (iban.country_code(), iban.check_digits(), iban.bban());
         let _ = iban.is_sepa();
         let _ = iban.to_string();
+        // Anything that validates must satisfy the registered structure, so a
+        // structural check that disagrees with the validator is a bug.
+        if let Some(structure) = sepa::iban_bban_format(iban.country_code()) {
+            assert_eq!(structure.len(), iban.bban().len());
+            assert!(
+                sepa::validate_bic(&format!("AAAA{}FF", iban.country_code())).is_ok(),
+                "an IBAN country must be an acceptable BIC country",
+            );
+        }
     }
     if let Ok(bic) = sepa::validate_bic(s) {
         let _ = (bic.institution_code(), bic.country_code(), bic.location_code());
         let _ = (bic.branch_code(), bic.is_test(), bic.is_passive());
+    }
+
+    // A parsed date must render back to something that parses identically, and
+    // its calendar arithmetic must saturate rather than wrap or panic.
+    if let Ok(date) = s.parse::<sepa::IsoDate>() {
+        assert_eq!(sepa::IsoDate::parse(&date.to_string()), Ok(date));
+        assert_eq!(
+            sepa::IsoDate::from_epoch_days(date.epoch_days()),
+            Ok(date),
+            "epoch-day round trip must be lossless"
+        );
+        let offset = i64::try_from(data.len()).unwrap_or(i64::MAX) - 1_000;
+        let _ = date.plus_days(offset);
+    }
+    if let Ok(ts) = s.parse::<sepa::IsoDateTime>() {
+        assert_eq!(sepa::IsoDateTime::parse(&ts.to_string()), Ok(ts));
     }
 });

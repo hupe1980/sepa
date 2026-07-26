@@ -76,7 +76,7 @@ deny:
 # ── Fuzzing ───────────────────────────────────────────────────────────────────
 
 # Fuzz a target (requires nightly + `cargo install cargo-fuzz`).
-# Targets: parse, identifiers, build
+# Targets: parse, identifiers, build_batch
 fuzz TARGET="parse" SECS="60":
     cargo +nightly fuzz run {{ TARGET }} -- -max_total_time={{ SECS }}
 

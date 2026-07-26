@@ -27,7 +27,8 @@
 //! ## Example
 //!
 //! ```rust
-//! # #[cfg(feature = "json")] {
+//! # #[cfg(feature = "json")]
+//! # fn demo() -> Result<(), sepa::camt054::SimpleJsonError> {
 //! use sepa::camt054::parse_simple_json;
 //!
 //! let json = serde_json::json!({
@@ -36,10 +37,13 @@
 //!     "reference": "Invoice 2026-06-001",
 //!     "date": "2026-07-10"
 //! });
-//! let entry = parse_simple_json(&json).unwrap();
+//! let entry = parse_simple_json(&json)?;
 //! assert_eq!(entry.amount_ct, 15_500);
 //! assert_eq!(entry.to_ledger_ct(), -15_500); // credit reduces balance
+//! # Ok(())
 //! # }
+//! # #[cfg(feature = "json")]
+//! # demo().unwrap();
 //! ```
 
 use std::str::FromStr;
@@ -57,11 +61,15 @@ pub struct UnknownIndicator(
 );
 
 /// Whether a CAMT.054 entry is a credit or debit from the account holder's perspective.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Defaults to [`Credit`](Self::Credit), matching how the parsers treat an
+/// absent or unrecognised `CdtDbtInd`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CreditDebitIndicator {
     /// Money received into the account (`CRDT`).
+    #[default]
     #[cfg_attr(feature = "serde", serde(rename = "CRDT"))]
     Credit,
     /// Money debited from the account (`DBIT`).
@@ -146,7 +154,7 @@ impl ReturnInfo {
 ///
 /// Amounts are **always positive** with a separate [`CreditDebitIndicator`].
 /// Use [`to_ledger_ct`](Self::to_ledger_ct) to convert to open-items sign convention.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Camt054Entry {
@@ -156,10 +164,14 @@ pub struct Camt054Entry {
     pub amount_ct: i64,
     /// Whether this is a credit (incoming) or debit (outgoing).
     pub indicator: CreditDebitIndicator,
-    /// Value date (Wertstellungsdatum), ISO 8601 `"YYYY-MM-DD"`.
-    pub value_date: String,
-    /// Booking date (Buchungsdatum), ISO 8601. May differ from `value_date`.
-    pub booking_date: Option<String>,
+    /// Value date (Wertstellungsdatum) exactly as reported.
+    ///
+    /// Read [`value_date`](Self::value_date) for the day; this keeps whatever
+    /// the source actually contained.
+    pub value_date_raw: String,
+    /// Booking date (Buchungsdatum) exactly as reported. May differ from the
+    /// value date.
+    pub booking_date_raw: Option<String>,
     /// Payment reference / Verwendungszweck.
     pub reference: String,
     /// End-to-end reference from the original payment instruction.
@@ -190,6 +202,21 @@ impl Camt054Entry {
     #[must_use]
     pub const fn is_return(&self) -> bool {
         self.return_reason.is_some()
+    }
+
+    /// The value date — the day this entry is posted by.
+    ///
+    /// `None` only when the source carried something this crate cannot read as
+    /// a date; [`value_date_raw`](Self::value_date_raw) still has it.
+    #[must_use]
+    pub fn value_date(&self) -> Option<crate::IsoDate> {
+        crate::IsoDate::parse_date_part(&self.value_date_raw).ok()
+    }
+
+    /// The booking date, when one was reported.
+    #[must_use]
+    pub fn booking_date(&self) -> Option<crate::IsoDate> {
+        crate::IsoDate::parse_date_part(self.booking_date_raw.as_deref()?).ok()
     }
 
     /// Human-readable description for the entry.
@@ -375,6 +402,67 @@ pub fn parse_camt054(xml: &str) -> Result<Camt054Document, Camt054ParseError> {
 
 // ── parse_simple_json ─────────────────────────────────────────────────────────
 
+/// Error returned when a simplified CAMT.054 JSON record cannot be read.
+///
+/// Every variant names the offending field, so a bank row that gets skipped on
+/// import can be reported with the reason it was skipped — a truncated file, a
+/// German-formatted amount and a missing IBAN are three different operational
+/// problems and must not look alike in a log.
+#[cfg(feature = "json")]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SimpleJsonError {
+    /// The record is not a JSON object.
+    #[error("expected a JSON object, found {found}")]
+    NotAnObject {
+        /// The JSON type that was found instead.
+        found: &'static str,
+    },
+
+    /// A required field is absent.
+    #[error("required field {field:?} is missing")]
+    MissingField {
+        /// The field name.
+        field: &'static str,
+    },
+
+    /// A field is present but of the wrong JSON type.
+    #[error("field {field:?} must be {expected}")]
+    WrongType {
+        /// The field name.
+        field: &'static str,
+        /// What the field should have been.
+        expected: &'static str,
+    },
+
+    /// A field is present but empty.
+    #[error("field {field:?} must not be empty")]
+    Empty {
+        /// The field name.
+        field: &'static str,
+    },
+
+    /// The amount could not be read as integer cents.
+    #[error("field {field:?}: {source}")]
+    InvalidAmount {
+        /// The field name.
+        field: &'static str,
+        /// Why the amount was rejected.
+        #[source]
+        source: crate::AmountError,
+    },
+
+    /// The date is not a valid ISO 8601 calendar date.
+    #[error("field {field:?}: {source}")]
+    InvalidDate {
+        /// The field name.
+        field: &'static str,
+        /// Why the date was rejected.
+        #[source]
+        source: crate::DateError,
+    },
+}
+
 /// Parse a simplified CAMT.054 JSON record from a bank CSV/JSON export.
 ///
 /// Expected fields:
@@ -387,66 +475,162 @@ pub fn parse_camt054(xml: &str) -> Result<Camt054Document, Camt054ParseError> {
 /// }
 /// ```
 ///
+/// - `iban`, `amount_eur` and `date` are required; `reference`,
+///   `counterparty_name` and `counterparty_iban` are optional.
 /// - `amount_eur` may be a string `"155.42"` or a JSON number.
 ///   Positive = credit, negative = debit.
 /// - Parsed with integer arithmetic only — **no f64 rounding**.
 ///
-/// Returns `None` when required fields are missing, unparseable, or would overflow.
+/// # Errors
+///
+/// [`SimpleJsonError`], naming the field and the reason. A reconciliation
+/// import can therefore say *why* it dropped a row rather than only that it
+/// did.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::camt054::{SimpleJsonError, parse_simple_json};
+///
+/// let ok = serde_json::json!({
+///     "iban": "DE89370400440532013000",
+///     "amount_eur": "155.00",
+///     "date": "2026-07-10",
+/// });
+/// assert_eq!(parse_simple_json(&ok)?.amount_ct, 15_500);
+///
+/// // A German-formatted amount is rejected with the field that caused it.
+/// let bad = serde_json::json!({
+///     "iban": "DE89370400440532013000",
+///     "amount_eur": "155,00",
+///     "date": "2026-07-10",
+/// });
+/// let err = parse_simple_json(&bad).unwrap_err();
+/// assert!(matches!(err, SimpleJsonError::InvalidAmount { field: "amount_eur", .. }));
+/// assert_eq!(
+///     err.to_string(),
+///     r#"field "amount_eur": "155,00" is not a decimal amount"#,
+/// );
+/// # Ok::<(), SimpleJsonError>(())
+/// ```
 #[cfg(feature = "json")]
-pub fn parse_simple_json(value: &serde_json::Value) -> Option<Camt054Entry> {
-    let iban = value.get("iban").and_then(|v| v.as_str())?.to_owned();
-    let date = value
-        .get("date")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let reference = value
-        .get("reference")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
+pub fn parse_simple_json(value: &serde_json::Value) -> Result<Camt054Entry, SimpleJsonError> {
+    use serde_json::Value;
 
-    let amount_ct: i64 = parse_amount_ct(value.get("amount_eur")?)?;
+    if !value.is_object() {
+        return Err(SimpleJsonError::NotAnObject {
+            found: json_type_name(value),
+        });
+    }
 
+    let required_str = |field: &'static str| -> Result<String, SimpleJsonError> {
+        let raw = value
+            .get(field)
+            .ok_or(SimpleJsonError::MissingField { field })?
+            .as_str()
+            .ok_or(SimpleJsonError::WrongType {
+                field,
+                expected: "a string",
+            })?
+            .trim();
+        if raw.is_empty() {
+            return Err(SimpleJsonError::Empty { field });
+        }
+        Ok(raw.to_owned())
+    };
+    let optional_str = |field: &'static str| -> Result<Option<String>, SimpleJsonError> {
+        match value.get(field) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(SimpleJsonError::WrongType {
+                field,
+                expected: "a string",
+            }),
+        }
+    };
+
+    let iban = required_str("iban")?;
+
+    // Validated rather than passed through: a value date is what a reconciled
+    // posting is dated by, so a malformed one has to surface here.
+    let date_raw = required_str("date")?;
+    crate::IsoDate::parse(&date_raw).map_err(|source| SimpleJsonError::InvalidDate {
+        field: "date",
+        source,
+    })?;
+
+    let amount_ct = parse_amount_ct(value.get("amount_eur").ok_or(
+        SimpleJsonError::MissingField {
+            field: "amount_eur",
+        },
+    )?)?;
+
+    // A magnitude plus a direction, as camt.054 itself reports it. `i64::MIN`
+    // has no positive counterpart, so it is an overflow rather than a debit.
     let (amount_ct, indicator) = if amount_ct >= 0 {
         (amount_ct, CreditDebitIndicator::Credit)
     } else {
-        (amount_ct.checked_neg()?, CreditDebitIndicator::Debit)
+        let magnitude = amount_ct
+            .checked_neg()
+            .ok_or_else(|| SimpleJsonError::InvalidAmount {
+                field: "amount_eur",
+                source: crate::AmountError::Overflow {
+                    value: amount_ct.to_string(),
+                },
+            })?;
+        (magnitude, CreditDebitIndicator::Debit)
     };
 
-    Some(Camt054Entry {
+    Ok(Camt054Entry {
         iban,
         amount_ct,
         indicator,
-        value_date: date.clone(),
-        booking_date: Some(date),
-        reference,
-        end_to_end_id: None,
+        value_date_raw: date_raw.clone(),
+        booking_date_raw: Some(date_raw),
+        reference: optional_str("reference")?.unwrap_or_default(),
+        end_to_end_id: optional_str("end_to_end_id")?,
         return_reason: None,
-        counterparty_name: value
-            .get("counterparty_name")
-            .and_then(|v: &serde_json::Value| v.as_str())
-            .map(str::to_owned),
-        counterparty_iban: value
-            .get("counterparty_iban")
-            .and_then(|v: &serde_json::Value| v.as_str())
-            .map(str::to_owned),
+        counterparty_name: optional_str("counterparty_name")?,
+        counterparty_iban: optional_str("counterparty_iban")?,
     })
 }
 
-/// Parse `amount_eur` JSON value to integer cents without f64.
+#[cfg(feature = "json")]
+const fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// Parse an `amount_eur` JSON value to integer cents without f64.
 ///
 /// Accepts string `"155.42"`, negative `"-75.00"`, integer string `"100"`,
 /// and JSON numbers (converted via `.to_string()` to avoid f64 rounding).
-/// Returns `None` on overflow or parse failure.
 #[cfg(feature = "json")]
-fn parse_amount_ct(val: &serde_json::Value) -> Option<i64> {
+fn parse_amount_ct(val: &serde_json::Value) -> Result<i64, SimpleJsonError> {
+    const FIELD: &str = "amount_eur";
     let raw = match val {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Number(n) => n.to_string(),
-        _ => return None,
+        other => {
+            return Err(SimpleJsonError::WrongType {
+                field: FIELD,
+                expected: match other {
+                    serde_json::Value::Null => "a decimal string or number, not null",
+                    _ => "a decimal string or number",
+                },
+            });
+        }
     };
-    crate::ct_from_eur_str(&raw)
+    crate::ct_from_eur_str(&raw).map_err(|source| SimpleJsonError::InvalidAmount {
+        field: FIELD,
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -458,8 +642,8 @@ mod tests {
             iban: "DE89370400440532013000".to_owned(),
             amount_ct: 15_500,
             indicator: CreditDebitIndicator::Credit,
-            value_date: "2026-07-10".to_owned(),
-            booking_date: Some("2026-07-10".to_owned()),
+            value_date_raw: "2026-07-10".to_owned(),
+            booking_date_raw: Some("2026-07-10".to_owned()),
             reference: "Invoice 2026-06-001".to_owned(),
             end_to_end_id: None,
             return_reason: None,
@@ -586,9 +770,96 @@ mod tests {
 
     #[cfg(feature = "json")]
     #[test]
-    fn parse_json_missing_iban_returns_none() {
-        let json =
-            serde_json::json!({ "amount_eur": "100", "reference": "R", "date": "2026-07-10" });
-        assert!(parse_simple_json(&json).is_none());
+    fn every_rejection_says_which_field_and_why() {
+        // The point of the Result: an import that skips a bank row has to be
+        // able to tell the operator what was wrong with it.
+        let base = serde_json::json!({
+            "iban": "DE89370400440532013000",
+            "amount_eur": "100.00",
+            "date": "2026-07-10",
+        });
+        let with = |field: &str, v: serde_json::Value| {
+            let mut j = base.clone();
+            j[field] = v;
+            j
+        };
+        let without = |field: &str| {
+            let mut j = base.clone();
+            j.as_object_mut().unwrap().remove(field);
+            j
+        };
+
+        assert_eq!(
+            parse_simple_json(&without("iban")),
+            Err(SimpleJsonError::MissingField { field: "iban" })
+        );
+        assert_eq!(
+            parse_simple_json(&without("amount_eur")),
+            Err(SimpleJsonError::MissingField {
+                field: "amount_eur"
+            })
+        );
+        assert_eq!(
+            parse_simple_json(&without("date")),
+            Err(SimpleJsonError::MissingField { field: "date" })
+        );
+        assert_eq!(
+            parse_simple_json(&with("iban", serde_json::json!(""))),
+            Err(SimpleJsonError::Empty { field: "iban" })
+        );
+        assert_eq!(
+            parse_simple_json(&with("iban", serde_json::json!(42))),
+            Err(SimpleJsonError::WrongType {
+                field: "iban",
+                expected: "a string"
+            })
+        );
+        assert!(matches!(
+            parse_simple_json(&with("amount_eur", serde_json::json!("155,00"))),
+            Err(SimpleJsonError::InvalidAmount {
+                field: "amount_eur",
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_simple_json(&with("amount_eur", serde_json::json!(true))),
+            Err(SimpleJsonError::WrongType {
+                field: "amount_eur",
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_simple_json(&with("date", serde_json::json!("10.07.2026"))),
+            Err(SimpleJsonError::InvalidDate { field: "date", .. })
+        ));
+        assert!(matches!(
+            parse_simple_json(&serde_json::json!([1, 2, 3])),
+            Err(SimpleJsonError::NotAnObject { found: "an array" })
+        ));
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn optional_fields_are_optional_but_still_type_checked() {
+        let json = serde_json::json!({
+            "iban": "DE89370400440532013000",
+            "amount_eur": 42,
+            "date": "2026-07-10",
+            "counterparty_name": "Max Mustermann",
+        });
+        let entry = parse_simple_json(&json).unwrap();
+        assert_eq!(entry.amount_ct, 4_200);
+        assert_eq!(entry.reference, "");
+        assert_eq!(entry.counterparty_name.as_deref(), Some("Max Mustermann"));
+
+        let mut bad = json;
+        bad["reference"] = serde_json::json!(7);
+        assert_eq!(
+            parse_simple_json(&bad),
+            Err(SimpleJsonError::WrongType {
+                field: "reference",
+                expected: "a string"
+            })
+        );
     }
 }

@@ -1,18 +1,18 @@
 [package]
 name         = "sepa"
-version      = "0.4.0"
+version      = "0.5.0"
 rust-version = "1.85"
 edition      = "2024"
 authors      = ["hupe1980"]
 description  = """\
 SEPA payment utilities: IBAN validation (ISO 13616 + 89-country registry), \
 BIC validation (ISO 9362), SEPA Creditor Identifier (EPC AT-02), \
-pain.001 SCT + SCT Inst XML builder (pain.001.001.09 / .003.03), \
-pain.008 SDD CORE + B2B XML builder (pain.008.001.08 / .003.02), \
+pain.001 SCT + SCT Inst XML builder (pain.001.001.09 / .001.03 / .003.03), \
+pain.008 SDD CORE + B2B XML builder (pain.008.001.08 / .001.02 / .003.02), \
 pain.002 status report parser, camt.052/053/054 parsers, \
 ISO 11649 RF creditor references, EPC field validation and SEPA charset \
 transliteration. Output is XSD-validated in CI. \
-Zero I/O. No async. No f64 in monetary arithmetic.\
+Typed ISO 8601 dates. Zero I/O. No async. No f64 in monetary arithmetic.\
 """
 repository   = "https://github.com/hupe1980/sepa"
 license      = "MIT OR Apache-2.0"
@@ -32,12 +32,20 @@ default = []
 serde = ["dep:serde"]
 ## Enable `camt054::parse_simple_json` — parses bank CSV/JSON export format.
 json  = ["dep:serde_json"]
+## Convert between `IsoDate` / `IsoDateTime` and the `time` crate's types.
+time = ["dep:time"]
+## Convert between `IsoDate` / `IsoDateTime` and the `chrono` crate's types.
+chrono = ["dep:chrono"]
 
 [dependencies]
 thiserror  = { version = "2", default-features = false }
 quick-xml  = { version = "0.41", default-features = false }
 serde      = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+# Date interop only — neither crate is used inside the library's own logic, so
+# the calendar arithmetic stays dependency-free and identical in every build.
+time       = { version = "0.3", default-features = false, optional = true }
+chrono     = { version = "0.4", default-features = false, optional = true }
 
 # `serde_json` is used by the `serde` round-trip unit tests. Declaring it as a
 # dev-dependency keeps `--features serde` (without `json`) compiling — the tests

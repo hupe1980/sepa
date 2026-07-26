@@ -1,9 +1,9 @@
-//! IBAN validation — ISO 13616-1:2007 mod-97 algorithm.
+//! IBAN validation — ISO 13616-1:2007 checksum **and** national structure.
 //!
-//! Validates IBANs from any country following the ISO 13616 standard.
-//! Commonly used in SEPA payments (eurozone) and internationally.
+//! Validates IBANs from any country in the SWIFT IBAN Registry, and applies the
+//! mod-97 checksum to any other.
 //!
-//! ## Algorithm (ISO 13616-1 §5.3)
+//! ## Checksum (ISO 13616-1 §5.3)
 //!
 //! 1. Remove whitespace, convert to uppercase.
 //! 2. Check length: 15–34 characters.
@@ -12,16 +12,33 @@
 //! 5. Compute the resulting large integer modulo 97.
 //! 6. Valid if result == 1.
 //!
+//! ## Structure
+//!
+//! The checksum is necessary but not sufficient. It detects an altered
+//! character with probability 96/97 and never says *which* one — so an `O`
+//! typed for a `0` in a German account number gets through about 99% of the
+//! time it is the only error. The registry publishes each country's BBAN
+//! structure (`8!n10!n` for Germany, `4!a10!n` for the Netherlands), and
+//! [`validate_iban`] checks every character against it, naming the position
+//! that failed. See [`iban_bban_format`] and [`BbanCharClass`].
+//!
 //! ## Examples
 //!
 //! ```
-//! use sepa::iban::{validate_iban, IbanError};
+//! use sepa::iban::{validate_iban, BbanCharClass, IbanError};
 //!
 //! assert!(validate_iban("DE89 3704 0044 0532 0130 00").is_ok());
 //! assert!(validate_iban("NL91ABNA0417164300").is_ok());
 //!
 //! let err = validate_iban("DE89370400440532013001").unwrap_err();
 //! assert!(matches!(err, IbanError::InvalidChecksum { .. }));
+//!
+//! // A capital O typed for a zero — caught by the structure, not the checksum.
+//! let err = validate_iban("DE8937O400440532013000").unwrap_err();
+//! assert!(matches!(
+//!     err,
+//!     IbanError::InvalidBbanFormat { position: 7, expected: BbanCharClass::Digit, .. }
+//! ));
 //!
 //! // FromStr / parse
 //! let iban: sepa::Iban = "DE89370400440532013000".parse().unwrap();
@@ -183,110 +200,261 @@ pub enum IbanError {
         /// The actual length of the input.
         actual: usize,
     },
+
+    /// Characters 1–2 are not two letters, as ISO 13616 requires.
+    #[error("IBAN must start with a 2-letter country code, got {code:?}")]
+    InvalidCountryCode {
+        /// The two characters that were rejected.
+        code: String,
+    },
+
+    /// Characters 3–4 are not two digits, as ISO 13616 requires.
+    ///
+    /// Distinct from [`InvalidChecksum`](Self::InvalidChecksum): those digits
+    /// are present and well-formed but do not match, whereas here they are not
+    /// digits at all.
+    #[error("IBAN check digits must be 2 digits, got {value:?}")]
+    NonNumericCheckDigits {
+        /// The two characters that were rejected.
+        value: String,
+    },
+
+    /// A BBAN character does not match the country's registered structure.
+    ///
+    /// Mod-97 is a checksum, not a format check: it accepts a letter where the
+    /// registry requires a digit roughly 96 times in 97. This catches the rest —
+    /// the `O`-for-`0` and `l`-for-`1` transcription errors that survive it.
+    #[error(
+        "IBAN position {position} must be {expected} for country {country}, got {found:?} \
+         (registry structure {structure})"
+    )]
+    InvalidBbanFormat {
+        /// The two-letter country code.
+        country: String,
+        /// 1-based position of the offending character in the whole IBAN.
+        position: usize,
+        /// The character class the registry requires there.
+        expected: BbanCharClass,
+        /// The character that was found.
+        found: char,
+        /// The country's registered BBAN structure, as `n`/`a`/`c` symbols.
+        structure: &'static str,
+    },
 }
 
-// ── Country-length registry (ISO 13616-1) ────────────────────────────────────
+// ── Registry (ISO 13616 / SWIFT IBAN Registry) ───────────────────────────────
 
-/// Return the expected IBAN length for a given 2-letter country code,
-/// or `None` for countries not yet in the ISO 13616 registry.
+/// The character class an IBAN position admits, in ISO 13616 registry notation.
 ///
-/// Source: SWIFT IBAN Registry (updated periodically).
+/// The registry writes each country's BBAN as a sequence such as `4!a6!n8!n`:
+/// four letters, six digits, eight digits. These are the three classes it uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BbanCharClass {
+    /// `n` — an ASCII digit.
+    Digit,
+    /// `a` — an ASCII uppercase letter.
+    UpperAlpha,
+    /// `c` — an ASCII digit or uppercase letter.
+    Alphanumeric,
+}
+
+impl BbanCharClass {
+    /// The registry's one-letter symbol: `"n"`, `"a"` or `"c"`.
+    #[inline]
+    #[must_use]
+    pub const fn as_registry_symbol(self) -> &'static str {
+        match self {
+            Self::Digit => "n",
+            Self::UpperAlpha => "a",
+            Self::Alphanumeric => "c",
+        }
+    }
+
+    /// Whether `ch` belongs to this class.
+    ///
+    /// Input reaching this point is already uppercased, so lowercase letters
+    /// are not a case the classes have to admit.
+    #[inline]
+    #[must_use]
+    pub const fn admits(self, ch: char) -> bool {
+        match self {
+            Self::Digit => ch.is_ascii_digit(),
+            Self::UpperAlpha => ch.is_ascii_uppercase(),
+            Self::Alphanumeric => ch.is_ascii_digit() || ch.is_ascii_uppercase(),
+        }
+    }
+
+    const fn from_symbol(b: u8) -> Option<Self> {
+        match b {
+            b'n' => Some(Self::Digit),
+            b'a' => Some(Self::UpperAlpha),
+            b'c' => Some(Self::Alphanumeric),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for BbanCharClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Digit => "a digit",
+            Self::UpperAlpha => "an uppercase letter",
+            Self::Alphanumeric => "a digit or uppercase letter",
+        })
+    }
+}
+
+/// The registered BBAN structure for a country, one symbol per character.
+///
+/// Returns the country's ISO 13616 BBAN format expanded to one `n`/`a`/`c`
+/// symbol per position — `"nnnnnnnnnnnnnnnnnn"` for Germany's `8!n10!n`. The
+/// string's length is the BBAN length, so the full IBAN length is four more.
+/// `None` for a country outside the SWIFT IBAN Registry.
+///
+/// This is the crate's single source of registry truth: [`iban_country_length`]
+/// is derived from it, and [`validate_iban`] checks every BBAN character
+/// against it. Structure matters because mod-97 is a checksum, not a format
+/// check — it accepts a letter where the registry requires a digit roughly 96
+/// times in 97.
+///
+/// Source: SWIFT IBAN Registry release 101.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::iban::iban_bban_format;
+///
+/// assert_eq!(iban_bban_format("DE"), Some("nnnnnnnnnnnnnnnnnn")); // 8!n10!n
+/// assert_eq!(iban_bban_format("NL"), Some("aaaannnnnnnnnn"));     // 4!a10!n
+/// assert_eq!(iban_bban_format("XX"), None);
+/// ```
 #[must_use]
 #[allow(clippy::match_same_arms, reason = "a data table, not control flow")]
-pub fn iban_country_length(country: &str) -> Option<usize> {
-    // Sorted by country code for readability.
+#[allow(clippy::too_many_lines, reason = "89 registry entries, one per line")]
+pub fn iban_bban_format(country: &str) -> Option<&'static str> {
+    // Sorted by country code. Each comment carries the registry's own notation
+    // so an entry can be checked against the published table by eye.
     match country {
-        "AD" => Some(24),
-        "AE" => Some(23),
-        "AL" => Some(28),
-        "AT" => Some(20),
-        "AZ" => Some(28),
-        "BA" => Some(20),
-        "BE" => Some(16),
-        "BG" => Some(22),
-        "BH" => Some(22),
-        "BI" => Some(27),
-        "BR" => Some(29),
-        "BY" => Some(28),
-        "CH" => Some(21),
-        "CR" => Some(22),
-        "CY" => Some(28),
-        "CZ" => Some(24),
-        "DE" => Some(22),
-        "DJ" => Some(27),
-        "DK" => Some(18),
-        "DO" => Some(28),
-        "EE" => Some(20),
-        "EG" => Some(29),
-        "ES" => Some(24),
-        "FI" => Some(18),
-        "FK" => Some(18),
-        "FO" => Some(18),
-        "FR" => Some(27),
-        "GB" => Some(22),
-        "GE" => Some(22),
-        "GI" => Some(23),
-        "GL" => Some(18),
-        "GR" => Some(27),
-        "GT" => Some(28),
-        "HN" => Some(28),
-        "HR" => Some(21),
-        "HU" => Some(28),
-        "IE" => Some(22),
-        "IL" => Some(23),
-        "IQ" => Some(23),
-        "IS" => Some(26),
-        "IT" => Some(27),
-        "JO" => Some(30),
-        "KW" => Some(30),
-        "KZ" => Some(20),
-        "LB" => Some(28),
-        "LC" => Some(32),
-        "LI" => Some(21),
-        "LT" => Some(20),
-        "LU" => Some(20),
-        "LV" => Some(21),
-        "LY" => Some(25),
-        "MC" => Some(27),
-        "MD" => Some(24),
-        "ME" => Some(22),
-        "MK" => Some(19),
-        "MN" => Some(20),
-        "MR" => Some(27),
-        "MT" => Some(31),
-        "MU" => Some(30),
-        "NI" => Some(28),
-        "NL" => Some(18),
-        "NO" => Some(15),
-        "OM" => Some(23),
-        "PK" => Some(24),
-        "PL" => Some(28),
-        "PS" => Some(29),
-        "PT" => Some(25),
-        "QA" => Some(29),
-        "RO" => Some(24),
-        "RS" => Some(22),
-        "RU" => Some(33),
-        "SA" => Some(24),
-        "SC" => Some(31),
-        "SD" => Some(18),
-        "SE" => Some(24),
-        "SI" => Some(19),
-        "SK" => Some(24),
-        "SM" => Some(27),
-        "SO" => Some(23),
-        "ST" => Some(25),
-        "SV" => Some(28),
-        "TL" => Some(23),
-        "TN" => Some(24),
-        "TR" => Some(26),
-        "UA" => Some(29),
-        "VA" => Some(22),
-        "VG" => Some(24),
-        "XK" => Some(20),
-        "YE" => Some(30),
+        "AD" => Some("nnnnnnnncccccccccccc"), // 4!n4!n12!c           Andorra
+        "AE" => Some("nnnnnnnnnnnnnnnnnnn"),  // 3!n16!n              United Arab Emirates (The)
+        "AL" => Some("nnnnnnnncccccccccccccccc"), // 8!n16!c              Albania
+        "AT" => Some("nnnnnnnnnnnnnnnn"),     // 5!n11!n              Austria
+        "AZ" => Some("aaaacccccccccccccccccccc"), // 4!a20!c              Azerbaijan
+        "BA" => Some("nnnnnnnnnnnnnnnn"),     // 3!n3!n8!n2!n         Bosnia and Herzegovina
+        "BE" => Some("nnnnnnnnnnnn"),         // 3!n7!n2!n            Belgium
+        "BG" => Some("aaaannnnnncccccccc"),   // 4!a4!n2!n8!c         Bulgaria
+        "BH" => Some("aaaacccccccccccccc"),   // 4!a14!c              Bahrain
+        "BI" => Some("nnnnnnnnnnnnnnnnnnnnnnn"), // 5!n5!n11!n2!n        Burundi
+        "BR" => Some("nnnnnnnnnnnnnnnnnnnnnnnac"), // 8!n5!n10!n1!a1!c     Brazil
+        "BY" => Some("ccccnnnncccccccccccccccc"), // 4!c4!n16!c           Belarus
+        "CH" => Some("nnnnncccccccccccc"),    // 5!n12!c              Switzerland
+        "CR" => Some("nnnnnnnnnnnnnnnnnn"),   // 4!n14!n              Costa Rica
+        "CY" => Some("nnnnnnnncccccccccccccccc"), // 3!n5!n16!c           Cyprus
+        "CZ" => Some("nnnnnnnnnnnnnnnnnnnn"), // 4!n16!n              Czechia
+        "DE" => Some("nnnnnnnnnnnnnnnnnn"),   // 8!n10!n              Germany
+        "DJ" => Some("nnnnnnnnnnnnnnnnnnnnnnn"), // 5!n5!n11!n2!n        Djibouti
+        "DK" => Some("nnnnnnnnnnnnnn"),       // 4!n9!n1!n            Denmark
+        "DO" => Some("ccccnnnnnnnnnnnnnnnnnnnn"), // 4!c20!n              Dominican Republic
+        "EE" => Some("nnnnnnnnnnnnnnnn"),     // 2!n14!n              Estonia
+        "EG" => Some("nnnnnnnnnnnnnnnnnnnnnnnnn"), // 4!n4!n17!n           Egypt
+        "ES" => Some("nnnnnnnnnnnnnnnnnnnn"), // 4!n4!n1!n1!n10!n     Spain
+        "FI" => Some("nnnnnnnnnnnnnn"),       // 3!n11!n              Finland
+        "FK" => Some("aannnnnnnnnnnn"),       // 2!a12!n              Falkland Islands (Malvinas)
+        "FO" => Some("nnnnnnnnnnnnnn"),       // 4!n9!n1!n            Faroe Islands
+        "FR" => Some("nnnnnnnnnncccccccccccnn"), // 5!n5!n11!c2!n        France
+        "GB" => Some("aaaannnnnnnnnnnnnn"),   // 4!a6!n8!n            United Kingdom
+        "GE" => Some("aannnnnnnnnnnnnnnn"),   // 2!a16!n              Georgia
+        "GI" => Some("aaaaccccccccccccccc"),  // 4!a15!c              Gibraltar
+        "GL" => Some("nnnnnnnnnnnnnn"),       // 4!n9!n1!n            Greenland
+        "GR" => Some("nnnnnnncccccccccccccccc"), // 3!n4!n16!c           Greece
+        "GT" => Some("cccccccccccccccccccccccc"), // 4!c20!c              Guatemala
+        "HN" => Some("aaaannnnnnnnnnnnnnnnnnnn"), // 4!a20!n              Honduras
+        "HR" => Some("nnnnnnnnnnnnnnnnn"),    // 7!n10!n              Croatia
+        "HU" => Some("nnnnnnnnnnnnnnnnnnnnnnnn"), // 3!n4!n1!n15!n1!n     Hungary
+        "IE" => Some("aaaannnnnnnnnnnnnn"),   // 4!a6!n8!n            Ireland
+        "IL" => Some("nnnnnnnnnnnnnnnnnnn"),  // 3!n3!n13!n           Israel
+        "IQ" => Some("aaaannnnnnnnnnnnnnn"),  // 4!a3!n12!n           Iraq
+        "IS" => Some("nnnnnnnnnnnnnnnnnnnnnn"), // 4!n2!n6!n10!n        Iceland
+        "IT" => Some("annnnnnnnnncccccccccccc"), // 1!a5!n5!n12!c        Italy
+        "JO" => Some("aaaannnncccccccccccccccccc"), // 4!a4!n18!c           Jordan
+        "KW" => Some("aaaacccccccccccccccccccccc"), // 4!a22!c              Kuwait
+        "KZ" => Some("nnnccccccccccccc"),     // 3!n13!c              Kazakhstan
+        "LB" => Some("nnnncccccccccccccccccccc"), // 4!n20!c              Lebanon
+        "LC" => Some("aaaacccccccccccccccccccccccc"), // 4!a24!c              Saint Lucia
+        "LI" => Some("nnnnncccccccccccc"),    // 5!n12!c              Liechtenstein
+        "LT" => Some("nnnnnnnnnnnnnnnn"),     // 5!n11!n              Lithuania
+        "LU" => Some("nnnccccccccccccc"),     // 3!n13!c              Luxembourg
+        "LV" => Some("aaaaccccccccccccc"),    // 4!a13!c              Latvia
+        "LY" => Some("nnnnnnnnnnnnnnnnnnnnn"), // 3!n3!n15!n           Libya
+        "MC" => Some("nnnnnnnnnncccccccccccnn"), // 5!n5!n11!c2!n        Monaco
+        "MD" => Some("cccccccccccccccccccc"), // 2!c18!c              Moldova, Republic of
+        "ME" => Some("nnnnnnnnnnnnnnnnnn"),   // 3!n13!n2!n           Montenegro
+        "MK" => Some("nnnccccccccccnn"),      // 3!n10!c2!n           North Macedonia
+        "MN" => Some("nnnnnnnnnnnnnnnn"),     // 4!n12!n              Mongolia
+        "MR" => Some("nnnnnnnnnnnnnnnnnnnnnnn"), // 5!n5!n11!n2!n        Mauritania
+        "MT" => Some("aaaannnnncccccccccccccccccc"), // 4!a5!n18!c           Malta
+        "MU" => Some("aaaannnnnnnnnnnnnnnnnnnaaa"), // 4!a2!n2!n12!n3!n3!a  Mauritius
+        "NI" => Some("aaaannnnnnnnnnnnnnnnnnnn"), // 4!a20!n              Nicaragua
+        "NL" => Some("aaaannnnnnnnnn"),       // 4!a10!n              Netherlands (The)
+        "NO" => Some("nnnnnnnnnnn"),          // 4!n6!n1!n            Norway
+        "OM" => Some("nnncccccccccccccccc"),  // 3!n16!c              Oman
+        "PK" => Some("aaaacccccccccccccccc"), // 4!a16!c              Pakistan
+        "PL" => Some("nnnnnnnnnnnnnnnnnnnnnnnn"), // 8!n16!n              Poland
+        "PS" => Some("aaaaccccccccccccccccccccc"), // 4!a21!c              Palestine, State of
+        "PT" => Some("nnnnnnnnnnnnnnnnnnnnn"), // 4!n4!n11!n2!n        Portugal
+        "QA" => Some("aaaaccccccccccccccccccccc"), // 4!a21!c              Qatar
+        "RO" => Some("aaaacccccccccccccccc"), // 4!a16!c              Romania
+        "RS" => Some("nnnnnnnnnnnnnnnnnn"),   // 3!n13!n2!n           Serbia
+        "RU" => Some("nnnnnnnnnnnnnnccccccccccccccc"), // 9!n5!n15!c           Russian Federation
+        "SA" => Some("nncccccccccccccccccc"), // 2!n18!c              Saudi Arabia
+        "SC" => Some("aaaannnnnnnnnnnnnnnnnnnnaaa"), // 4!a2!n2!n16!n3!a     Seychelles
+        "SD" => Some("nnnnnnnnnnnnnn"),       // 2!n12!n              Sudan
+        "SE" => Some("nnnnnnnnnnnnnnnnnnnn"), // 3!n16!n1!n           Sweden
+        "SI" => Some("nnnnnnnnnnnnnnn"),      // 5!n8!n2!n            Slovenia
+        "SK" => Some("nnnnnnnnnnnnnnnnnnnn"), // 4!n6!n10!n           Slovakia
+        "SM" => Some("annnnnnnnnncccccccccccc"), // 1!a5!n5!n12!c        San Marino
+        "SO" => Some("nnnnnnnnnnnnnnnnnnn"),  // 4!n3!n12!n           Somalia
+        "ST" => Some("nnnnnnnnnnnnnnnnnnnnn"), // 4!n4!n11!n2!n        Sao Tome and Principe
+        "SV" => Some("aaaannnnnnnnnnnnnnnnnnnn"), // 4!a20!n              El Salvador
+        "TL" => Some("nnnnnnnnnnnnnnnnnnn"),  // 3!n14!n2!n           Timor-Leste
+        "TN" => Some("nnnnnnnnnnnnnnnnnnnn"), // 2!n3!n13!n2!n        Tunisia
+        "TR" => Some("nnnnnncccccccccccccccc"), // 5!n1!n16!c           Turkiye
+        "UA" => Some("nnnnnnccccccccccccccccccc"), // 6!n19!c              Ukraine
+        "VA" => Some("nnnnnnnnnnnnnnnnnn"),   // 3!n15!n              Holy See
+        "VG" => Some("aaaannnnnnnnnnnnnnnn"), // 4!a16!n              Virgin Islands (British)
+        "XK" => Some("nnnnnnnnnnnnnnnn"),     // 4!n10!n2!n           Kosovo
+        "YE" => Some("aaaannnncccccccccccccccccc"), // 4!a4!n18!c           Yemen
         _ => None,
     }
+}
+
+/// The class admitted at 0-based `index` of `country`'s BBAN.
+fn bban_class_at(country: &str, index: usize) -> Option<BbanCharClass> {
+    let symbol = *iban_bban_format(country)?.as_bytes().get(index)?;
+    BbanCharClass::from_symbol(symbol)
+}
+
+/// Return the expected IBAN length for a given 2-letter country code,
+/// or `None` for countries not in the ISO 13616 registry.
+///
+/// Derived from [`iban_bban_format`], so the length and the structure can never
+/// disagree.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::iban::iban_country_length;
+///
+/// assert_eq!(iban_country_length("DE"), Some(22));
+/// assert_eq!(iban_country_length("NO"), Some(15));
+/// assert_eq!(iban_country_length("XX"), None);
+/// ```
+#[inline]
+#[must_use]
+pub fn iban_country_length(country: &str) -> Option<usize> {
+    // 4 = the country code and check digits that precede the BBAN.
+    Some(4 + iban_bban_format(country)?.len())
 }
 
 /// Country codes in the SEPA scheme area (42 entries).
@@ -373,13 +541,21 @@ impl Iban {
 /// Accepts IBANs with or without spaces.  Input is uppercased before validation.
 /// Returns the normalised [`Iban`] on success.
 ///
-/// Validation order:
+/// Validation order — earliest and most specific failure wins:
 /// 1. Strip whitespace, uppercase.
 /// 2. Check overall length range (15–34).
 /// 3. Check all characters are ASCII alphanumeric.
-/// 4. Check country-specific length against the ISO 13616 registry
-///    (only for known country codes; unknown countries skip this step).
-/// 5. Compute mod-97 checksum — must equal 1.
+/// 4. Check the ISO 13616 header: 2 letters, then 2 digits.
+/// 5. Check country-specific length against the SWIFT IBAN Registry
+///    (only for registered country codes; others skip steps 5 and 6).
+/// 6. Check every BBAN character against the country's registered structure.
+/// 7. Compute mod-97 checksum — must equal 1.
+///
+/// Step 6 is not redundant with step 7. Mod-97 is a checksum: it detects an
+/// altered character with probability 96/97, and says nothing about *which*
+/// one. The registry structure catches the specific transcription errors that
+/// slip through — an `O` typed for a `0`, a letter in a numeric bank code —
+/// and names the position.
 ///
 /// # Errors
 ///
@@ -387,7 +563,10 @@ impl Iban {
 /// |---|---|
 /// | [`IbanError::InvalidLength`] | Length outside 15–34 |
 /// | [`IbanError::InvalidCharacter`] | Non-alphanumeric character |
-/// | [`IbanError::WrongLengthForCountry`] | Length wrong for known country |
+/// | [`IbanError::InvalidCountryCode`] | Characters 1–2 are not letters |
+/// | [`IbanError::NonNumericCheckDigits`] | Characters 3–4 are not digits |
+/// | [`IbanError::WrongLengthForCountry`] | Length wrong for a registered country |
+/// | [`IbanError::InvalidBbanFormat`] | BBAN character violates the registered structure |
 /// | [`IbanError::InvalidChecksum`] | Mod-97 remainder ≠ 1 |
 ///
 /// # Examples
@@ -405,6 +584,10 @@ impl Iban {
 ///     validate_iban("DE891234567890123456"),
 ///     Err(IbanError::WrongLengthForCountry { .. })
 /// ));
+///
+/// // A capital O typed for a zero: the German BBAN is all digits.
+/// let err = validate_iban("DE8937O400440532013000").unwrap_err();
+/// assert!(matches!(err, IbanError::InvalidBbanFormat { position: 7, .. }));
 /// ```
 #[must_use = "ignoring a validated IBAN loses the result"]
 pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
@@ -414,7 +597,9 @@ pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
         .map(|c| c.to_ascii_uppercase())
         .collect();
 
-    let len = normalised.len();
+    // Counted in characters: a non-ASCII character is rejected below, but the
+    // length reported for one must not be its UTF-8 byte count.
+    let len = normalised.chars().count();
     if !(15..=34).contains(&len) {
         return Err(IbanError::InvalidLength { len });
     }
@@ -424,16 +609,47 @@ pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
             return Err(IbanError::InvalidCharacter { ch: c });
         }
     }
+    // Every character is now ASCII, so byte indices are character indices.
 
-    // Country-specific length check (step 4)
+    // ISO 13616 fixes the header: `CCkk`. Mod-97 alone would not catch a
+    // digit in the country code — the expansion happily consumes one.
     let country = &normalised[..2];
-    if let Some(expected) = iban_country_length(country) {
-        if len != expected {
+    if !country.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(IbanError::InvalidCountryCode {
+            code: country.to_owned(),
+        });
+    }
+    let check_digits = &normalised[2..4];
+    if !check_digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(IbanError::NonNumericCheckDigits {
+            value: check_digits.to_owned(),
+        });
+    }
+
+    // Registry checks. A country outside the registry has no published
+    // structure, so it gets the checksum and nothing more.
+    if let Some(structure) = iban_bban_format(country) {
+        let expected_len = 4 + structure.len();
+        if len != expected_len {
             return Err(IbanError::WrongLengthForCountry {
                 country: country.to_owned(),
-                expected,
+                expected: expected_len,
                 actual: len,
             });
+        }
+        for (i, ch) in normalised[4..].chars().enumerate() {
+            let Some(class) = bban_class_at(country, i) else {
+                continue;
+            };
+            if !class.admits(ch) {
+                return Err(IbanError::InvalidBbanFormat {
+                    country: country.to_owned(),
+                    position: i + 5, // 1-based, past the 4-character header
+                    expected: class,
+                    found: ch,
+                    structure,
+                });
+            }
         }
     }
 
@@ -566,6 +782,194 @@ mod tests {
         // from the table, so every Latvian IBAN failed validation.
         assert_eq!(iban_country_length("LV"), Some(21));
         assert!(validate_iban("LV80BANK0000435195001").is_ok());
+    }
+
+    /// Real IBAN examples published in the SWIFT IBAN Registry, one per
+    /// country. Every one must pass length, structure and checksum — this is
+    /// the table's defence against a transcription slip in 89 hand-entered
+    /// registry rows.
+    const REGISTRY_EXAMPLES: [&str; 78] = [
+        "AD1200012030200359100100",
+        "AE070331234567890123456",
+        "AL47212110090000000235698741",
+        "AT611904300234573201",
+        "AZ21NABZ00000000137010001944",
+        "BA391290079401028494",
+        "BE68539007547034",
+        "BG80BNBG96611020345678",
+        "BH67BMAG00001299123456",
+        "BR9700360305000010009795493P1",
+        "BY13NBRB3600900000002Z00AB00",
+        "CH9300762011623852957",
+        "CR05015202001026284066",
+        "CY17002001280000001200527600",
+        "CZ6508000000192000145399",
+        "DE89370400440532013000",
+        "DJ2110002010010409943020008",
+        "DK5000400440116243",
+        "DO28BAGR00000001212453611324",
+        "EE382200221020145685",
+        "EG380019000500000000263180002",
+        "ES9121000418450200051332",
+        "FI2112345600000785",
+        "FO2000400440116243",
+        "FR1420041010050500013M02606",
+        "GB29NWBK60161331926819",
+        "GE29NB0000000101904917",
+        "GI75NWBK000000007099453",
+        "GL2000400440116243",
+        "GR1601101250000000012300695",
+        "GT82TRAJ01020000001210029690",
+        "HN54PISA00000000000000123124",
+        "HR1210010051863000160",
+        "HU42117730161111101800000000",
+        "IE29AIBK93115212345678",
+        "IL620108000000099999999",
+        "IQ98NBIQ850123456789012",
+        "IS140159260076545510730339",
+        "IT60X0542811101000000123456",
+        "JO94CBJO0010000000000131000302",
+        "KW81CBKU0000000000001234560101",
+        "KZ86125KZT5004100100",
+        "LB62099900000001001901229114",
+        "LC55HEMM000100010012001200023015",
+        "LI21088100002324013AA",
+        "LT121000011101001000",
+        "LU280019400644750000",
+        "LV80BANK0000435195001",
+        "MC5811222000010123456789030",
+        "MD24AG000225100013104168",
+        "ME25505000012345678951",
+        "MK07250120000058984",
+        "MR1300020001010000123456753",
+        "MT84MALT011000012345MTLCAST001S",
+        "MU17BOMM0101101030300200000MUR",
+        "NL91ABNA0417164300",
+        "NO9386011117947",
+        "PK36SCBL0000001123456702",
+        "PL61109010140000071219812874",
+        "PS92PALS000000000400123456702",
+        "PT50000201231234567890154",
+        "QA58DOHB00001234567890ABCDEFG",
+        "RO49AAAA1B31007593840000",
+        "RS35260005601001611379",
+        "SA0380000000608010167519",
+        "SC18SSCB11010000000000001497USD",
+        "SE4550000000058398257466",
+        "SI56191000000123438",
+        "SK3112000000198742637541",
+        "SM86U0322509800000000270100",
+        "ST68000100010051845310112",
+        "SV62CENR00000000000000700025",
+        "TL380080012345678910157",
+        "TN5910006035183598478831",
+        "TR330006100519786457841326",
+        "UA213996220000026007233566001",
+        "VG96VPVG0000012345678901",
+        "XK051212012345678906",
+    ];
+
+    #[test]
+    fn every_published_registry_example_validates() {
+        for example in REGISTRY_EXAMPLES {
+            assert!(
+                validate_iban(example).is_ok(),
+                "registry example {example} must validate: {:?}",
+                validate_iban(example)
+            );
+        }
+    }
+
+    #[test]
+    fn registry_structures_are_well_formed() {
+        for a in b'A'..=b'Z' {
+            for b in b'A'..=b'Z' {
+                let cc = String::from_utf8(vec![a, b]).unwrap();
+                let Some(structure) = iban_bban_format(&cc) else {
+                    continue;
+                };
+                assert!(
+                    structure.bytes().all(|s| matches!(s, b'n' | b'a' | b'c')),
+                    "{cc} structure {structure:?} has an unknown symbol"
+                );
+                // The registry's own bound: 15–34 for the whole IBAN.
+                let len = 4 + structure.len();
+                assert!((15..=34).contains(&len), "{cc} length {len} is impossible");
+                assert_eq!(iban_country_length(&cc), Some(len));
+            }
+        }
+    }
+
+    #[test]
+    fn a_letter_typed_for_a_digit_is_caught_and_located() {
+        // The classic transcription error mod-97 lets through 96 times in 97:
+        // a capital O for a zero. The German BBAN is 18 digits.
+        let err = validate_iban("DE8937O400440532013000").unwrap_err();
+        assert_eq!(
+            err,
+            IbanError::InvalidBbanFormat {
+                country: "DE".to_owned(),
+                position: 7,
+                expected: BbanCharClass::Digit,
+                found: 'O',
+                structure: "nnnnnnnnnnnnnnnnnn",
+            }
+        );
+        // And the converse: a digit where the registry requires a letter.
+        // NL is 4!a10!n, so position 5 must be a letter.
+        assert!(matches!(
+            validate_iban("NL914BNA0417164300"),
+            Err(IbanError::InvalidBbanFormat {
+                position: 5,
+                expected: BbanCharClass::UpperAlpha,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_iso_13616_header_is_checked_before_the_checksum() {
+        // Mod-97 expands letters happily, so neither of these is caught by the
+        // checksum — the country code would simply not be a country code.
+        assert!(matches!(
+            validate_iban("1289370400440532013000"),
+            Err(IbanError::InvalidCountryCode { .. })
+        ));
+        assert!(matches!(
+            validate_iban("DEX9370400440532013000"),
+            Err(IbanError::NonNumericCheckDigits { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unregistered_country_gets_the_checksum_and_nothing_more() {
+        // No published structure means nothing to check it against; the mod-97
+        // result still decides.
+        assert_eq!(iban_bban_format("QQ"), None);
+        assert!(matches!(
+            validate_iban("QQ00ABC123"),
+            Err(IbanError::InvalidLength { .. })
+        ));
+        let unregistered = validate_iban("XX89370400440532013000");
+        assert!(!matches!(
+            unregistered,
+            Err(IbanError::WrongLengthForCountry { .. } | IbanError::InvalidBbanFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn char_classes_admit_what_the_registry_says() {
+        assert!(BbanCharClass::Digit.admits('7'));
+        assert!(!BbanCharClass::Digit.admits('A'));
+        assert!(BbanCharClass::UpperAlpha.admits('A'));
+        assert!(!BbanCharClass::UpperAlpha.admits('7'));
+        // Input is uppercased before it reaches the check.
+        assert!(!BbanCharClass::UpperAlpha.admits('a'));
+        assert!(BbanCharClass::Alphanumeric.admits('A'));
+        assert!(BbanCharClass::Alphanumeric.admits('7'));
+        assert!(!BbanCharClass::Alphanumeric.admits('-'));
+        assert_eq!(BbanCharClass::Digit.as_registry_symbol(), "n");
+        assert_eq!(BbanCharClass::UpperAlpha.to_string(), "an uppercase letter");
     }
 
     #[test]

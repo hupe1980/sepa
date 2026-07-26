@@ -204,7 +204,9 @@ pub fn validate_creditor_id(raw: &str) -> Result<CreditorId, CreditorIdError> {
         .map(|c| c.to_ascii_uppercase())
         .collect();
 
-    let len = normalised.len();
+    // Counted in characters: a non-ASCII character is rejected just below, but
+    // the length reported for one must not be its UTF-8 byte count.
+    let len = normalised.chars().count();
     if !(8..=35).contains(&len) {
         return Err(CreditorIdError::InvalidLength { len });
     }

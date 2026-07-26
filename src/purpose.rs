@@ -125,12 +125,19 @@ macro_rules! code_enum {
             ///
             /// # Errors
             ///
-            /// Returns [`ValidationError::InvalidCharacter`] or
+            /// Returns [`ValidationError::Empty`],
+            /// [`ValidationError::InvalidCharacter`] or
             /// [`ValidationError::TooLong`] for a malformed `Other` code.
             pub fn validate(&self, field: &'static str) -> Result<(), ValidationError> {
                 let code = self.as_code();
                 match check_code(code) {
                     Ok(_) => Ok(()),
+                    // `check_code` folds "too short" and "too long" into one
+                    // variant; an empty code is not a length overrun, and
+                    // saying so would read as nonsense in an operator's log.
+                    Err(PurposeCodeError::InvalidLength { .. }) if code.trim().is_empty() => {
+                        Err(ValidationError::Empty { field })
+                    }
                     Err(PurposeCodeError::InvalidLength { .. }) => {
                         Err(ValidationError::TooLong {
                             field,

@@ -6,9 +6,15 @@ generates. They are **test fixtures only** — nothing in `src/` reads them.
 | File | Used for |
 |---|---|
 | `pain.001.001.09.xsd` | SCT + SCT Instant (current default) |
+| `pain.001.001.03.xsd` | SCT, EPC version until Nov 2023 |
 | `pain.001.003.03.xsd` | SCT, legacy DK V2.7 |
 | `pain.008.001.08.xsd` | SDD CORE + B2B (current default) |
+| `pain.008.001.02.xsd` | SDD, EPC version until Nov 2023 |
 | `pain.008.003.02.xsd` | SDD, legacy DK V2.7 |
+
+The file name is derived from the schema variant's `message_id()`, so adding a
+variant to `CreditTransferSchema::ALL` / `DirectDebitSchema::ALL` without adding
+its XSD here makes the validation tests skip loudly rather than pass silently.
 
 ## Why they are vendored
 
@@ -45,6 +51,18 @@ If you ever replace these files, verify that the choice types
   — the same ISO 2019 maintenance release batch as `pain.001.001.09.xsd`.
 - `pain.001.001.09.xsd` — from
   [fortesp/xsd2xml](https://github.com/fortesp/xsd2xml/blob/master/tests/resources/pain.001.001.09.xsd).
+- `pain.001.001.03.xsd` — SHA-256
+  `ae2bbba02a6be0119a26f4afcb65ced067453cb1b81d38b26bcc569f19eca93e`.
+- `pain.008.001.02.xsd` — SHA-256
+  `09b13e91fcde87f3153a4a417c866008fbc3d8a91706c0b24ff2bf4a18b56429`.
+
+  Both from [sepa.js](https://github.com/kewisch/sepa.js/tree/main/schema) and
+  corroborated against
+  [python-sepaxml](https://github.com/raphaelm/python-sepaxml/tree/master/sepaxml/schemas):
+  identical after CRLF→LF and comment normalisation. Both carry the generator
+  stamp `SWIFTStandards Workstation (build:R6.1.0.2) on 2009 Jan 08`, and their
+  `ServiceLevel8Choice` / `LocalInstrument2Choice` / `AccountIdentification4Choice`
+  really are `xs:choice` — see the warning above.
 - `pain.001.003.03.xsd`, `pain.008.003.02.xsd` — from
   [willuhn/hbci4java](https://github.com/willuhn/hbci4java), the German DK
   schemas per DFÜ-Abkommen Anlage 3 V2.7.

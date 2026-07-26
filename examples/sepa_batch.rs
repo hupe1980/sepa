@@ -6,7 +6,9 @@
 //!   in one file — the reason payment groups exist
 //! - A pain.001 credit transfer batch
 //! - Structured ISO 11649 references and ultimate parties
+//! - Typed `IsoDate` values, so no date is ever hand-formatted
 //! - Integer-safe money formatting — no f64
+//! - Build errors that name the group and transaction that failed
 
 // An example reads better with `expect` than with error plumbing on every line.
 #![allow(
@@ -17,12 +19,12 @@
 )]
 
 use sepa::{
-    CreditTransferEntry, CreditTransferGroup, DirectDebitEntry, DirectDebitGroup, Pain001Builder,
-    Pain008Builder, Party, Purpose, RfReference, SequenceType, ValidationError, validate_bic,
+    CreditTransferEntry, CreditTransferGroup, DirectDebitEntry, DirectDebitGroup, IsoDate,
+    Pain001Builder, Pain008Builder, Party, Purpose, RfReference, SequenceType, validate_bic,
     validate_creditor_id, validate_iban,
 };
 
-fn main() -> Result<(), ValidationError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Validate identifiers ──────────────────────────────────────────────────
 
     let creditor_iban =
@@ -46,35 +48,31 @@ fn main() -> Result<(), ValidationError> {
     let pain008_xml = Pain008Builder::new("Stadtwerke Muster GmbH")
         .msg_id("DD-2026-07-001")
         .add_group(
-            DirectDebitGroup::new(
-                "Stadtwerke Muster GmbH",
-                &creditor_iban,
-                creditor_id.clone(),
-            )
-            .sequence_type(SequenceType::Frst)
-            .collection_date("2026-07-20")
-            .creditor_bic(creditor_bic.clone())
-            .add_entry(
-                DirectDebitEntry::new(
-                    "MND-00042",
-                    "2026-06-01",
-                    "Max Mustermann",
-                    debtor_a,
-                    8_500, // 85.00 EUR — integer cents, no f64
-                    "ABSCHLAG-2026-07-A",
-                )
-                .with_description("Abschlag Juli 2026"),
-            ),
+            DirectDebitGroup::new("Stadtwerke Muster GmbH", &creditor_iban, &creditor_id)
+                .sequence_type(SequenceType::Frst)
+                .collection_date(IsoDate::new(2026, 7, 20)?)
+                .creditor_bic(creditor_bic.clone())
+                .add_entry(
+                    DirectDebitEntry::new(
+                        "MND-00042",
+                        "2026-06-01".parse()?, // rejected here if malformed, not by the bank
+                        "Max Mustermann",
+                        debtor_a,
+                        8_500, // 85.00 EUR — integer cents, no f64
+                        "ABSCHLAG-2026-07-A",
+                    )
+                    .with_description("Abschlag Juli 2026"),
+                ),
         )
         .add_group(
-            DirectDebitGroup::new("Stadtwerke Muster GmbH", &creditor_iban, creditor_id)
+            DirectDebitGroup::new("Stadtwerke Muster GmbH", &creditor_iban, &creditor_id)
                 .sequence_type(SequenceType::Rcur)
-                .collection_date("2026-07-18")
+                .collection_date(IsoDate::new(2026, 7, 18)?)
                 .creditor_bic(creditor_bic)
                 .add_entry(
                     DirectDebitEntry::new(
                         "MND-00099",
-                        "2023-11-15",
+                        "2023-11-15".parse()?,
                         "Erika Mustermann",
                         debtor_b,
                         12_300, // 123.00 EUR
@@ -107,7 +105,7 @@ fn main() -> Result<(), ValidationError> {
         .msg_id("CT-2026-07-001")
         .add_group(
             CreditTransferGroup::new("Stadtwerke Muster GmbH", &creditor_iban)
-                .execution_date("2026-07-22")
+                .execution_date(IsoDate::new(2026, 7, 22)?)
                 .add_entry(
                     CreditTransferEntry::new(
                         "Franz Huber",
@@ -134,7 +132,7 @@ fn main() -> Result<(), ValidationError> {
         .msg_id("CT-UMLAUT")
         .add_group(
             CreditTransferGroup::new("Müller & Söhne GmbH", &creditor_iban)
-                .execution_date("2026-07-22")
+                .execution_date(IsoDate::new(2026, 7, 22)?)
                 .add_entry(CreditTransferEntry::new(
                     "Jörg Groß",
                     creditor_iban.clone(),
@@ -152,9 +150,43 @@ fn main() -> Result<(), ValidationError> {
         .build()
         .expect_err("an empty batch must be rejected");
 
+    // A field-level failure names the group and transaction it came from, so a
+    // rejected run points at the row to fix rather than at the whole file.
+    let located = Pain008Builder::new("Stadtwerke Muster GmbH")
+        .msg_id("DD-BAD")
+        .add_group(
+            DirectDebitGroup::new("Stadtwerke Muster GmbH", &creditor_iban, &creditor_id)
+                .collection_date(IsoDate::new(2026, 7, 20)?)
+                .add_entry(DirectDebitEntry::new(
+                    "MND-1",
+                    "2024-01-01".parse()?,
+                    "Erste Kundin",
+                    creditor_iban.clone(),
+                    100,
+                    "E2E-1",
+                ))
+                .add_entry(DirectDebitEntry::new(
+                    "MND-2",
+                    "2024-01-01".parse()?,
+                    "Zweiter Kunde",
+                    creditor_iban.clone(),
+                    0, // a zero amount is outside the SEPA range
+                    "E2E-2",
+                )),
+        )
+        .build()
+        .expect_err("a zero amount must be rejected");
+
     println!("\n── Validation ──");
     println!("Transliterated: Müller & Söhne GmbH -> Mueller + Soehne GmbH");
     println!("Empty batch:    {rejected}");
+    println!("Located:        {located}");
+    println!("  group:        {:?}", located.location.group);
+    println!("  transaction:  {:?}", located.location.transaction);
+
+    // A malformed date cannot reach a batch at all.
+    let bad_date = "2026-02-30".parse::<IsoDate>().expect_err("30 February");
+    println!("Bad date:       {bad_date}");
 
     Ok(())
 }

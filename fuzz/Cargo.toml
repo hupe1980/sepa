@@ -26,9 +26,11 @@ test = false
 doc  = false
 bench = false
 
+# Named `build_batch`, not `build`: cargo forbids a binary target called
+# `build`, and the whole fuzz crate fails to parse its manifest if one exists.
 [[bin]]
-name = "build"
-path = "fuzz_targets/build.rs"
+name = "build_batch"
+path = "fuzz_targets/build_batch.rs"
 test = false
 doc  = false
 bench = false

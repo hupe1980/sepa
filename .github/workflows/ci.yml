@@ -103,7 +103,10 @@ jobs:
           - ""
           - "--features serde"
           - "--features json"
+          - "--features time"
+          - "--features chrono"
           - "--features serde,json"
+          - "--features time,chrono"
           - "--all-features"
     steps:
       - uses: actions/checkout@v4

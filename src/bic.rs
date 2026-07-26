@@ -1,7 +1,9 @@
 //! BIC (Bank Identifier Code) validation — ISO 9362.
 //!
 //! A BIC uniquely identifies a financial institution for SEPA payments.
-//! Format: `[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?`
+//! Format: `[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?`, with the location-code
+//! restrictions ISO 9362 adds on top of it, and a country code that has to be a
+//! real country — the bare pattern accepts `COBAZZFF`, which addresses nothing.
 //!
 //! ## Examples
 //!
@@ -209,11 +211,78 @@ pub enum BicError {
         pos: usize,
     },
 
+    /// Characters 5–6 are letters, but not a country code any BIC may carry.
+    ///
+    /// The pattern check alone accepts `COBAZZFF`; there is no country `ZZ`, so
+    /// no institution can be addressed by it.
+    #[error("BIC country code {code:?} is not an ISO 3166-1 alpha-2 country")]
+    UnknownCountryCode {
+        /// The two-letter code that was rejected.
+        code: String,
+    },
+
     /// The input is the EPC `"NOTPROVIDED"` placeholder, not a real BIC.
     ///
     /// Use `Option<Bic>` with `None` when the BIC is unknown.
     #[error("\"NOTPROVIDED\" is an EPC placeholder, not a valid BIC — use Option<Bic> with None")]
     Placeholder,
+}
+
+// ── Country codes ─────────────────────────────────────────────────────────────
+
+/// Every country code a BIC may carry: the 249 officially assigned
+/// ISO 3166-1 alpha-2 codes, plus `XK`.
+///
+/// `XK` is not an ISO 3166 code — it is user-assigned — but SWIFT issues BICs
+/// under it for Kosovo, and it is a registered IBAN country code, so rejecting
+/// it would make a Kosovan BIC unusable against a Kosovan IBAN.
+///
+/// Sorted, so the lookup is a binary search.
+static BIC_COUNTRY_CODES: [&[u8; 2]; 250] = [
+    b"AD", b"AE", b"AF", b"AG", b"AI", b"AL", b"AM", b"AO", b"AQ", b"AR", b"AS", b"AT", b"AU",
+    b"AW", b"AX", b"AZ", b"BA", b"BB", b"BD", b"BE", b"BF", b"BG", b"BH", b"BI", b"BJ", b"BL",
+    b"BM", b"BN", b"BO", b"BQ", b"BR", b"BS", b"BT", b"BV", b"BW", b"BY", b"BZ", b"CA", b"CC",
+    b"CD", b"CF", b"CG", b"CH", b"CI", b"CK", b"CL", b"CM", b"CN", b"CO", b"CR", b"CU", b"CV",
+    b"CW", b"CX", b"CY", b"CZ", b"DE", b"DJ", b"DK", b"DM", b"DO", b"DZ", b"EC", b"EE", b"EG",
+    b"EH", b"ER", b"ES", b"ET", b"FI", b"FJ", b"FK", b"FM", b"FO", b"FR", b"GA", b"GB", b"GD",
+    b"GE", b"GF", b"GG", b"GH", b"GI", b"GL", b"GM", b"GN", b"GP", b"GQ", b"GR", b"GS", b"GT",
+    b"GU", b"GW", b"GY", b"HK", b"HM", b"HN", b"HR", b"HT", b"HU", b"ID", b"IE", b"IL", b"IM",
+    b"IN", b"IO", b"IQ", b"IR", b"IS", b"IT", b"JE", b"JM", b"JO", b"JP", b"KE", b"KG", b"KH",
+    b"KI", b"KM", b"KN", b"KP", b"KR", b"KW", b"KY", b"KZ", b"LA", b"LB", b"LC", b"LI", b"LK",
+    b"LR", b"LS", b"LT", b"LU", b"LV", b"LY", b"MA", b"MC", b"MD", b"ME", b"MF", b"MG", b"MH",
+    b"MK", b"ML", b"MM", b"MN", b"MO", b"MP", b"MQ", b"MR", b"MS", b"MT", b"MU", b"MV", b"MW",
+    b"MX", b"MY", b"MZ", b"NA", b"NC", b"NE", b"NF", b"NG", b"NI", b"NL", b"NO", b"NP", b"NR",
+    b"NU", b"NZ", b"OM", b"PA", b"PE", b"PF", b"PG", b"PH", b"PK", b"PL", b"PM", b"PN", b"PR",
+    b"PS", b"PT", b"PW", b"PY", b"QA", b"RE", b"RO", b"RS", b"RU", b"RW", b"SA", b"SB", b"SC",
+    b"SD", b"SE", b"SG", b"SH", b"SI", b"SJ", b"SK", b"SL", b"SM", b"SN", b"SO", b"SR", b"SS",
+    b"ST", b"SV", b"SX", b"SY", b"SZ", b"TC", b"TD", b"TF", b"TG", b"TH", b"TJ", b"TK", b"TL",
+    b"TM", b"TN", b"TO", b"TR", b"TT", b"TV", b"TW", b"TZ", b"UA", b"UG", b"UM", b"US", b"UY",
+    b"UZ", b"VA", b"VC", b"VE", b"VG", b"VI", b"VN", b"VU", b"WF", b"WS", b"XK", b"YE", b"YT",
+    b"ZA", b"ZM", b"ZW",
+];
+
+/// Returns `true` when `code` is a country code a BIC may carry.
+///
+/// Takes the two-letter code — characters 5–6 of a BIC, i.e.
+/// [`Bic::country_code`]. Comparison is case-insensitive.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::bic::is_bic_country_code;
+///
+/// assert!(is_bic_country_code("DE"));
+/// assert!(is_bic_country_code("us"));
+/// assert!(is_bic_country_code("XK")); // Kosovo — user-assigned, used by SWIFT
+/// assert!(!is_bic_country_code("ZZ"));
+/// assert!(!is_bic_country_code("DEU"));
+/// ```
+#[must_use]
+pub fn is_bic_country_code(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    let [a, b] = bytes else { return false };
+    let key = [a.to_ascii_uppercase(), b.to_ascii_uppercase()];
+    BIC_COUNTRY_CODES.binary_search(&&key).is_ok()
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -226,12 +295,19 @@ pub enum BicError {
 /// The EPC `"NOTPROVIDED"` placeholder is explicitly rejected ([`BicError::Placeholder`]).
 /// Use `Option<Bic>` with `None` when the debtor's BIC is not known.
 ///
+/// Beyond the character pattern, two structural rules apply. ISO 9362 forbids
+/// `0` and `1` as the first character of the location code and `O` as the
+/// second; and characters 5–6 must be a country code a BIC may carry, not
+/// merely two letters — see [`is_bic_country_code`].
+///
 /// # Errors
 ///
 /// Returns [`BicError::Placeholder`] for the EPC `"NOTPROVIDED"` sentinel,
 /// [`BicError::InvalidLength`] when not 8 or 11 characters,
 /// [`BicError::InvalidCharacter`] for any character that violates the SEPA
-/// pattern, with the zero-based position of the offender.
+/// pattern, with the zero-based position of the offender, or
+/// [`BicError::UnknownCountryCode`] when characters 5–6 are letters but not a
+/// country.
 ///
 /// # Examples
 ///
@@ -246,17 +322,25 @@ pub enum BicError {
 ///     BicError::InvalidLength { len: 12 }
 /// ));
 /// assert!(matches!(validate_bic("NOTPROVIDED").unwrap_err(), BicError::Placeholder));
+///
+/// // Matches the pattern, but there is no country ZZ.
+/// assert!(matches!(
+///     validate_bic("COBAZZFF").unwrap_err(),
+///     BicError::UnknownCountryCode { .. }
+/// ));
 /// ```
 #[must_use = "ignoring a validated BIC loses the result"]
 pub fn validate_bic(raw: &str) -> Result<Bic, BicError> {
     let upper: String = raw.to_ascii_uppercase();
-    let len = upper.len();
 
     // Reject the EPC "NOTPROVIDED" placeholder before length check
     if upper == "NOTPROVIDED" {
         return Err(BicError::Placeholder);
     }
 
+    // Counted in characters: a non-ASCII character is rejected below, but the
+    // length reported for one must not be its UTF-8 byte count.
+    let len = upper.chars().count();
     if len != 8 && len != 11 {
         return Err(BicError::InvalidLength { len });
     }
@@ -275,6 +359,15 @@ pub fn validate_bic(raw: &str) -> Result<Bic, BicError> {
         if !ok {
             return Err(BicError::InvalidCharacter { ch, pos });
         }
+    }
+    // Every character is now ASCII, so byte indices are character indices.
+
+    // The pattern says "two letters"; only a country code addresses a bank.
+    let country = &upper[4..6];
+    if !is_bic_country_code(country) {
+        return Err(BicError::UnknownCountryCode {
+            code: country.to_owned(),
+        });
     }
 
     Ok(Bic(upper))
@@ -355,6 +448,56 @@ mod tests {
         // …but digits are fine at position 8.
         assert!(validate_bic("DEUTDEF0").is_ok());
         assert!(validate_bic("DEUTDEF2").is_ok());
+    }
+
+    #[test]
+    fn the_country_code_must_be_a_real_country() {
+        // The bare SEPA pattern accepts any two letters, so this is the last
+        // structural rule between a typo and a BIC that addresses nothing.
+        assert!(matches!(
+            validate_bic("COBAZZFF").unwrap_err(),
+            BicError::UnknownCountryCode { .. }
+        ));
+        assert!(matches!(
+            validate_bic("COBAQQFFXXX").unwrap_err(),
+            BicError::UnknownCountryCode { .. }
+        ));
+        // Kosovo: user-assigned rather than ISO 3166, but SWIFT issues BICs
+        // under it and XK is a registered IBAN country.
+        assert!(validate_bic("NCBKXKPRXXX").is_ok());
+    }
+
+    #[test]
+    fn the_country_table_agrees_with_the_iban_registry() {
+        // A BIC has to be usable against an IBAN from the same country, so
+        // every registered IBAN country must be an acceptable BIC country.
+        for a in b'A'..=b'Z' {
+            for b in b'A'..=b'Z' {
+                let cc = String::from_utf8(vec![a, b]).unwrap();
+                if crate::iban::iban_bban_format(&cc).is_some() {
+                    assert!(
+                        is_bic_country_code(&cc),
+                        "{cc} is an IBAN country but not a BIC country"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn country_lookup_rejects_malformed_input_without_panicking() {
+        for bad in ["", "D", "DEU", "Ü!", "12"] {
+            assert!(!is_bic_country_code(bad), "{bad:?} must not be a country");
+        }
+        assert!(is_bic_country_code("de"));
+    }
+
+    #[test]
+    fn the_country_table_is_sorted_for_binary_search() {
+        assert!(
+            BIC_COUNTRY_CODES.windows(2).all(|w| w[0] < w[1]),
+            "the table must stay sorted or the binary search silently misses"
+        );
     }
 
     #[test]
