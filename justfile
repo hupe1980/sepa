@@ -32,9 +32,9 @@ test-all:
 test-no-features:
     RUSTFLAGS="-D warnings" cargo test --all-targets --no-default-features
 
-# Test against the declared MSRV (requires `rustup toolchain install 1.85`).
+# Test against the declared MSRV (requires `rustup toolchain install 1.88`).
 test-msrv:
-    cargo +1.85 test --all-targets --all-features
+    cargo +1.88 test --all-targets --all-features
 
 # Run a specific test by name filter.
 test-one FILTER:

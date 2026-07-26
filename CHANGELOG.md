@@ -27,6 +27,8 @@ While the crate is `0.x`:
   and for documentation.
 - A change to a **default schema version** is always a minor bump with a
   migration note, never a patch.
+- A rise in the **minimum supported Rust version** is a minor bump, called out
+  under its own heading.
 
 Pin `sepa = "0.5"` and treat a move to `0.6` as a deliberate migration.
 
@@ -120,6 +122,16 @@ schema-correctness defects and several smaller ones are fixed along the way.
   `CreditTransferGroup::requested_execution_date()`.
 - `Camt054Entry` now derives `PartialEq`/`Eq`; `CreditDebitIndicator` derives
   `Default` (`Credit`, matching how the parsers treat an absent `CdtDbtInd`).
+
+### Changed — MSRV
+
+- **The minimum supported Rust version rises from 1.85 to 1.88.**
+  RUSTSEC-2026-0009 is a stack-exhaustion denial of service in `time`'s RFC
+  2822 parser, fixed in `time` 0.3.47 — which requires Rust 1.88. This crate
+  never calls that parser, so it was not itself exposed, but the dependency
+  requirement pulled a flagged version into every downstream tree and failed
+  their audits too. Raised for all builds rather than only for the `time`
+  feature, so the MSRV stays one unconditional promise. `chrono` is unaffected.
 
 ### Changed — API
 

@@ -326,6 +326,13 @@ impl IsoDate {
     /// assert_eq!(IsoDate::new(1969, 12, 31)?.epoch_days(), -1);
     /// # Ok::<(), sepa::DateError>(())
     /// ```
+    // `doy`, `doe` and `yoe` are the reference algorithm's own names — day of
+    // year, day of era, year of era. Renaming them to satisfy `similar_names`
+    // would make the code harder to check against the published version.
+    #[allow(
+        clippy::similar_names,
+        reason = "names taken from the source algorithm"
+    )]
     #[must_use]
     pub const fn epoch_days(self) -> i64 {
         // Howard Hinnant's `days_from_civil`.
@@ -345,6 +352,13 @@ impl IsoDate {
     ///
     /// [`DateError::OutOfRange`] when the day count falls outside
     /// `0001-01-01`–`9999-12-31`.
+    // `doy`, `doe` and `yoe` are the reference algorithm's own names — day of
+    // year, day of era, year of era. Renaming them to satisfy `similar_names`
+    // would make the code harder to check against the published version.
+    #[allow(
+        clippy::similar_names,
+        reason = "names taken from the source algorithm"
+    )]
     pub fn from_epoch_days(days: i64) -> Result<Self, DateError> {
         // Reject well outside the representable range first: the algorithm
         // below shifts the input, and `i64::MAX + 719_468` would overflow.
@@ -432,7 +446,7 @@ impl TryFrom<&str> for IsoDate {
 }
 
 const fn is_leap(year: u16) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 const fn days_in_month(year: u16, month: u8) -> u8 {

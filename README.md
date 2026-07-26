@@ -4,7 +4,7 @@
 [![Docs.rs](https://img.shields.io/docsrs/sepa)](https://docs.rs/sepa)
 [![CI](https://github.com/hupe1980/sepa/actions/workflows/ci.yml/badge.svg)](https://github.com/hupe1980/sepa/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![MSRV](https://img.shields.io/badge/rustc-1.85+-orange.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+[![MSRV](https://img.shields.io/badge/rustc-1.88+-orange.svg)](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/)
 
 > 🏦 **SEPA payment utilities for Rust.**
 > ⚡ Zero I/O. No async. 🔢 No `f64` in monetary arithmetic. 📅 No hand-formatted dates.
