@@ -80,6 +80,20 @@ deny:
 fuzz TARGET="parse" SECS="60":
     cargo +nightly fuzz run {{ TARGET }} -- -max_total_time={{ SECS }}
 
+# ── Site ──────────────────────────────────────────────────────────────────────
+
+# Serve the documentation site locally (requires `zola`).
+site-serve:
+    cd site && zola serve
+
+# Build the documentation site into site/public.
+site-build:
+    cd site && zola build
+
+# Check the site's internal links and anchors.
+site-check:
+    cd site && zola check
+
 # ── Schema validation ─────────────────────────────────────────────────────────
 
 # Validate generated XML against the pinned ISO 20022 XSDs (requires xmllint).

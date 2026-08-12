@@ -299,6 +299,374 @@ mod xsd {
     }
 
     #[test]
+    fn postal_addresses_validate_in_every_schema_that_has_them() {
+        // `PostalAddress6` (pain.001.001.03) and `PostalAddress24`
+        // (pain.001.001.09) share the elements this crate emits and their
+        // order, so one address value has to validate against both. The DK
+        // schema's `PostalAddressSEPA` holds only Ctry and two AdrLines, so it
+        // must refuse rather than emit something its own XSD rejects.
+        let address = || {
+            sepa::PostalAddress::new("Berlin", "DE")
+                .unwrap()
+                .street("Unter den Linden")
+                .building_number("77")
+                .post_code("10117")
+                .country_subdivision("BE")
+        };
+
+        for schema in CreditTransferSchema::ALL {
+            let built = super::Pain001Builder::new("Acme GmbH")
+                .schema(*schema)
+                .msg_id("CT-ADR")
+                .add_group(
+                    super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
+                        .execution_date(date("2026-07-20"))
+                        .debtor_address(address())
+                        .add_entry(
+                            super::CreditTransferEntry::new(
+                                "Supplier AG",
+                                super::creditor(),
+                                12_000,
+                                "E2E-1",
+                            )
+                            .with_creditor_address(
+                                sepa::PostalAddress::new("Amsterdam", "NL")
+                                    .unwrap()
+                                    .line("Herengracht 1"),
+                            ),
+                        ),
+                )
+                .build();
+
+            if schema.supports_postal_address() {
+                let xml = built.expect("an ISO schema carries PstlAdr");
+                assert!(xml.contains("<PstlAdr><StrtNm>Unter den Linden</StrtNm>"));
+                assert!(
+                    xml.contains(
+                        "<TwnNm>Berlin</TwnNm><CtrySubDvsn>BE</CtrySubDvsn><Ctry>DE</Ctry>"
+                    )
+                );
+                assert!(xml.contains(
+                    "<TwnNm>Amsterdam</TwnNm><Ctry>NL</Ctry><AdrLine>Herengracht 1</AdrLine>"
+                ));
+                assert_validates(&xml, &schema_file(schema.message_id()));
+            } else {
+                assert_eq!(
+                    built.unwrap_err().kind,
+                    ValidationError::UnsupportedBySchema {
+                        feature: "Dbtr/PstlAdr",
+                        schema: schema.message_id(),
+                    },
+                    "{schema} cannot hold a structured address",
+                );
+            }
+        }
+
+        for schema in DirectDebitSchema::ALL {
+            let built = super::Pain008Builder::new("Stadtwerke GmbH")
+                .schema(*schema)
+                .msg_id("DD-ADR")
+                .add_group(
+                    super::DirectDebitGroup::new(
+                        "Stadtwerke GmbH",
+                        &super::debtor(),
+                        &super::creditor_id(),
+                    )
+                    .collection_date(date("2026-07-20"))
+                    .creditor_address(address())
+                    .add_entry(
+                        super::DirectDebitEntry::new(
+                            "MND-1",
+                            date("2024-06-01"),
+                            "Max Mustermann",
+                            super::creditor(),
+                            7_500,
+                            "E2E-1",
+                        )
+                        .with_debtor_address(
+                            sepa::PostalAddress::new("Wien", "AT")
+                                .unwrap()
+                                .post_code("1010"),
+                        ),
+                    ),
+                )
+                .build();
+
+            if schema.supports_postal_address() {
+                let xml = built.expect("an ISO schema carries PstlAdr");
+                assert!(xml.contains("<PstCd>1010</PstCd><TwnNm>Wien</TwnNm><Ctry>AT</Ctry>"));
+                assert_validates(&xml, &schema_file(schema.message_id()));
+            } else {
+                assert_eq!(
+                    built.unwrap_err().kind,
+                    ValidationError::UnsupportedBySchema {
+                        feature: "Cdtr/PstlAdr",
+                        schema: schema.message_id(),
+                    },
+                    "{schema} cannot hold a structured address",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_timed_execution_validates_only_where_the_choice_exists() {
+        // The DK's "terminierte Echtzeitüberweisung": a scheduled instant
+        // transfer due at a stated time, which needs ReqdExctnDt/DtTm. Only
+        // pain.001.001.09 types ReqdExctnDt as a date/time choice.
+        for schema in CreditTransferSchema::ALL {
+            let built = super::Pain001Builder::new("Acme GmbH")
+                .schema(*schema)
+                .msg_id("CT-TIMED")
+                .add_group(
+                    super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
+                        .local_instrument(sepa::LocalInstrument::Inst)
+                        .execution_at("2026-07-20T11:00:00Z".parse().unwrap())
+                        .add_entry(super::CreditTransferEntry::new(
+                            "Payee",
+                            super::creditor(),
+                            5_000,
+                            "E2E-1",
+                        )),
+                )
+                .build();
+
+            if schema.supports_execution_time() {
+                let xml = built.expect("the choice type accepts a time");
+                assert!(
+                    xml.contains("<ReqdExctnDt><DtTm>2026-07-20T11:00:00Z</DtTm></ReqdExctnDt>")
+                );
+                assert_validates(&xml, &schema_file(schema.message_id()));
+                assert_validates(&xml, "pain.001.001.09_GBIC_5.xsd");
+            } else {
+                // The DK schema has no LclInstrm either, so it fails on that
+                // first — both are UnsupportedBySchema for the same reason.
+                assert!(
+                    matches!(
+                        built.unwrap_err().kind,
+                        ValidationError::UnsupportedBySchema { .. }
+                    ),
+                    "{schema} has a bare ISODate and must refuse a time",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_timed_execution_needs_sct_instant_and_a_utc_offset() {
+        // The DK validation subset annotates ReqdExctnDt/DtTm "Only allowed for
+        // SCTinst", with the usage rule "Only UTC time format or local time
+        // with UTC offset format can be used". Neither is expressible in XSD,
+        // so neither is caught by xmllint — a file breaking them validates
+        // cleanly and is rejected on ingestion.
+        let build = |instant: bool, moment: &str| {
+            let mut group = super::CreditTransferGroup::new("Acme GmbH", &super::debtor());
+            if instant {
+                group = group.local_instrument(sepa::LocalInstrument::Inst);
+            }
+            super::Pain001Builder::new("Acme GmbH")
+                .msg_id("CT-TIMED")
+                .add_group(group.execution_at(moment.parse().unwrap()).add_entry(
+                    super::CreditTransferEntry::new("Payee", super::creditor(), 5_000, "E2E-1"),
+                ))
+                .build()
+        };
+
+        assert_eq!(
+            build(false, "2026-07-20T11:00:00Z").unwrap_err().kind,
+            ValidationError::Requires {
+                feature: "ReqdExctnDt/DtTm (timed execution)",
+                requires: "PmtTpInf/LclInstrm = INST (SCT Inst)",
+            },
+        );
+        assert_eq!(
+            build(true, "2026-07-20T11:00:00").unwrap_err().kind,
+            ValidationError::Requires {
+                feature: "ReqdExctnDt/DtTm (timed execution)",
+                requires: "a UTC offset — see IsoDateTime::in_utc",
+            },
+        );
+        // Both forms the usage rule names are accepted.
+        for moment in ["2026-07-20T11:00:00Z", "2026-07-20T13:00:00+02:00"] {
+            let xml = build(true, moment).unwrap();
+            assert!(xml.contains(&format!("<DtTm>{moment}</DtTm>")));
+            assert_validates(&xml, "pain.001.001.09_GBIC_5.xsd");
+        }
+        // A plain date is unaffected — it is the ordinary SCT case.
+        assert!(
+            super::Pain001Builder::new("Acme GmbH")
+                .msg_id("CT-PLAIN")
+                .add_group(
+                    super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
+                        .execution_date(super::date("2026-07-20"))
+                        .add_entry(super::CreditTransferEntry::new(
+                            "Payee",
+                            super::creditor(),
+                            5_000,
+                            "E2E-1",
+                        )),
+                )
+                .build()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn direct_debit_reversals_validate() {
+        // pain.007 is validated against the DK GBIC technical validation
+        // subset, which is a restriction of the ISO schema.
+        let creditor = super::debtor();
+        let ci = super::creditor_id();
+        let group = super::DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci)
+            .sequence_type(sepa::SequenceType::Frst)
+            .collection_date(date("2026-07-20"))
+            .creditor_bic("COBADEFFXXX".parse().unwrap());
+        let entry = super::DirectDebitEntry::new(
+            "MND-42",
+            date("2024-06-01"),
+            "Max Mustermann",
+            super::creditor(),
+            7_500,
+            "E2E-1",
+        );
+
+        // Full reference form.
+        let xml = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
+            .msg_id("RVSL-001")
+            .creditor_agent("COBADEFFXXX".parse().unwrap())
+            .add_group(sepa::ReversalGroup::new("DD-2026-07-001").add_entry(
+                sepa::ReversalEntry::reverse(&group, &entry, sepa::ReversalReason::Ms02),
+            ))
+            .build()
+            .unwrap();
+        assert_validates(&xml, "pain.007.001.09.xsd");
+
+        // The minimum the DK subset accepts: OrgnlTxRef with just the mandate.
+        let bare = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
+            .msg_id("RVSL-002")
+            .add_group(sepa::ReversalGroup::new("DD-2026-07-001").add_entry(
+                sepa::ReversalEntry::new(
+                    "E2E-1",
+                    7_500,
+                    sepa::ReversalReason::Am05,
+                    sepa::OriginalCollection::new("MND-42", date("2024-06-01")),
+                ),
+            ))
+            .build()
+            .unwrap();
+        assert!(bare.contains("<MndtId>MND-42</MndtId>"));
+        assert_validates(&bare, "pain.007.001.09.xsd");
+
+        // A partial reversal is still a valid document.
+        let partial = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-1")
+            .msg_id("RVSL-003")
+            .add_group(
+                sepa::ReversalGroup::new("DD-1").add_entry(
+                    sepa::ReversalEntry::reverse(&group, &entry, sepa::ReversalReason::Ms02)
+                        .reversed_amount(2_500),
+                ),
+            )
+            .build()
+            .unwrap();
+        assert!(partial.contains("<RvsdInstdAmt Ccy=\"EUR\">25.00</RvsdInstdAmt>"));
+        assert_validates(&partial, "pain.007.001.09.xsd");
+    }
+
+    #[test]
+    fn the_pain002_fixtures_are_schema_valid_input() {
+        // The parser is only as good as what it is tested against. This pins
+        // that the Verification of Payee shape the unit tests parse is a real
+        // pain.002.001.10 document and not something invented.
+        let vop = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr>
+      <MsgId>B78567267384</MsgId>
+      <CreDtTm>2025-11-10T09:31:30Z</CreDtTm>
+      <DbtrAgt><FinInstnId><BICFI>SPUEDE2UXXX</BICFI></FinInstnId></DbtrAgt>
+    </GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>K563</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.001</OrgnlMsgNmId>
+      <OrgnlNbOfTxs>462</OrgnlNbOfTxs>
+      <GrpSts>RVCM</GrpSts>
+      <StsRsnInf><AddtlInf>legal notice</AddtlInf></StsRsnInf>
+      <NbOfTxsPerSts><DtldNbOfTxs>454</DtldNbOfTxs><DtldSts>RCVC</DtldSts></NbOfTxsPerSts>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>B001</OrgnlPmtInfId>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>K563-B001-T087</OrgnlEndToEndId>
+        <TxSts>RVMC</TxSts>
+        <StsRsnInf><AddtlInf>Peter Schmitz</AddtlInf></StsRsnInf>
+        <OrgnlTxRef>
+          <Cdtr><Pty><Nm>P. Schmitz</Nm></Pty></Cdtr>
+          <CdtrAcct><Id><IBAN>DE34500500009876543210</IBAN></Id></CdtrAcct>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#;
+        assert_validates(vop, "pain.002.001.10.xsd");
+
+        // …and it parses into the VoP model rather than falling through to
+        // `Other`, which is what would happen if the codes were unknown.
+        let doc = super::parse_pain002(vop).unwrap();
+        let tx = &doc.payment_info_statuses[0].transactions[0];
+        assert_eq!(
+            tx.status.as_ref().unwrap().verification(),
+            Some(sepa::VerificationOutcome::CloseMatch)
+        );
+        assert_eq!(tx.original_creditor_name.as_deref(), Some("P. Schmitz"));
+    }
+
+    #[test]
+    fn the_default_schemas_also_satisfy_the_stricter_dk_subset() {
+        // The plain ISO schemas are permissive; the Deutsche Kreditwirtschaft
+        // publishes technical validation subsets (GBIC 5) that restrict them to
+        // what German banks actually accept — mandatory elements, narrowed
+        // enumerations. Passing both is a strictly stronger guarantee than
+        // passing ISO alone, and it is what caught `OrgnlTxRef` being mandatory
+        // on a reversal.
+        assert_validates(
+            &sct(CreditTransferSchema::IsoV9),
+            "pain.001.001.09_GBIC_5.xsd",
+        );
+        assert_validates(&sdd(DirectDebitSchema::IsoV8), "pain.008.001.08_GBIC_5.xsd");
+
+        // Structured addresses and a timed instant execution are the two newest
+        // shapes, and the DK subset is where they are pinned down.
+        let addressed = super::Pain001Builder::new("Acme GmbH")
+            .msg_id("CT-DK-ADR")
+            .add_group(
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
+                    .local_instrument(sepa::LocalInstrument::Inst)
+                    .execution_at("2026-07-20T11:00:00Z".parse().unwrap())
+                    .debtor_bic("COBADEFFXXX".parse().unwrap())
+                    .add_entry(
+                        super::CreditTransferEntry::new(
+                            "Supplier AG",
+                            super::creditor(),
+                            12_000,
+                            "E2E-1",
+                        )
+                        .with_bic("ABNANL2A".parse().unwrap())
+                        .with_creditor_address(
+                            sepa::PostalAddress::new("Bonn", "DE")
+                                .unwrap()
+                                .street("Musterlandstrasse")
+                                .building_number("47")
+                                .post_code("53113"),
+                        ),
+                    ),
+            )
+            .build()
+            .unwrap();
+        assert_validates(&addressed, "pain.001.001.09_GBIC_5.xsd");
+        assert_validates(&addressed, "pain.001.001.09.xsd");
+    }
+
+    #[test]
     fn structured_rf_remittance_validates() {
         // The ISO 11649 path: RmtInf/Strd/CdtrRefInf with Cd=SCOR and Issr=ISO.
         let rf = sepa::RfReference::generate("539007547034").unwrap();
@@ -769,7 +1137,7 @@ fn pain002_round_trip_reads_back_our_own_identifiers() {
     let rejected = doc.rejected_transactions();
     assert_eq!(rejected.len(), 1, "the commented-out block must be ignored");
     let tx = rejected[0];
-    assert_eq!(tx.original_end_to_end_id, "INV-2026-001");
+    assert_eq!(tx.original_end_to_end_id.as_deref(), Some("INV-2026-001"));
     assert_eq!(tx.original_amount_ct, Some(12_000));
     // Entities and numeric character references are decoded.
     assert_eq!(tx.original_creditor_name.as_deref(), Some("Blümel & Söhne"));
@@ -826,7 +1194,7 @@ fn camt053_batch_booking_exposes_every_transaction() {
 
     let doc = parse_camt053(xml).unwrap();
     let stmt = &doc.statements[0];
-    assert_eq!(stmt.account_iban, "DE89370400440532013000");
+    assert_eq!(stmt.account.iban.as_deref(), Some("DE89370400440532013000"));
     assert_eq!(stmt.closing_balance().unwrap().signed_ct(), 122_500);
 
     let entry = &stmt.entries[0];

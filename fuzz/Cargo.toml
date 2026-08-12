@@ -10,7 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-sepa          = { path = "..", features = ["serde", "json"] }
+sepa          = { path = "..", features = ["serde"] }
 
 [[bin]]
 name = "parse"

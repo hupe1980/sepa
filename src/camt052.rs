@@ -32,12 +32,12 @@
 //!
 //! let doc = parse_camt052(xml)?;
 //! let rpt = &doc.reports[0];
-//! assert_eq!(rpt.account_iban, "DE89370400440532013000");
+//! assert_eq!(rpt.account.iban.as_deref(), Some("DE89370400440532013000"));
 //! assert_eq!(rpt.entries[0].status, sepa::EntryStatus::Pending);
 //! # Ok::<(), sepa::Camt052ParseError>(())
 //! ```
 
-use crate::camt::{self, CashEntry, StatementBalance};
+use crate::camt::{self, AccountRef, CashEntry, StatementBalance};
 use crate::xml::{Document, Node, XmlError};
 
 /// Known camt.052 XML namespace URIs.
@@ -61,10 +61,9 @@ pub struct Camt052Report {
     pub report_id: String,
     /// Electronic sequence number, when the bank numbers its reports.
     pub sequence_number: Option<u64>,
-    /// Account IBAN.
-    pub account_iban: String,
-    /// BIC of the account servicing institution (`Acct/Svcr`), if reported.
-    pub account_servicer_bic: Option<String>,
+    /// The account this covers — IBAN or proprietary identifier, currency and
+    /// servicing institution. See [`AccountRef`].
+    pub account: AccountRef,
     /// Reporting period start, ISO 8601.
     pub from_date: Option<String>,
     /// Reporting period end, ISO 8601.
@@ -163,11 +162,7 @@ fn parse_report(r: &Node) -> Camt052Report {
     Camt052Report {
         report_id: r.text_of("Id").unwrap_or_default().to_owned(),
         sequence_number: r.text_of("ElctrncSeqNb").and_then(|v| v.parse().ok()),
-        account_iban: camt::account_iban(r),
-        account_servicer_bic: r
-            .path(&["Acct", "Svcr"])
-            .and_then(camt::agent_bic)
-            .map(str::to_owned),
+        account: camt::account_of(r),
         from_date,
         to_date,
         balances: camt::balances_of(r),
@@ -230,8 +225,8 @@ mod tests {
         let rpt = &doc.reports[0];
         assert_eq!(rpt.report_id, "INTRADAY-1");
         assert_eq!(rpt.sequence_number, Some(7));
-        assert_eq!(rpt.account_iban, "DE89370400440532013000");
-        assert_eq!(rpt.account_servicer_bic.as_deref(), Some("COBADEFFXXX"));
+        assert_eq!(rpt.account.iban.as_deref(), Some("DE89370400440532013000"));
+        assert_eq!(rpt.account.servicer_bic.as_deref(), Some("COBADEFFXXX"));
         assert_eq!(rpt.from_date.as_deref(), Some("2026-07-14T00:00:00"));
         assert_eq!(rpt.to_date.as_deref(), Some("2026-07-14T11:00:00"));
     }

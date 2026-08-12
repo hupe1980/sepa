@@ -13,7 +13,29 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Each parser independently: a panic in any of them is a bug.
-    let _ = sepa::parse_pain002(xml);
+    if let Ok(doc) = sepa::parse_pain002(xml) {
+        let _ = doc.is_fully_accepted();
+        let _ = doc.has_rejections();
+        for tx in doc.rejected_transactions() {
+            let _ = tx.is_rejected();
+        }
+        for count in &doc.group_status_counts {
+            let _ = count.status.verification();
+        }
+        for block in &doc.payment_info_statuses {
+            let _ = block.has_rejections();
+            let _ = block.rejection_reasons();
+            for count in &block.status_counts {
+                let _ = (count.count, count.total_ct);
+            }
+            for tx in &block.transactions {
+                // Verification of Payee: the outcome must be derivable from any
+                // status a bank sends, including ones this crate does not know.
+                let _ = tx.status.as_ref().map(|s| (s.verification(), s.is_verification()));
+                let _ = tx.additional_info.len();
+            }
+        }
+    }
     let _ = sepa::parse_camt052(xml);
     let _ = sepa::parse_camt053(xml);
     let _ = sepa::parse_camt054(xml);

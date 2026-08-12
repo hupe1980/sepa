@@ -19,6 +19,15 @@ fuzz_target!(|data: (&str, &str, i64, u8)| {
     let pick = usize::from(selector) % 3;
     let date = sepa::IsoDate::today();
 
+    // A structured address built from the same arbitrary text: the builders
+    // must reject or emit, never crash, and the DK schemas must refuse it.
+    let address = sepa::PostalAddress::new(if text.is_empty() { "Berlin" } else { text }, "DE")
+        .unwrap_or_else(|_| {
+            sepa::PostalAddress::new("Berlin", "DE").expect("a literal address is valid")
+        })
+        .street(text)
+        .line(text);
+
     let sct = sepa::Pain001Builder::new(text)
         .schema(CreditTransferSchema::ALL[pick])
         .msg_id(id)
@@ -29,7 +38,8 @@ fuzz_target!(|data: (&str, &str, i64, u8)| {
                 .add_entry(
                     sepa::CreditTransferEntry::new(text, iban.clone(), amount, id)
                         .with_description(text)
-                        .with_ultimate_debtor(sepa::Party::new(text)),
+                        .with_ultimate_debtor(sepa::Party::new(text))
+                        .with_creditor_address(address.clone()),
                 ),
         );
     let _ = sct.total_ct();
@@ -46,6 +56,7 @@ fuzz_target!(|data: (&str, &str, i64, u8)| {
                 sepa::DirectDebitGroup::new(text, &iban, &ci)
                     .collection_date(date)
                     .payment_info_id(id)
+                    .creditor_address(address.clone())
                     .add_entry(
                         sepa::DirectDebitEntry::new(id, date, text, iban.clone(), amount, id)
                             .with_description(text)
@@ -56,6 +67,25 @@ fuzz_target!(|data: (&str, &str, i64, u8)| {
         if let Ok(xml) = sdd.build() {
             assert!(xml.starts_with("<?xml"));
             assert!(xml.ends_with("</Document>"));
+        }
+
+        // A reversal of that same collection: `reverse` copies arbitrary text
+        // out of the collection objects, so it sees everything the builders do.
+        let group = sepa::DirectDebitGroup::new(text, &iban, &ci).collection_date(date);
+        let entry = sepa::DirectDebitEntry::new(id, date, text, iban.clone(), amount, id);
+        let rvsl = sepa::Pain007Builder::new(text, id)
+            .msg_id(id)
+            .add_group(sepa::ReversalGroup::new(id).add_entry(sepa::ReversalEntry::reverse(
+                &group,
+                &entry,
+                sepa::ReversalReason::Ms02,
+            )));
+        let _ = rvsl.total_ct();
+        if let Ok(xml) = rvsl.build() {
+            assert!(xml.starts_with("<?xml"));
+            assert!(xml.ends_with("</Document>"));
+            // A reversal may never send back more than was collected.
+            assert!(rvsl.total_ct() <= sdd.total_ct());
         }
     }
 });

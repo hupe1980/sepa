@@ -1,0 +1,34 @@
+base_url = "https://hupe1980.github.io/sepa"
+title = "sepa — SEPA payments for Rust"
+description = "Build and parse SEPA payment files in Rust. IBAN and BIC validation, pain.001 credit transfers, pain.008 direct debits, pain.007 reversals, pain.002 status reports with Verification of Payee, and camt.05x bank statements. Zero I/O, no f64, XSD-validated."
+
+default_language = "en"
+compile_sass = false
+build_search_index = false
+generate_feeds = false
+minify_html = true
+author = "hupe1980"
+
+# Every page is reachable from the nav; a stale internal link is a bug.
+[link_checker]
+skip_prefixes = ["https://crates.io/", "https://docs.rs/"]
+
+[markdown]
+smart_punctuation = true
+insert_anchor_links = "right"
+external_links_target_blank = true
+external_links_no_referrer = true
+
+# Giallo renders both themes into one CSS light-dark() value, so code follows
+# the reader's colour scheme with no extra stylesheet and no JavaScript.
+[markdown.highlighting]
+light_theme = "github-light"
+dark_theme = "github-dark-default"
+
+[extra]
+repo = "https://github.com/hupe1980/sepa"
+crate_url = "https://crates.io/crates/sepa"
+api_url = "https://docs.rs/sepa"
+# Shown in the hero and the install snippet.
+crate_version = "0.6"
+og_image = "og.png"

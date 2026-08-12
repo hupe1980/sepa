@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block og_type %}article{% endblock %}
+{% block content %}
+<div class="wrap docs-layout">
+  {% include "_sidebar.html" %}
+  <article class="prose">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="{{ get_url(path='@/docs/_index.md') | safe }}">Docs</a> <span aria-hidden="true">/</span> {{ page.title }}
+    </nav>
+    <h1>{{ page.title }}</h1>
+    {% if page.description %}<p class="lede">{{ page.description }}</p>{% endif %}
+    {% if page.toc | length > 1 %}
+    <details class="toc"><summary>On this page</summary>
+      <ul>{% for h in page.toc %}<li><a href="{{ h.permalink | safe }}">{{ h.title }}</a></li>{% endfor %}</ul>
+    </details>
+    {% endif %}
+    {{ page.content | safe }}
+    <hr>
+    <p class="muted">
+      Full API reference on <a href="{{ config.extra.api_url }}">docs.rs</a>.
+      Found a mistake? <a href="{{ config.extra.repo }}/issues">Open an issue</a>.
+    </p>
+  </article>
+</div>
+{% endblock %}

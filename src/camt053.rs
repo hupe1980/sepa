@@ -39,12 +39,12 @@
 //!
 //! let doc = parse_camt053(xml)?;
 //! let stmt = &doc.statements[0];
-//! assert_eq!(stmt.account_iban, "DE89370400440532013000");
+//! assert_eq!(stmt.account.iban.as_deref(), Some("DE89370400440532013000"));
 //! assert_eq!(stmt.closing_balance().unwrap().amount_ct, 115_542);
 //! # Ok::<(), sepa::Camt053ParseError>(())
 //! ```
 
-use crate::camt::{self, BalanceType, CashEntry, StatementBalance};
+use crate::camt::{self, AccountRef, BalanceType, CashEntry, StatementBalance};
 use crate::xml::{Document, Node, XmlError};
 
 // ── known namespaces ──────────────────────────────────────────────────────────
@@ -72,10 +72,9 @@ pub struct Camt053Statement {
     pub stmt_id: String,
     /// Electronic sequence number.
     pub sequence_number: Option<u64>,
-    /// Account IBAN.
-    pub account_iban: String,
-    /// BIC of the account servicing institution (`Acct/Svcr`), if reported.
-    pub account_servicer_bic: Option<String>,
+    /// The account this covers — IBAN or proprietary identifier, currency and
+    /// servicing institution. See [`AccountRef`].
+    pub account: AccountRef,
     /// Statement period start, ISO 8601.
     pub from_date: Option<String>,
     /// Statement period end, ISO 8601.
@@ -140,14 +139,13 @@ pub enum Camt053ParseError {
     Xml(#[from] XmlError),
 
     /// Root element `BkToCstmrStmt` not found — not a camt.053 document.
+    ///
+    /// Everything below the root is optional to this parser: a statement with
+    /// no entries, no balances or no account identifier is unusual but not
+    /// malformed, and refusing to read the rest of a real bank file over it
+    /// would help nobody.
     #[error("not a camt.053 document: root element <BkToCstmrStmt> not found")]
     NotCamt053,
-    /// A required XML element was absent.
-    #[error("missing required camt.053 element: <{tag}>")]
-    MissingElement {
-        /// Name of the missing element.
-        tag: &'static str,
-    },
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────────
@@ -191,11 +189,7 @@ fn parse_statement(s: &Node) -> Camt053Statement {
     Camt053Statement {
         stmt_id: s.text_of("Id").unwrap_or_default().to_owned(),
         sequence_number: s.text_of("ElctrncSeqNb").and_then(|v| v.parse().ok()),
-        account_iban: camt::account_iban(s),
-        account_servicer_bic: s
-            .path(&["Acct", "Svcr"])
-            .and_then(camt::agent_bic)
-            .map(str::to_owned),
+        account: camt::account_of(s),
         from_date,
         to_date,
         balances: camt::balances_of(s),
@@ -272,7 +266,7 @@ mod tests {
         let stmt = &doc.statements[0];
         assert_eq!(stmt.stmt_id, "2026-07-14");
         assert_eq!(stmt.sequence_number, Some(42));
-        assert_eq!(stmt.account_iban, "DE89370400440532013000");
+        assert_eq!(stmt.account.iban.as_deref(), Some("DE89370400440532013000"));
     }
 
     #[test]
@@ -314,6 +308,42 @@ mod tests {
     fn net_movement() {
         let doc = parse_camt053(CAMT053_EXAMPLE).unwrap();
         assert_eq!(doc.statements[0].net_movement_ct(), 15_542);
+    }
+
+    #[test]
+    fn a_non_iban_account_is_reported_rather_than_lost() {
+        // `Acct/Id` is a choice: IBAN *or* a proprietary identifier. Collapsing
+        // it to one string made a non-IBAN account read as "" — indistinguishable
+        // from an account with no identifier at all.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>T</CreDtTm></GrpHdr>
+    <Stmt>
+      <Id>S1</Id>
+      <Acct>
+        <Id><Othr><Id>1234567890</Id></Othr></Id>
+        <Ccy>CHF</Ccy>
+        <Svcr><FinInstnId><BICFI>POFICHBEXXX</BICFI></FinInstnId></Svcr>
+      </Acct>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>"#;
+        let acct = &parse_camt053(xml).unwrap().statements[0].account;
+        assert_eq!(acct.iban, None);
+        assert_eq!(acct.other_id.as_deref(), Some("1234567890"));
+        assert_eq!(acct.currency.as_deref(), Some("CHF"));
+        assert_eq!(acct.servicer_bic.as_deref(), Some("POFICHBEXXX"));
+        assert_eq!(acct.any_id(), Some("1234567890"));
+
+        // An IBAN account still reports the IBAN, and `any_id` prefers it.
+        let acct = &parse_camt053(CAMT053_EXAMPLE).unwrap().statements[0].account;
+        assert_eq!(acct.any_id(), Some("DE89370400440532013000"));
+
+        // No Acct block at all is empty, not a panic or an invented value.
+        let bare = "<Document><BkToCstmrStmt><Stmt><Id>S</Id></Stmt></BkToCstmrStmt></Document>";
+        let acct = &parse_camt053(bare).unwrap().statements[0].account;
+        assert_eq!(acct.any_id(), None);
     }
 
     #[test]

@@ -18,7 +18,7 @@
 //!
 //! [`transliterate`] converts unsupported characters into that set using the
 //! **published EPC217-08 conversion table**, transcribed verbatim from the
-//! spreadsheet the EPC distributes alongside the guidance document — 1011
+//! spreadsheet the EPC distributes alongside the guidance document — 1010
 //! mappings covering Latin, Latin Extended, Greek, Cyrillic and symbols.
 //!
 //! This matters because a generic accent-folding transliterator agrees with the
@@ -33,9 +33,11 @@
 //! | `Я` | `YA` | `YA` or dropped |
 //! | `€` | `E` | dropped |
 //!
-//! Twenty-six Greek and Cyrillic letters have a genuine multi-character
-//! romanisation (ISO 843 / ISO 9); the rest of the table is strictly one
-//! character to one character. Characters absent from the table become `.`.
+//! Twenty Greek and Cyrillic letters have a genuine multi-character
+//! romanisation (ISO 843 / ISO 9) — six Greek (`Θ Χ Ψ θ χ ψ`) and fourteen
+//! Cyrillic (`Ж Ц Ч Ш Щ Ю Я` and their lower-case forms). The rest of the
+//! table is strictly one character to one character, and characters absent
+//! from it become `.`.
 //!
 //! ### The two styles
 //!
@@ -102,7 +104,7 @@ pub enum Transliteration {
     ///
     /// This is the table as published: strictly one character to one character
     /// for Latin, including the ligatures (`Æ→A`, not `AE`). The only entries
-    /// that lengthen are 26 Greek and Cyrillic letters with a genuine
+    /// that lengthen are the 20 Greek and Cyrillic letters with a genuine
     /// multi-character romanisation (`Θ→TH`, `Щ→SHT`, `Я→YA`).
     Epc,
 }
@@ -361,7 +363,63 @@ mod tests {
             table.windows(2).all(|w| w[0].0 < w[1].0),
             "EPC table must be strictly sorted by code point"
         );
-        assert!(table.len() > 1000, "table looks truncated");
+        assert_eq!(
+            table.len(),
+            1010,
+            "the transcribed EPC table changed size; update the module docs too"
+        );
+    }
+
+    #[test]
+    fn no_table_entry_maps_a_character_that_is_already_legal() {
+        // The table is generated with "entries whose target equals the source
+        // and is already SEPA-legal are omitted". A row for a legal character
+        // means the transcription slipped — and it is invisible in normal use,
+        // because `transliterate` short-circuits on `is_sepa_char` before ever
+        // consulting the table. Regression: U+0020 SPACE was mapped to '.'.
+        for (cp, replacement) in crate::charset_table::EPC_CONVERSION_TABLE {
+            if let Some(ch) = char::from_u32(*cp) {
+                assert!(
+                    !is_sepa_char(ch),
+                    "{ch:?} (U+{cp:04X}) is already SEPA-legal but the table \
+                     rewrites it to {replacement:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_replacement_is_itself_legal_and_non_empty() {
+        // The table is the last step before text reaches the wire, so a single
+        // illegal replacement would leak straight into a payment field.
+        for (cp, replacement) in crate::charset_table::EPC_CONVERSION_TABLE {
+            assert!(
+                !replacement.is_empty(),
+                "U+{cp:04X} maps to nothing; characters with no mapping are \
+                 meant to be absent from the table and become '.'"
+            );
+            assert!(
+                is_sepa_text(replacement),
+                "U+{cp:04X} maps to {replacement:?}, which is not SEPA-legal"
+            );
+        }
+    }
+
+    #[test]
+    fn exactly_twenty_entries_lengthen_the_text() {
+        // The documented claim, pinned. Everything else in the published table
+        // is one character to one character, which is what makes the EPC style
+        // length-preserving — and the docs said 26 for three releases.
+        let multi: Vec<_> = crate::charset_table::EPC_CONVERSION_TABLE
+            .iter()
+            .filter(|(_, r)| r.chars().count() > 1)
+            .collect();
+        assert_eq!(multi.len(), 20, "multi-character romanisations: {multi:?}");
+        // All of them are Greek (U+0370–U+03FF) or Cyrillic (U+0400–U+04FF).
+        assert!(
+            multi.iter().all(|(cp, _)| (0x0370..=0x04FF).contains(cp)),
+            "only Greek and Cyrillic have a multi-character romanisation"
+        );
     }
 
     #[test]

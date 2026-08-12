@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en" prefix="og: https://ogp.me/ns#">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+{%- if page is defined -%}
+  {%- set page_title = page.title ~ " — sepa" -%}
+  {%- set page_desc = page.description -%}
+{%- elif section is defined and section.title -%}
+  {%- set page_title = section.title ~ " — sepa" -%}
+  {%- set page_desc = section.description -%}
+{%- else -%}
+  {%- set page_title = config.title -%}
+  {%- set page_desc = config.description -%}
+{%- endif -%}
+{%- set is_home = current_path == "/" -%}
+{%- set canonical = current_url -%}
+
+<title>{% if is_home %}{{ config.title }}{% else %}{{ page_title }}{% endif %}</title>
+<meta name="description" content="{{ page_desc }}">
+<link rel="canonical" href="{{ canonical | safe }}">
+
+<meta property="og:type" content="{% block og_type %}website{% endblock %}">
+<meta property="og:site_name" content="sepa">
+<meta property="og:title" content="{{ page_title }}">
+<meta property="og:description" content="{{ page_desc }}">
+<meta property="og:url" content="{{ canonical | safe }}">
+<meta property="og:image" content="{{ get_url(path='og.png') | safe }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ page_title }}">
+<meta name="twitter:description" content="{{ page_desc }}">
+<meta name="twitter:image" content="{{ get_url(path='og.png') | safe }}">
+
+<link rel="icon" href="{{ get_url(path='favicon.svg') | safe }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ get_url(path='style.css') | safe }}">
+<link rel="alternate" type="application/xml" href="{{ get_url(path='sitemap.xml') | safe }}">
+
+<script type="application/ld+json">
+{% if is_home %}
+{"@context":"https://schema.org","@type":"SoftwareSourceCode",
+ "name":"sepa","description":{{ page_desc | json_encode | safe }},
+ "url":{{ canonical | json_encode | safe }},
+ "codeRepository":{{ config.extra.repo | json_encode | safe }},
+ "programmingLanguage":"Rust","runtimePlatform":"Rust 1.88+",
+ "license":"https://spdx.org/licenses/MIT.html",
+ "author":{"@type":"Person","name":"hupe1980"},
+ "keywords":"SEPA, ISO 20022, IBAN, BIC, pain.001, pain.008, pain.007, pain.002, camt.053, Rust"}
+{% else %}
+{"@context":"https://schema.org","@type":"TechArticle",
+ "headline":{{ page_title | json_encode | safe }},
+ "description":{{ page_desc | json_encode | safe }},
+ "url":{{ canonical | json_encode | safe }},"inLanguage":"en",
+ "isPartOf":{"@type":"WebSite","name":"sepa","url":{{ config.base_url | json_encode | safe }}},
+ "author":{"@type":"Person","name":"hupe1980"}}
+{% endif %}
+</script>
+{% block extra_head %}{% endblock %}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="{{ get_url(path='@/_index.md') | safe }}">
+      <span class="brand-mark" aria-hidden="true">◧</span> sepa
+    </a>
+    <nav aria-label="Main">
+      <a href="{{ get_url(path='@/docs/_index.md') | safe }}">Docs</a>
+      <a href="{{ config.extra.api_url }}">API</a>
+      <a href="{{ config.extra.crate_url }}">crates.io</a>
+      <a href="{{ config.extra.repo }}">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">{% block content %}{% endblock %}</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <p>
+      <strong>sepa</strong> — SEPA payment utilities for Rust.
+      Dual-licensed <a href="{{ config.extra.repo }}/blob/main/LICENSE-MIT">MIT</a> or
+      <a href="{{ config.extra.repo }}/blob/main/LICENSE-APACHE">Apache-2.0</a>.
+    </p>
+    <p class="muted">
+      Not affiliated with the European Payments Council, ISO, or SWIFT.
+      Standards are referenced for identification only.
+    </p>
+  </div>
+</footer>
+</body>
+</html>

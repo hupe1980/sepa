@@ -47,7 +47,12 @@ use std::str::FromStr;
 ///
 /// Created only via [`validate_creditor_id`] or [`CreditorId::from_str`].
 /// Cannot be forged — the mod-97 check digit is validated on construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Carries the same conversions as [`Iban`](crate::Iban) and
+/// [`Bic`](crate::Bic): `Deref<Target = str>`, `Borrow<str>` (so it keys a
+/// `HashMap<CreditorId, _>` that can be looked up with a `&str`), `Ord`, and
+/// `TryFrom` for both `&str` and `String`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CreditorId(String);
 
 impl CreditorId {
@@ -99,6 +104,19 @@ impl AsRef<str> for CreditorId {
     }
 }
 
+impl std::ops::Deref for CreditorId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for CreditorId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 impl From<CreditorId> for String {
     fn from(ci: CreditorId) -> Self {
         ci.0
@@ -116,6 +134,13 @@ impl TryFrom<&str> for CreditorId {
     type Error = CreditorIdError;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         validate_creditor_id(s)
+    }
+}
+
+impl TryFrom<String> for CreditorId {
+    type Error = CreditorIdError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        validate_creditor_id(&s)
     }
 }
 
@@ -147,8 +172,12 @@ pub enum CreditorIdError {
         len: usize,
     },
 
-    /// Country code (chars 1–2) must be two ASCII uppercase letters.
-    #[error("Creditor Identifier country code must be 2 ASCII letters (A–Z), got: {code:?}")]
+    /// Characters 1–2 are not an ISO 3166-1 alpha-2 country.
+    ///
+    /// The check digits are computed *over* the country code, so a forged
+    /// identifier in a country that does not exist — `ZZ99ZZZ…` — has perfectly
+    /// consistent check digits. Only the registry rules it out.
+    #[error("Creditor Identifier country code {code:?} is not an ISO 3166-1 alpha-2 country")]
     InvalidCountryCode {
         /// The country code that was rejected.
         code: String,
@@ -217,9 +246,11 @@ pub fn validate_creditor_id(raw: &str) -> Result<CreditorId, CreditorIdError> {
         }
     }
 
-    // Country code (chars 1–2) must be letters
+    // Characters 1–2 name the assigning country. Checking only that they are
+    // letters would accept `ZZ`, whose check digits are computed over `ZZ` and
+    // therefore agree — the same gap `validate_bic` closes for a BIC.
     let cc = &normalised[..2];
-    if !cc.chars().all(|c| c.is_ascii_alphabetic()) {
+    if !crate::country::is_country_code(cc) {
         return Err(CreditorIdError::InvalidCountryCode {
             code: cc.to_owned(),
         });
@@ -347,6 +378,33 @@ mod tests {
     }
 
     #[test]
+    fn the_country_must_be_a_real_country() {
+        // Regression: the check digits are computed over the country code, so
+        // a `ZZ` identifier is internally consistent and used to validate. The
+        // registry is the only thing that rules it out.
+        let forged = format!(
+            "ZZ{}ZZZ09999999999",
+            creditor_id_check_digits("09999999999", "ZZ")
+        );
+        assert!(matches!(
+            validate_creditor_id(&forged),
+            Err(CreditorIdError::InvalidCountryCode { .. })
+        ));
+        assert!(matches!(
+            validate_creditor_id("1298ZZZ09999999999"),
+            Err(CreditorIdError::InvalidCountryCode { .. })
+        ));
+        // Every SEPA country still works, including the 2025 joiners.
+        for cc in ["DE", "FR", "NL", "AT", "RS", "MD", "AL", "MK", "ME"] {
+            let cd = creditor_id_check_digits("0123456789", cc);
+            assert!(
+                validate_creditor_id(&format!("{cc}{cd}ZZZ0123456789")).is_ok(),
+                "{cc} must be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn invalid_check_digit() {
         // DE00 has wrong check digits (correct is DE98)
         assert!(matches!(
@@ -373,6 +431,22 @@ mod tests {
         let ci = validate_creditor_id("DE98ZZZ09999999999").unwrap();
         let s: String = ci.into();
         assert_eq!(s, "DE98ZZZ09999999999");
+    }
+
+    #[test]
+    fn conversions_match_iban_and_bic() {
+        // The three identifier types are used interchangeably in call sites, so
+        // an inconsistent set of impls is a papercut in every one of them.
+        let ci = CreditorId::try_from("DE98ZZZ09999999999".to_owned()).unwrap();
+        assert_eq!(ci.len(), 18); // Deref to str
+
+        let mut by_id = std::collections::HashMap::new();
+        by_id.insert(ci.clone(), "Stadtwerke");
+        // Borrow<str>: lookup without allocating a CreditorId.
+        assert_eq!(by_id.get("DE98ZZZ09999999999"), Some(&"Stadtwerke"));
+
+        let other = validate_creditor_id("AT61ZZZ01234567890").unwrap();
+        assert!(other < ci); // Ord
     }
 
     #[cfg(feature = "serde")]

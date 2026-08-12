@@ -33,11 +33,20 @@
 //! `Rcur`), and add a group per sequence type to cover a whole collection run
 //! in a single file.
 //!
+//! ## Postal addresses
+//!
+//! `Cdtr/PstlAdr` sits on the group (it belongs to the account holder) and
+//! `Dbtr/PstlAdr` on each collection. Both are optional, and both must be
+//! structured or hybrid — see [`PostalAddress`] for the
+//! 15 November 2026 cut-over. The legacy DK schema cannot carry one and says
+//! so with [`ValidationError::UnsupportedBySchema`].
+//!
 //! ## References
 //!
-//! - ISO 20022 pain.008.001.08 / pain.008.003.02 schemas
-//! - EPC SEPA Core Direct Debit Rulebook
-//! - EPC SEPA Business-to-Business Direct Debit Rulebook
+//! - ISO 20022 pain.008.001.08 / pain.008.001.02 / pain.008.003.02 schemas
+//! - EPC130-08 SDD Core Customer-to-PSP Implementation Guidelines, 2025 version
+//! - EPC131-08 SDD B2B Customer-to-PSP Implementation Guidelines, 2025 version
+//! - EPC153-22 v2.1, Provision of Addresses under the EPC Payment Schemes
 //! - Deutsche Bundesbank pain.008 implementation guide (DFÜ-Abkommen V2.7)
 //!
 //! ## Example
@@ -91,6 +100,7 @@
 
 use std::str::FromStr;
 
+use crate::address::PostalAddress;
 use crate::creditor_id::CreditorId;
 use crate::date::IsoDate;
 use crate::party::Party;
@@ -98,7 +108,7 @@ use crate::purpose::{CategoryPurpose, Purpose};
 use crate::reference::RemittanceInfo;
 use crate::validate::{
     BuildError, CharsetPolicy, Locate, Location, MAX_ID_LEN, UnknownSchema, ValidationError,
-    WriteError, check_amount, check_id, check_name, check_remittance, truncate_chars,
+    WriteError, check_amount, check_id, check_name, truncate_chars,
 };
 use crate::{Bic, Iban, IsoDateTime, ct_to_eur_str};
 
@@ -176,6 +186,17 @@ impl DirectDebitSchema {
             Self::IsoV2 => "urn:iso:std:iso:20022:tech:xsd:pain.008.001.02",
             Self::DkV2_7 => "urn:iso:std:iso:20022:tech:xsd:pain.008.003.02",
         }
+    }
+
+    /// Whether this schema can carry a structured `PstlAdr`.
+    ///
+    /// The DK schema cannot: its `PostalAddressSEPA` type holds nothing but
+    /// `Ctry` and two `AdrLine`s — precisely the unstructured form the EPC
+    /// retires on 15 November 2026 — so there is no element to put a town or a
+    /// street in. See [`PostalAddress`].
+    #[must_use]
+    pub const fn supports_postal_address(self) -> bool {
+        !matches!(self, Self::DkV2_7)
     }
 
     /// The element name carrying an agent's BIC (`BIC` before the 2019 rename).
@@ -397,7 +418,9 @@ pub struct MandateAmendment {
     pub original_creditor_id: Option<CreditorId>,
     /// The previous debtor IBAN (`OrgnlDbtrAcct/Id/IBAN`).
     ///
-    /// Mutually exclusive with `same_mandate_new_account`.
+    /// Mutually exclusive with `same_mandate_new_account`: both fill the single
+    /// `OrgnlDbtrAcct` element, and setting both is rejected by
+    /// [`validate`](Self::validate).
     pub original_debtor_iban: Option<Iban>,
     /// Emit the `SMNDA` marker — the debtor changed account or bank.
     pub same_mandate_new_account: bool,
@@ -470,8 +493,10 @@ impl MandateAmendment {
     /// # Errors
     ///
     /// Returns [`ValidationError::Empty`] when nothing actually changed — an
-    /// amendment carrying no detail is rejected by the debtor's bank — or a
-    /// length/character error on the individual fields.
+    /// amendment carrying no detail is rejected by the debtor's bank —
+    /// [`ValidationError::MutuallyExclusive`] when the previous debtor account
+    /// is both stated and marked `SMNDA`, or a length/character error on the
+    /// individual fields.
     pub fn validate(&self, charset: CharsetPolicy) -> Result<(), ValidationError> {
         if self.original_mandate_id.is_none()
             && self.original_creditor_name.is_none()
@@ -481,6 +506,17 @@ impl MandateAmendment {
         {
             return Err(ValidationError::Empty {
                 field: "MndtRltdInf/AmdmntInfDtls",
+            });
+        }
+        // `OrgnlDbtrAcct` occurs once; SMNDA and an explicit previous IBAN are
+        // two ways of filling it. The writer used to silently prefer SMNDA and
+        // drop the IBAN, which is not something a batch should discover from a
+        // diff of its own output.
+        if self.same_mandate_new_account && self.original_debtor_iban.is_some() {
+            return Err(ValidationError::MutuallyExclusive {
+                field: "AmdmntInfDtls/OrgnlDbtrAcct",
+                first: "SMNDA",
+                second: "OrgnlDbtrAcct/Id/IBAN",
             });
         }
         if let Some(id) = &self.original_mandate_id {
@@ -516,9 +552,7 @@ impl MandateAmendment {
         if self.original_creditor_name.is_some() || self.original_creditor_id.is_some() {
             w.write_str("<OrgnlCdtrSchmeId>")?;
             if let Some(name) = &self.original_creditor_name {
-                let name = charset
-                    .apply("OrgnlCdtrSchmeId/Nm", name)
-                    .unwrap_or(std::borrow::Cow::Borrowed(name));
+                let name = charset.render(name);
                 w.write_str("<Nm>")?;
                 write_escaped(w, &name)?;
                 w.write_str("</Nm>")?;
@@ -570,6 +604,8 @@ pub struct DirectDebitEntry {
     pub debtor_iban: Iban,
     /// Debtor's BIC. Uses `NOTPROVIDED` in XML when `None` (EPC allowance).
     pub debtor_bic: Option<Bic>,
+    /// Debtor's postal address (`Dbtr/PstlAdr`).
+    pub debtor_address: Option<PostalAddress>,
     /// Collection amount in **ct** (1/100 EUR). Must be positive.
     pub amount_ct: i64,
     /// Unique end-to-end reference (`EndToEndId`) visible on debtor's bank statement.
@@ -629,6 +665,7 @@ impl DirectDebitEntry {
             amount_ct,
             end_to_end_id: end_to_end_id.into(),
             debtor_bic: None,
+            debtor_address: None,
             remittance: None,
             ultimate_creditor: None,
             ultimate_debtor: None,
@@ -641,6 +678,17 @@ impl DirectDebitEntry {
     #[must_use]
     pub fn with_bic(mut self, bic: Bic) -> Self {
         self.debtor_bic = Some(bic);
+        self
+    }
+
+    /// Set the debtor's postal address (`Dbtr/PstlAdr`).
+    ///
+    /// Optional in the SEPA schemes, but asked for by some banks and by
+    /// sanction screening. See [`PostalAddress`] for the
+    /// structured/hybrid rules and the 15 November 2026 cut-over.
+    #[must_use]
+    pub fn with_debtor_address(mut self, address: PostalAddress) -> Self {
+        self.debtor_address = Some(address);
         self
     }
 
@@ -744,13 +792,16 @@ impl DirectDebitEntry {
 #[non_exhaustive]
 pub struct DirectDebitGroup {
     payment_info_id: Option<String>,
-    creditor_name: String,
-    creditor_iban: Iban,
-    creditor_bic: Option<Bic>,
-    creditor_id: CreditorId,
-    sequence_type: SequenceType,
-    scheme: DirectDebitScheme,
-    collection_date: IsoDate,
+    // Visible to `pain007`, which copies a collection into the `OrgnlTxRef` of
+    // the reversal that undoes it.
+    pub(crate) creditor_name: String,
+    pub(crate) creditor_iban: Iban,
+    pub(crate) creditor_bic: Option<Bic>,
+    creditor_address: Option<PostalAddress>,
+    pub(crate) creditor_id: CreditorId,
+    pub(crate) sequence_type: SequenceType,
+    pub(crate) scheme: DirectDebitScheme,
+    pub(crate) collection_date: IsoDate,
     batch_booking: Option<bool>,
     category_purpose: Option<CategoryPurpose>,
     ultimate_creditor: Option<Party>,
@@ -775,6 +826,7 @@ impl DirectDebitGroup {
             creditor_name: creditor_name.into(),
             creditor_iban: creditor_iban.clone(),
             creditor_bic: None,
+            creditor_address: None,
             creditor_id: creditor_id.clone(),
             sequence_type: SequenceType::Rcur,
             scheme: DirectDebitScheme::Core,
@@ -830,6 +882,17 @@ impl DirectDebitGroup {
     #[must_use]
     pub fn creditor_bic(mut self, bic: Bic) -> Self {
         self.creditor_bic = Some(bic);
+        self
+    }
+
+    /// Set the creditor's postal address (`Cdtr/PstlAdr`).
+    ///
+    /// The address belongs to the account holder, so it lives on the group
+    /// rather than on each collection. See
+    /// [`PostalAddress`].
+    #[must_use]
+    pub fn creditor_address(mut self, address: PostalAddress) -> Self {
+        self.creditor_address = Some(address);
         self
     }
 
@@ -911,7 +974,7 @@ impl Pain008Builder {
     pub fn new(initiating_party: impl Into<String>) -> Self {
         Self {
             initiating_party: initiating_party.into(),
-            msg_id: format!("sepa-{}", epoch_secs()),
+            msg_id: default_msg_id("sepa"),
             created_at: None,
             schema: DirectDebitSchema::default(),
             charset: CharsetPolicy::default(),
@@ -919,7 +982,15 @@ impl Pain008Builder {
         }
     }
 
-    /// Override the `MsgId` (max 35 chars).
+    /// Set the `MsgId` (`Max35Text`).
+    ///
+    /// A `MsgId` is how a bank de-duplicates submissions: two files sharing one
+    /// are a duplicate, and the second is rejected — or, worse, accepted and
+    /// silently discarded. **Set it from your own persistent sequence.**
+    ///
+    /// The default is only a placeholder. It is unique within one process, so
+    /// building several messages in a loop cannot collide, but it does not
+    /// survive a restart and carries no meaning a bank or an auditor can use.
     #[must_use]
     pub fn msg_id(mut self, id: impl Into<String>) -> Self {
         self.msg_id = id.into();
@@ -1005,6 +1076,18 @@ impl Pain008Builder {
         format!("{}{suffix}", truncate_chars(&self.msg_id, keep))
     }
 
+    /// Refuse a postal address on a schema whose `PstlAdr` cannot hold one.
+    fn check_address_supported(&self, feature: &'static str) -> Result<(), ValidationError> {
+        if self.schema.supports_postal_address() {
+            Ok(())
+        } else {
+            Err(ValidationError::UnsupportedBySchema {
+                feature,
+                schema: self.schema.message_id(),
+            })
+        }
+    }
+
     /// Validate the message without producing XML.
     ///
     /// # Errors
@@ -1030,17 +1113,35 @@ impl Pain008Builder {
         .at(msg)?;
 
         let mut total: i64 = 0;
+        let mut seen_ids = std::collections::BTreeSet::new();
         for (i, g) in self.groups.iter().enumerate() {
             let at = Location::group(i);
             if g.entries.is_empty() {
                 return Err(BuildError::group(i, ValidationError::EmptyBatch));
             }
-            check_id("PmtInf/PmtInfId", &self.payment_info_id(i)).at(at)?;
+            // `PmtInfId` is what a bank echoes back in pain.002 and in a camt
+            // `Btch` block, so two groups sharing one make the booking
+            // unattributable — and duplicate detection may drop the second.
+            let id = self.payment_info_id(i);
+            check_id("PmtInf/PmtInfId", &id).at(at)?;
+            if !seen_ids.insert(id.clone()) {
+                return Err(BuildError::group(
+                    i,
+                    ValidationError::Duplicate {
+                        field: "PmtInf/PmtInfId",
+                        value: id,
+                    },
+                ));
+            }
             check_name(
                 "Cdtr/Nm",
                 &self.charset.apply("Cdtr/Nm", &g.creditor_name).at(at)?,
             )
             .at(at)?;
+            if let Some(a) = &g.creditor_address {
+                self.check_address_supported("Cdtr/PstlAdr").at(at)?;
+                a.validate(self.charset).at(at)?;
+            }
             if let Some(p) = &g.category_purpose {
                 p.validate("PmtTpInf/CtgyPurp/Cd").at(at)?;
             }
@@ -1064,6 +1165,10 @@ impl Pain008Builder {
                     &self.charset.apply("Dbtr/Nm", &e.debtor_name).at(at)?,
                 )
                 .at(at)?;
+                if let Some(a) = &e.debtor_address {
+                    self.check_address_supported("Dbtr/PstlAdr").at(at)?;
+                    a.validate(self.charset).at(at)?;
+                }
                 if let Some(p) = &e.ultimate_creditor {
                     p.validate("DrctDbtTxInf/UltmtCdtr", self.charset).at(at)?;
                 }
@@ -1077,15 +1182,8 @@ impl Pain008Builder {
                     a.validate(self.charset).at(at)?;
                 }
                 if let Some(r) = &e.remittance {
-                    if let RemittanceInfo::Unstructured(text) = r {
-                        check_remittance(
-                            "RmtInf/Ustrd",
-                            &self.charset.apply("RmtInf/Ustrd", text).at(at)?,
-                        )
+                    r.validate(crate::pain001::remittance_field(r), self.charset)
                         .at(at)?;
-                    } else {
-                        r.validate("RmtInf/Strd").at(at)?;
-                    }
                 }
                 total = total.checked_add(e.amount_ct).ok_or(BuildError {
                     location: at,
@@ -1172,10 +1270,7 @@ impl Pain008Builder {
 
         let now = self.created_at.unwrap_or_else(IsoDateTime::now);
         let namespace = self.schema.namespace();
-        let initiating = self
-            .charset
-            .apply("InitgPty/Nm", &self.initiating_party)
-            .unwrap_or(std::borrow::Cow::Borrowed(&self.initiating_party));
+        let initiating = self.charset.render(&self.initiating_party);
 
         w.write_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
         writeln!(w, "<Document xmlns=\"{namespace}\">")?;
@@ -1209,10 +1304,7 @@ impl Pain008Builder {
         use crate::xml_util::write_escaped;
 
         let bic_el = self.schema.bic_element();
-        let creditor_name = self
-            .charset
-            .apply("Cdtr/Nm", &g.creditor_name)
-            .unwrap_or(std::borrow::Cow::Borrowed(&g.creditor_name));
+        let creditor_name = self.charset.render(&g.creditor_name);
 
         w.write_str("    <PmtInf>\n      <PmtInfId>")?;
         write_escaped(w, payment_info_id)?;
@@ -1247,7 +1339,12 @@ impl Pain008Builder {
 
         w.write_str("      <Cdtr><Nm>")?;
         write_escaped(w, &creditor_name)?;
-        w.write_str("</Nm></Cdtr>\n")?;
+        // XSD sequence inside PartyIdentification: Nm, PstlAdr, Id, …
+        w.write_str("</Nm>")?;
+        if let Some(address) = &g.creditor_address {
+            address.write_xml(w, self.charset)?;
+        }
+        w.write_str("</Cdtr>\n")?;
         writeln!(
             w,
             "      <CdtrAcct><Id><IBAN>{}</IBAN></Id></CdtrAcct>",
@@ -1286,10 +1383,7 @@ impl Pain008Builder {
         use crate::xml_util::{write_escaped, write_eur};
 
         let bic_el = self.schema.bic_element();
-        let debtor_name = self
-            .charset
-            .apply("Dbtr/Nm", &e.debtor_name)
-            .unwrap_or(std::borrow::Cow::Borrowed(&e.debtor_name));
+        let debtor_name = self.charset.render(&e.debtor_name);
 
         w.write_str("    <DrctDbtTxInf>\n      <PmtId>\n        <EndToEndId>")?;
         write_escaped(w, &e.end_to_end_id)?;
@@ -1316,7 +1410,11 @@ impl Pain008Builder {
         }
         w.write_str("</FinInstnId></DbtrAgt>\n      <Dbtr><Nm>")?;
         write_escaped(w, &debtor_name)?;
-        w.write_str("</Nm></Dbtr>\n      <DbtrAcct><Id><IBAN>")?;
+        w.write_str("</Nm>")?;
+        if let Some(address) = &e.debtor_address {
+            address.write_xml(w, self.charset)?;
+        }
+        w.write_str("</Dbtr>\n      <DbtrAcct><Id><IBAN>")?;
         w.write_str(e.debtor_iban.as_str())?;
         w.write_str("</IBAN></Id></DbtrAcct>\n")?;
 
@@ -1340,12 +1438,28 @@ impl Pain008Builder {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-pub(crate) fn epoch_secs() -> u64 {
+/// A `MsgId` for a builder whose caller has not set one, as `<prefix>-<secs>-<n>`.
+///
+/// `MsgId` is the key a bank de-duplicates submissions by: two files sharing
+/// one are a duplicate, and the second is rejected — or worse, dropped in
+/// silence. A wall-clock second alone does not give that, because building two
+/// messages in the same second is the normal case in a batch job, so a
+/// process-wide counter is appended.
+///
+/// It is still only unique within one process. Anything that must survive a
+/// restart — which, for duplicate detection at a bank, is everything — belongs
+/// in `msg_id()` from the caller's own sequence.
+pub(crate) fn default_msg_id(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_secs();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{secs}-{n}")
 }
 
 /// Five days out — the SDD Core pre-notification floor for `FRST`/`OOFF`.
@@ -1462,6 +1576,62 @@ mod tests {
     }
 
     #[test]
+    fn postal_addresses_sit_inside_the_party_after_the_name() {
+        let xml = Pain008Builder::new("Test")
+            .msg_id("DD-ADR")
+            .add_group(
+                group("Stadtwerke GmbH")
+                    .creditor_address(
+                        crate::PostalAddress::new("Berlin", "DE")
+                            .unwrap()
+                            .street("Hauptstrasse")
+                            .building_number("1"),
+                    )
+                    .add_entry(
+                        entry("M1", 1_000).with_debtor_address(
+                            crate::PostalAddress::new("Wien", "AT")
+                                .unwrap()
+                                .post_code("1010"),
+                        ),
+                    ),
+            )
+            .build()
+            .unwrap();
+
+        assert!(xml.contains(
+            "<Cdtr><Nm>Stadtwerke GmbH</Nm><PstlAdr><StrtNm>Hauptstrasse</StrtNm>\
+             <BldgNb>1</BldgNb><TwnNm>Berlin</TwnNm><Ctry>DE</Ctry></PstlAdr></Cdtr>"
+        ));
+        assert!(xml.contains(
+            "<Dbtr><Nm>Max Mustermann</Nm><PstlAdr><PstCd>1010</PstCd>\
+             <TwnNm>Wien</TwnNm><Ctry>AT</Ctry></PstlAdr></Dbtr>"
+        ));
+    }
+
+    #[test]
+    fn an_address_on_a_schema_without_one_is_rejected() {
+        let err = Pain008Builder::new("Test")
+            .schema(DirectDebitSchema::DkV2_7)
+            .msg_id("DD-DK-ADR")
+            .add_group(
+                group("Test").add_entry(
+                    entry("M1", 100)
+                        .with_debtor_address(crate::PostalAddress::new("Wien", "AT").unwrap()),
+                ),
+            )
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.kind,
+            ValidationError::UnsupportedBySchema {
+                feature: "Dbtr/PstlAdr",
+                schema: "pain.008.003.02",
+            }
+        );
+        assert_eq!(err.location, Location::transaction(0, 0));
+    }
+
+    #[test]
     fn creditor_scheme_id_is_emitted_per_group() {
         let xml = one_group("Test").build().unwrap();
         assert!(xml.contains("DE98ZZZ09999999999"));
@@ -1525,6 +1695,44 @@ mod tests {
                 .kind,
             ValidationError::Empty { .. }
         ));
+    }
+
+    #[test]
+    fn an_amendment_cannot_both_state_and_suppress_the_previous_account() {
+        // `OrgnlDbtrAcct` occurs once; the writer used to silently prefer
+        // SMNDA and drop the IBAN the caller had supplied.
+        let amendment = MandateAmendment {
+            original_debtor_iban: Some(nl_iban()),
+            same_mandate_new_account: true,
+            ..MandateAmendment::default()
+        };
+        assert_eq!(
+            Pain008Builder::new("Test")
+                .msg_id("DD-AMD")
+                .add_group(group("Test").add_entry(entry("M1", 100).with_amendment(amendment)))
+                .build()
+                .unwrap_err()
+                .kind,
+            ValidationError::MutuallyExclusive {
+                field: "AmdmntInfDtls/OrgnlDbtrAcct",
+                first: "SMNDA",
+                second: "OrgnlDbtrAcct/Id/IBAN",
+            }
+        );
+
+        // Either one on its own is fine.
+        for a in [
+            MandateAmendment::debtor_account_changed(),
+            MandateAmendment::debtor_iban_changed(nl_iban()),
+        ] {
+            assert!(
+                Pain008Builder::new("Test")
+                    .msg_id("DD-AMD")
+                    .add_group(group("Test").add_entry(entry("M1", 100).with_amendment(a)))
+                    .build()
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

@@ -55,7 +55,7 @@
 
 use std::str::FromStr;
 
-use crate::validate::{MAX_REMITTANCE_LEN, ValidationError, check_remittance};
+use crate::validate::{ValidationError, check_remittance};
 
 /// Maximum total length of an RF Creditor Reference, including `RF` and the
 /// check digits (ISO 11649 §5).
@@ -268,11 +268,12 @@ impl TryFrom<&str> for RfReference {
 impl std::fmt::Display for RfReference {
     /// Printed format: groups of four, e.g. `"RF18 5390 0754 7034"`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (i, chunk) in self.0.as_bytes().chunks(4).enumerate() {
+        // Validation guarantees pure ASCII — see `crate::iban::group_of_four`.
+        for (i, chunk) in crate::iban::group_of_four(&self.0).enumerate() {
             if i > 0 {
                 f.write_str(" ")?;
             }
-            f.write_str(std::str::from_utf8(chunk).unwrap_or_default())?;
+            f.write_str(chunk)?;
         }
         Ok(())
     }
@@ -352,15 +353,28 @@ impl RemittanceInfo {
         Self::Structured(reference)
     }
 
-    /// Validate against the EPC length rules.
+    /// Validate against the EPC length and character-set rules.
+    ///
+    /// Free text is measured **after** the charset policy has been applied,
+    /// because transliteration can lengthen it — 140 characters of German
+    /// *Verwendungszweck* can cross the limit on its way to `Mueller`. Checking
+    /// the input instead would leave `build()` with a value it can neither emit
+    /// nor shorten without silently losing a reconciliation key.
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError`] when the text is empty or too long.
-    pub fn validate(&self, field: &'static str) -> Result<(), ValidationError> {
+    /// Returns [`ValidationError`] when the text is empty, too long, or — under
+    /// [`CharsetPolicy::Strict`](crate::CharsetPolicy::Strict) — outside the
+    /// SEPA character set.
+    pub fn validate(
+        &self,
+        field: &'static str,
+        charset: crate::validate::CharsetPolicy,
+    ) -> Result<(), ValidationError> {
         match self {
-            Self::Unstructured(text) => check_remittance(field, text),
-            // An RfReference is at most 25 characters by construction.
+            Self::Unstructured(text) => check_remittance(field, &charset.apply(field, text)?),
+            // An RfReference is at most 25 characters, and SEPA-legal, by
+            // construction — there is nothing left to check.
             Self::Structured(_) => Ok(()),
             Self::Proprietary { reference, .. } => {
                 // Ref is Max35Text, and the whole Strd block must stay under 140.
@@ -376,17 +390,17 @@ impl RemittanceInfo {
         indent: &str,
         charset: crate::validate::CharsetPolicy,
     ) -> std::fmt::Result {
-        use crate::validate::truncate_chars;
         use crate::xml_util::write_escaped;
 
         write!(w, "{indent}<RmtInf>")?;
         match self {
             Self::Unstructured(text) => {
-                let text = charset
-                    .apply("RmtInf/Ustrd", text)
-                    .unwrap_or(std::borrow::Cow::Borrowed(text));
+                // `validate` has already bounded this at MAX_REMITTANCE_LEN
+                // characters *after* transliteration, so there is nothing to
+                // truncate. Silently cutting here instead would ship a payment
+                // whose reference no longer matches the invoice.
                 w.write_str("<Ustrd>")?;
-                write_escaped(w, &truncate_chars(&text, MAX_REMITTANCE_LEN))?;
+                write_escaped(w, &charset.render(text))?;
                 w.write_str("</Ustrd>")?;
             }
             Self::Structured(rf) => {
@@ -645,19 +659,54 @@ mod tests {
 
     #[test]
     fn remittance_validation_enforces_epc_limits() {
+        let policy = crate::validate::CharsetPolicy::default();
         assert!(
             RemittanceInfo::unstructured("A".repeat(140))
-                .validate("RmtInf/Ustrd")
+                .validate("RmtInf/Ustrd", policy)
                 .is_ok()
         );
         assert!(matches!(
-            RemittanceInfo::unstructured("A".repeat(141)).validate("RmtInf/Ustrd"),
+            RemittanceInfo::unstructured("A".repeat(141)).validate("RmtInf/Ustrd", policy),
             Err(ValidationError::TooLong { .. })
         ));
         assert!(matches!(
-            RemittanceInfo::unstructured("").validate("RmtInf/Ustrd"),
+            RemittanceInfo::unstructured("").validate("RmtInf/Ustrd", policy),
             Err(ValidationError::Empty { .. })
         ));
+    }
+
+    #[test]
+    fn the_limit_binds_on_the_transliterated_text_not_the_input() {
+        // Regression: 140 characters of German went in, `Mueller`-style
+        // expansion pushed it past 140, and the writer silently cut the tail —
+        // which is where an invoice number tends to sit.
+        let policy = crate::validate::CharsetPolicy::default();
+        let input = format!("{}ü", "A".repeat(139)); // 140 chars in, 141 out
+        assert_eq!(input.chars().count(), 140);
+        assert!(matches!(
+            RemittanceInfo::unstructured(&input).validate("RmtInf/Ustrd", policy),
+            Err(ValidationError::TooLong {
+                max: 140,
+                actual: 141,
+                ..
+            })
+        ));
+        // The strict policy neither rewrites nor truncates — it names the char.
+        assert!(matches!(
+            RemittanceInfo::unstructured("Zahlung für Müller")
+                .validate("RmtInf/Ustrd", crate::validate::CharsetPolicy::Strict),
+            Err(ValidationError::InvalidCharacter { ch: 'ü', .. })
+        ));
+    }
+
+    #[test]
+    fn accepted_remittance_text_is_written_whole() {
+        let mut out = String::new();
+        let text = "Ü".repeat(70); // 70 chars in, 140 out — exactly the limit
+        RemittanceInfo::unstructured(&text)
+            .write_xml(&mut out, "", crate::validate::CharsetPolicy::default())
+            .unwrap();
+        assert!(out.contains(&format!("<Ustrd>{}</Ustrd>", "Ue".repeat(70))));
     }
 
     #[cfg(feature = "serde")]

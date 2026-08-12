@@ -13,13 +13,20 @@
 //! | `Nm` (any party) | 1–70 chars (XSD permits 140) | EPC IG |
 //! | `Ustrd` | 1–140 chars, one occurrence | EPC IG |
 //! | `InstdAmt` | 0.01 – 999,999,999.99 EUR, 2 decimals | EPC IG §2.95 |
+//! | `PstlAdr` | `TwnNm` + `Ctry` mandatory, ≤2 `AdrLine` | EPC153-22 v2.1 |
 //! | Batch | at least one transaction | `CdtTrfTxInf`/`DrctDbtTxInf` are `1..n` |
 //!
-//! Dates are absent from that table on purpose: they are [`IsoDate`] values,
-//! validated where they are constructed, so a malformed `ReqdColltnDt` cannot
-//! reach a builder in the first place.
+//! Two kinds of rule are absent from that table because they are enforced by
+//! construction rather than checked here:
+//!
+//! - **Dates** are [`IsoDate`] values, so a malformed `ReqdColltnDt` cannot
+//!   reach a builder in the first place.
+//! - **Unstructured addresses** are not representable: [`PostalAddress`]
+//!   requires a town and a country, which is the form the EPC schemes will
+//!   still accept after 15 November 2026.
 //!
 //! [`IsoDate`]: crate::IsoDate
+//! [`PostalAddress`]: crate::PostalAddress
 //!
 //! The amount ceiling is uniform across SCT, SCT Inst, SDD Core and SDD B2B.
 //! The old 100,000 EUR SCT Inst cap was removed from the scheme on
@@ -76,6 +83,21 @@ pub enum ValidationError {
         actual: usize,
     },
 
+    /// A repeating element occurred more often than the rules allow.
+    ///
+    /// Separate from [`TooLong`](Self::TooLong), which is about one value being
+    /// too long. This is about too many values — `PstlAdr/AdrLine` is capped at
+    /// two by the EPC even though the XSD permits seven.
+    #[error("{field} occurs {actual} times, exceeding the maximum of {max}")]
+    TooMany {
+        /// ISO 20022 element path of the offending field.
+        field: &'static str,
+        /// Maximum permitted number of occurrences.
+        max: usize,
+        /// Actual number of occurrences.
+        actual: usize,
+    },
+
     /// A field contained a character outside the SEPA Basic Latin set.
     ///
     /// Only produced under [`CharsetPolicy::Strict`]; the default policy
@@ -116,6 +138,23 @@ pub enum ValidationError {
         field: &'static str,
     },
 
+    /// Two mutually exclusive alternatives were both supplied.
+    ///
+    /// Distinct from [`ConflictingLevels`](Self::ConflictingLevels), which is
+    /// about the same element appearing at two *levels* of the message. This is
+    /// about two different elements that stand in for one another — a mandate
+    /// amendment cannot both name the previous debtor account and say `SMNDA`
+    /// for it.
+    #[error("{field}: {first} and {second} are alternatives — set one, not both")]
+    MutuallyExclusive {
+        /// ISO 20022 element path of the enclosing field.
+        field: &'static str,
+        /// The first alternative.
+        first: &'static str,
+        /// The second alternative.
+        second: &'static str,
+    },
+
     /// The selected schema version cannot carry a requested feature.
     ///
     /// The older schemas are not merely renamed: `pain.001.003.03` has no
@@ -127,6 +166,34 @@ pub enum ValidationError {
         feature: &'static str,
         /// The message identifier of the selected schema, e.g. `pain.001.003.03`.
         schema: &'static str,
+    },
+
+    /// A feature was used without the element the scheme requires beside it.
+    ///
+    /// Distinct from [`UnsupportedBySchema`](Self::UnsupportedBySchema): the
+    /// element exists in the selected schema, but the scheme rules only admit
+    /// it in combination with another. A timed `ReqdExctnDt` is the case in
+    /// point — the DK schema annotates `DtTm` *"Only allowed for `SCTinst`"*.
+    #[error("{feature} requires {requires}")]
+    Requires {
+        /// What the batch asked for, named as its ISO 20022 element.
+        feature: &'static str,
+        /// What has to accompany it.
+        requires: &'static str,
+    },
+
+    /// Two `PmtInf` groups in one message carry the same identifier.
+    ///
+    /// `PmtInfId` is the key a bank echoes back in `pain.002` and in the
+    /// `NtryDtls/Btch` block of a camt statement, so duplicates make a booking
+    /// unattributable — and duplicate-file detection may drop the second group
+    /// outright.
+    #[error("{field} {value:?} is used by more than one group — it must be unique in a message")]
+    Duplicate {
+        /// ISO 20022 element path of the offending field.
+        field: &'static str,
+        /// The value that occurred more than once.
+        value: String,
     },
 }
 
@@ -346,6 +413,21 @@ impl CharsetPolicy {
             },
         }
     }
+
+    /// The form of `text` a writer emits — the same conversion as
+    /// [`apply`](Self::apply), minus the error.
+    ///
+    /// Serialisation runs only after `validate()` has accepted the message, so
+    /// under [`Strict`](Self::Strict) there is by then nothing left to reject
+    /// and the text passes through. Having one infallible entry point for the
+    /// writers keeps that reasoning in a single place rather than repeated at
+    /// every element.
+    pub(crate) fn render(self, text: &str) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Transliterate(style) => transliterate(text, style),
+            Self::Strict => std::borrow::Cow::Borrowed(text),
+        }
+    }
 }
 
 impl Default for CharsetPolicy {
@@ -400,6 +482,19 @@ pub fn check_remittance(field: &'static str, value: &str) -> Result<(), Validati
     check_len(field, value, MAX_REMITTANCE_LEN)
 }
 
+/// Validate a free-text element against an explicit `Max*Text` bound.
+///
+/// Used where the limit is per-element rather than one of the three shared
+/// SEPA limits — the `PstlAdr` sub-elements run from `Max16Text` to
+/// `Max70Text`.
+///
+/// # Errors
+///
+/// See [`ValidationError`].
+pub fn check_text(field: &'static str, value: &str, max: usize) -> Result<(), ValidationError> {
+    check_len(field, value, max)
+}
+
 /// Non-empty and within `max` **characters** (not bytes).
 fn check_len(field: &'static str, value: &str, max: usize) -> Result<(), ValidationError> {
     if value.trim().is_empty() {
@@ -427,19 +522,22 @@ pub fn check_amount(field: &'static str, amount_ct: i64) -> Result<(), Validatio
     Ok(())
 }
 
-/// Truncate `s` to at most `max` **characters**, never splitting one.
+/// The longest prefix of `s` that is at most `max` **characters**.
 ///
-/// Slicing by byte index (`&s[..140]`) panics whenever the boundary lands
-/// inside a multi-byte character — which a German remittance line reaches
-/// routinely — and would mis-measure the limit even when it did not panic,
-/// since ISO 20022 counts characters.
+/// Slicing by byte index (`&s[..35]`) panics whenever the boundary lands inside
+/// a multi-byte character — which a German name reaches routinely — and would
+/// mis-measure the limit even when it did not panic, since ISO 20022 counts
+/// characters.
 ///
-/// Returns `Cow::Borrowed` when no truncation is needed.
+/// This is for values the crate *derives*, such as the `PmtInfId` it suffixes
+/// from a `MsgId`. Caller-supplied text is never silently shortened: an
+/// over-long field is a [`ValidationError::TooLong`], because a truncated
+/// remittance line is a reconciliation failure the sender never sees.
 #[must_use]
-pub fn truncate_chars(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
+pub fn truncate_chars(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {
-        Some((byte_idx, _)) => std::borrow::Cow::Borrowed(&s[..byte_idx]),
-        None => std::borrow::Cow::Borrowed(s),
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s,
     }
 }
 
@@ -608,11 +706,18 @@ mod tests {
 
     #[test]
     fn truncation_is_a_no_op_when_within_limit() {
-        assert!(matches!(
-            truncate_chars("short", 140),
-            std::borrow::Cow::Borrowed("short")
-        ));
+        assert_eq!(truncate_chars("short", 140), "short");
         assert_eq!(truncate_chars("", 140), "");
+    }
+
+    #[test]
+    fn render_is_apply_without_the_error() {
+        // Writers run after validation, so `render` never has to reject.
+        assert_eq!(
+            CharsetPolicy::default().render("Müller & Co"),
+            "Mueller + Co"
+        );
+        assert_eq!(CharsetPolicy::Strict.render("Mueller"), "Mueller");
     }
 
     #[test]

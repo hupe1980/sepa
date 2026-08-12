@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Rust crate · ISO 20022 · SEPA</p>
+    <h1>SEPA payment files, without the footguns</h1>
+    <p class="lede">{{ section.description }}</p>
+
+    <div class="cta">
+      <a class="btn btn-primary" href="{{ get_url(path='@/docs/getting-started.md') | safe }}">Get started</a>
+      <a class="btn" href="{{ config.extra.api_url }}">API reference</a>
+    </div>
+
+    <pre class="install"><code>cargo add sepa</code></pre>
+
+    <p class="badges">
+      <a href="{{ config.extra.crate_url }}"><img alt="crates.io" src="https://img.shields.io/crates/v/sepa.svg"></a>
+      <a href="{{ config.extra.api_url }}"><img alt="docs.rs" src="https://img.shields.io/docsrs/sepa"></a>
+      <a href="{{ config.extra.repo }}/actions/workflows/ci.yml"><img alt="CI" src="{{ config.extra.repo }}/actions/workflows/ci.yml/badge.svg"></a>
+      <img alt="MSRV 1.88" src="https://img.shields.io/badge/rustc-1.88+-orange.svg">
+    </p>
+  </div>
+</section>
+
+<section class="wrap prose">
+  {{ section.content | safe }}
+</section>
+{% endblock %}

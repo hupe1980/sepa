@@ -233,8 +233,11 @@ impl Document {
                     let node = element(&e)?;
                     match stack.last_mut() {
                         Some(parent) => parent.children.push(node),
-                        // A self-closing root element: `<Document/>`.
-                        None => root = Some(node),
+                        // A self-closing root element: `<Document/>`. It goes
+                        // through `set_root` like any other, or a document
+                        // beginning `<Document/>` could be displaced by a
+                        // second root appended after it.
+                        None => set_root(&mut root, node)?,
                     }
                 }
                 Event::End(_) => {
@@ -242,15 +245,12 @@ impl Document {
                         continue;
                     };
                     // Trim once, now that every text run and entity reference
-                    // for this element has been appended.
-                    let trimmed = node.text.trim();
-                    if trimmed.len() != node.text.len() {
-                        // Truncate/shift in place rather than reallocating.
-                        let start = trimmed.as_ptr() as usize - node.text.as_ptr() as usize;
-                        let end = start + trimmed.len();
-                        node.text.replace_range(..start, "");
-                        node.text.truncate(end - start);
-                    }
+                    // for this element has been appended. Truncate and shift in
+                    // place rather than reallocating.
+                    let end = node.text.trim_end().len();
+                    node.text.truncate(end);
+                    let start = node.text.len() - node.text.trim_start().len();
+                    node.text.replace_range(..start, "");
                     match stack.last_mut() {
                         Some(parent) => parent.children.push(node),
                         None => set_root(&mut root, node)?,
@@ -490,6 +490,23 @@ mod tests {
         let xml = "<Doc xmlns='urn:x'><MsgId>REAL</MsgId></Doc>\
                    <Doc xmlns='urn:evil'><MsgId>EVIL</MsgId></Doc>";
         assert_eq!(Document::parse(xml), Err(XmlError::MultipleRootElements));
+    }
+
+    #[test]
+    fn a_self_closing_root_cannot_be_displaced_either() {
+        // Regression: `Event::Empty` at depth 0 assigned the root directly,
+        // bypassing the duplicate check — so `<Doc/>` followed by a second
+        // root silently handed the caller the *second* document.
+        assert_eq!(
+            Document::parse("<Doc/><Doc xmlns='urn:evil'><MsgId>EVIL</MsgId></Doc>"),
+            Err(XmlError::MultipleRootElements)
+        );
+        assert_eq!(
+            Document::parse("<Doc><MsgId>REAL</MsgId></Doc><Doc/>"),
+            Err(XmlError::MultipleRootElements)
+        );
+        // A document that really is just a self-closing root still parses.
+        assert_eq!(Document::parse("<Doc/>").unwrap().root.name, "Doc");
     }
 
     #[test]

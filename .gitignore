@@ -20,8 +20,21 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Zola build output
+/site/public
+
+# macOS Finder metadata
+.DS_Store
+
 # cargo-fuzz
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts
 /fuzz/Cargo.lock
+
+# Specification downloads (staging area) — ISO 20022 originals, DK/GBIC
+# validation subsets and the published example files. They are large and their
+# redistribution terms are unclear, so they are never committed. Only the
+# individual XSDs the tests need are vendored, into tests/xsd/.
+/schemas/*
+!/schemas/README.md

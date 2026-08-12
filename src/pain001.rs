@@ -17,11 +17,20 @@
 //! parse it from configuration — the enum implements [`FromStr`]
 //! over both the message identifier (`"pain.001.001.03"`) and the namespace URN.
 //!
+//! ## Postal addresses
+//!
+//! `Dbtr/PstlAdr` sits on the group (it belongs to the account holder) and
+//! `Cdtr/PstlAdr` on each transfer. Both are optional, and both must be
+//! structured or hybrid — see [`PostalAddress`] for the
+//! 15 November 2026 cut-over. The legacy DK schema cannot carry one and says
+//! so with [`ValidationError::UnsupportedBySchema`].
+//!
 //! ## References
 //!
 //! - ISO 20022 pain.001.001.03 / pain.001.001.09 / pain.001.003.03 schemas
-//! - EPC SEPA Credit Transfer Rulebook (SCT)
-//! - EPC SEPA Instant Credit Transfer Rulebook (SCT Inst)
+//! - EPC SEPA Credit Transfer Rulebook (SCT), 2025 version
+//! - EPC SEPA Instant Credit Transfer Rulebook (SCT Inst), 2025 version
+//! - EPC153-22 v2.1, Provision of Addresses under the EPC Payment Schemes
 //! - Deutsche Kreditwirtschaft DFÜ-Abkommen V2.7
 //!
 //! ## Example
@@ -66,13 +75,14 @@
 
 use std::str::FromStr;
 
+use crate::address::PostalAddress;
 use crate::date::IsoDate;
 use crate::party::Party;
 use crate::purpose::{CategoryPurpose, Purpose};
 use crate::reference::RemittanceInfo;
 use crate::validate::{
     BuildError, CharsetPolicy, Locate, Location, MAX_ID_LEN, UnknownSchema, ValidationError,
-    WriteError, check_amount, check_id, check_name, check_remittance, truncate_chars,
+    WriteError, check_amount, check_id, check_name, truncate_chars,
 };
 use crate::{Bic, Iban, IsoDateTime, ct_to_eur_str};
 
@@ -167,6 +177,17 @@ impl CreditTransferSchema {
         !matches!(self, Self::DkV2_7)
     }
 
+    /// Whether this schema can carry a structured `PstlAdr`.
+    ///
+    /// The DK schema cannot: its `PostalAddressSEPA` type holds nothing but
+    /// `Ctry` and two `AdrLine`s — precisely the unstructured form the EPC
+    /// retires on 15 November 2026 — so there is no element to put a town or a
+    /// street in. See [`PostalAddress`].
+    #[must_use]
+    pub const fn supports_postal_address(self) -> bool {
+        !matches!(self, Self::DkV2_7)
+    }
+
     /// The element name carrying an agent's BIC.
     ///
     /// ISO renamed `BIC` to `BICFI` in the 2019 maintenance release.
@@ -178,9 +199,13 @@ impl CreditTransferSchema {
         }
     }
 
-    /// Whether `ReqdExctnDt` needs a `<Dt>` wrapper child.
+    /// Whether `ReqdExctnDt` is a date/time choice rather than a bare date.
+    ///
+    /// Only `pain.001.001.09` types it as `DateAndDateTime2Choice`. That is
+    /// both why the date needs a `<Dt>` wrapper there and why a timed execution
+    /// ([`ExecutionMoment::At`]) is expressible only on that version.
     #[must_use]
-    const fn wraps_execution_date(self) -> bool {
+    pub const fn supports_execution_time(self) -> bool {
         matches!(self, Self::IsoV9)
     }
 }
@@ -236,6 +261,104 @@ pub enum LocalInstrument {
     Inst,
 }
 
+// ── ExecutionMoment ───────────────────────────────────────────────────────────
+
+/// When a payment group is to be executed (`ReqdExctnDt`).
+///
+/// `pain.001.001.09` types this as a `DateAndDateTime2Choice`, so it is either
+/// a bare day or a day *and* a time. The timed form is what the Deutsche
+/// Kreditwirtschaft calls a **terminierte Echtzeitüberweisung** — a scheduled
+/// SEPA Instant transfer that is to leave the account at a stated moment rather
+/// than at some point during the day.
+///
+/// The older schemas type `ReqdExctnDt` as a bare `ISODate` and have no choice
+/// wrapper at all, so [`At`](Self::At) on those is rejected with
+/// [`ValidationError::UnsupportedBySchema`] rather than silently downgraded to
+/// the date — a payment that was meant to leave at 11:00 must not quietly
+/// become "some time that day".
+///
+/// ## Two rules no XSD can express
+///
+/// The DK validation subset annotates `DtTm` *"Only allowed for `SCTinst`"*, with
+/// the usage rule *"Only UTC time format or local time with UTC offset format
+/// can be used"*. Both are prose in the schema, so `xmllint` accepts a file
+/// that breaks either and the bank rejects it on ingestion. `build()` returns
+/// [`ValidationError::Requires`] instead:
+///
+/// - [`At`](Self::At) needs [`LocalInstrument::Inst`] on the same group. An
+///   ordinary SCT settles some time during the banking day, so a time of day on
+///   one instructs nothing.
+/// - The timestamp needs a UTC offset — `2026-07-20T11:00:00Z` or
+///   `2026-07-20T13:00:00+02:00`. See [`IsoDateTime::in_utc`].
+///
+/// # Examples
+///
+/// ```
+/// use sepa::{CreditTransferGroup, IsoDate, IsoDateTime, validate_iban};
+/// use sepa::pain001::LocalInstrument;
+///
+/// let iban = validate_iban("DE89370400440532013000")?;
+///
+/// // The ordinary case — a day.
+/// let plain = CreditTransferGroup::new("Acme", &iban)
+///     .execution_date(IsoDate::new(2026, 7, 20)?);
+///
+/// // A scheduled instant transfer — a day and a time.
+/// let timed = CreditTransferGroup::new("Acme", &iban)
+///     .local_instrument(LocalInstrument::Inst)
+///     .execution_at("2026-07-20T11:00:00Z".parse::<IsoDateTime>()?);
+/// # let _ = (plain, timed);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ExecutionMoment {
+    /// `<ReqdExctnDt><Dt>2026-07-20</Dt></ReqdExctnDt>` — a banking day.
+    On(IsoDate),
+    /// `<ReqdExctnDt><DtTm>2026-07-20T11:00:00Z</DtTm></ReqdExctnDt>` — a moment.
+    At(IsoDateTime),
+}
+
+impl ExecutionMoment {
+    /// The day this group executes on, whichever form was given.
+    #[must_use]
+    pub const fn date(self) -> IsoDate {
+        match self {
+            Self::On(date) => date,
+            Self::At(moment) => moment.date(),
+        }
+    }
+
+    /// Whether this carries a time of day, and so needs the `DtTm` branch.
+    #[must_use]
+    pub const fn is_timed(self) -> bool {
+        matches!(self, Self::At(_))
+    }
+}
+
+impl From<IsoDate> for ExecutionMoment {
+    fn from(date: IsoDate) -> Self {
+        Self::On(date)
+    }
+}
+
+impl From<IsoDateTime> for ExecutionMoment {
+    fn from(moment: IsoDateTime) -> Self {
+        Self::At(moment)
+    }
+}
+
+/// The ISO 20022 element path a remittance violation should name.
+///
+/// `Ustrd` and `Strd` are alternatives inside one `RmtInf`, and an error that
+/// says which branch failed is what points an operator at the right field.
+pub(crate) fn remittance_field(remittance: &RemittanceInfo) -> &'static str {
+    match remittance {
+        RemittanceInfo::Unstructured(_) => "RmtInf/Ustrd",
+        _ => "RmtInf/Strd",
+    }
+}
+
 // ── CreditTransferEntry ───────────────────────────────────────────────────────
 
 /// A single credit transfer in a pain.001 batch.
@@ -251,6 +374,8 @@ pub struct CreditTransferEntry {
     pub creditor_iban: Iban,
     /// Beneficiary BIC. Uses `NOTPROVIDED` in XML when `None`.
     pub creditor_bic: Option<Bic>,
+    /// Beneficiary postal address (`Cdtr/PstlAdr`).
+    pub creditor_address: Option<PostalAddress>,
     /// Payment amount in **ct** (1/100 EUR). Must be positive.
     pub amount_ct: i64,
     /// Unique end-to-end reference (`EndToEndId`) visible on beneficiary's statement.
@@ -281,6 +406,7 @@ impl CreditTransferEntry {
             amount_ct,
             end_to_end_id: end_to_end_id.into(),
             creditor_bic: None,
+            creditor_address: None,
             remittance: None,
             ultimate_debtor: None,
             ultimate_creditor: None,
@@ -292,6 +418,17 @@ impl CreditTransferEntry {
     #[must_use]
     pub fn with_bic(mut self, bic: Bic) -> Self {
         self.creditor_bic = Some(bic);
+        self
+    }
+
+    /// Set the beneficiary's postal address (`Cdtr/PstlAdr`).
+    ///
+    /// Optional in the SEPA schemes, but asked for by some banks and by
+    /// sanction screening. See [`PostalAddress`] for the
+    /// structured/hybrid rules and the 15 November 2026 cut-over.
+    #[must_use]
+    pub fn with_creditor_address(mut self, address: PostalAddress) -> Self {
+        self.creditor_address = Some(address);
         self
     }
 
@@ -382,7 +519,8 @@ pub struct CreditTransferGroup {
     debtor_name: String,
     debtor_iban: Iban,
     debtor_bic: Option<Bic>,
-    execution_date: IsoDate,
+    debtor_address: Option<PostalAddress>,
+    execution: ExecutionMoment,
     local_instrument: LocalInstrument,
     batch_booking: Option<bool>,
     category_purpose: Option<CategoryPurpose>,
@@ -398,7 +536,12 @@ impl CreditTransferGroup {
             debtor_name: debtor_name.into(),
             debtor_iban: debtor_iban.clone(),
             debtor_bic: None,
-            execution_date: crate::pain008::default_collection_date(),
+            debtor_address: None,
+            // Today, meaning "as soon as the bank can". A credit transfer has
+            // no pre-notification period to respect — that is a direct debit
+            // rule, and borrowing it here put every unset transfer five days
+            // into the future for no reason anyone could state.
+            execution: ExecutionMoment::On(IsoDate::today()),
             local_instrument: LocalInstrument::None,
             batch_booking: None,
             category_purpose: None,
@@ -420,24 +563,61 @@ impl CreditTransferGroup {
 
     /// Set the requested execution date (`ReqdExctnDt`).
     ///
-    /// Defaults to five days out. The date is an [`IsoDate`], so a malformed
-    /// one cannot reach the batch.
+    /// Defaults to today — "as soon as the bank can". The date is an
+    /// [`IsoDate`], so a malformed one cannot reach the batch; it is calendar
+    /// arithmetic, though, so a date landing on a weekend or a TARGET2 holiday
+    /// is the caller's to avoid.
     #[must_use]
     pub fn execution_date(mut self, date: IsoDate) -> Self {
-        self.execution_date = date;
+        self.execution = ExecutionMoment::On(date);
         self
     }
 
-    /// The requested execution date.
+    /// Set the requested execution **moment** — a day and a time.
+    ///
+    /// This is the DK's *terminierte Echtzeitüberweisung*: a scheduled instant
+    /// transfer due at a stated time. Three things have to line up, and
+    /// `build()` checks all three — see [`ExecutionMoment`]:
+    ///
+    /// 1. `pain.001.001.09`, the only schema whose `ReqdExctnDt` is a
+    ///    date/time choice;
+    /// 2. [`local_instrument(LocalInstrument::Inst)`](Self::local_instrument)
+    ///    on this group;
+    /// 3. a UTC offset on `moment` — `"…T11:00:00Z"`, or
+    ///    [`IsoDateTime::in_utc`].
+    #[must_use]
+    pub fn execution_at(mut self, moment: IsoDateTime) -> Self {
+        self.execution = ExecutionMoment::At(moment);
+        self
+    }
+
+    /// When this group is to execute, in whichever form it was set.
+    #[must_use]
+    pub const fn execution(&self) -> ExecutionMoment {
+        self.execution
+    }
+
+    /// The day this group is to execute on, whether or not a time was set.
     #[must_use]
     pub const fn requested_execution_date(&self) -> IsoDate {
-        self.execution_date
+        self.execution.date()
     }
 
     /// Set the debtor's BIC (`DbtrAgt`).
     #[must_use]
     pub fn debtor_bic(mut self, bic: Bic) -> Self {
         self.debtor_bic = Some(bic);
+        self
+    }
+
+    /// Set the debtor's postal address (`Dbtr/PstlAdr`).
+    ///
+    /// The address belongs to the account holder, so it lives on the group
+    /// rather than on each transfer. See
+    /// [`PostalAddress`].
+    #[must_use]
+    pub fn debtor_address(mut self, address: PostalAddress) -> Self {
+        self.debtor_address = Some(address);
         self
     }
 
@@ -536,7 +716,7 @@ impl Pain001Builder {
     pub fn new(initiating_party: impl Into<String>) -> Self {
         Self {
             initiating_party: initiating_party.into(),
-            msg_id: format!("sct-{}", crate::pain008::epoch_secs()),
+            msg_id: crate::pain008::default_msg_id("sct"),
             created_at: None,
             schema: CreditTransferSchema::default(),
             charset: CharsetPolicy::default(),
@@ -544,7 +724,15 @@ impl Pain001Builder {
         }
     }
 
-    /// Override the `MsgId` (max 35 chars).
+    /// Set the `MsgId` (`Max35Text`).
+    ///
+    /// A `MsgId` is how a bank de-duplicates submissions: two files sharing one
+    /// are a duplicate, and the second is rejected — or, worse, accepted and
+    /// silently discarded. **Set it from your own persistent sequence.**
+    ///
+    /// The default is only a placeholder. It is unique within one process, so
+    /// building several messages in a loop cannot collide, but it does not
+    /// survive a restart and carries no meaning a bank or an auditor can use.
     #[must_use]
     pub fn msg_id(mut self, id: impl Into<String>) -> Self {
         self.msg_id = id.into();
@@ -626,6 +814,18 @@ impl Pain001Builder {
         format!("{}{suffix}", truncate_chars(&self.msg_id, keep))
     }
 
+    /// Refuse a postal address on a schema whose `PstlAdr` cannot hold one.
+    fn check_address_supported(&self, feature: &'static str) -> Result<(), ValidationError> {
+        if self.schema.supports_postal_address() {
+            Ok(())
+        } else {
+            Err(ValidationError::UnsupportedBySchema {
+                feature,
+                schema: self.schema.message_id(),
+            })
+        }
+    }
+
     /// Validate the message without producing XML.
     ///
     /// # Errors
@@ -651,29 +851,94 @@ impl Pain001Builder {
         .at(msg)?;
 
         let mut total: i64 = 0;
+        let mut seen_ids = std::collections::BTreeSet::new();
         for (i, g) in self.groups.iter().enumerate() {
+            self.validate_group(i, g, &mut seen_ids, &mut total)?;
+        }
+        Ok(())
+    }
+
+    /// The rules that tie a group's local instrument to its execution moment.
+    ///
+    /// None of these are expressible in XSD, so a file that breaks them
+    /// validates cleanly against the schema and is rejected on ingestion.
+    fn check_instrument_and_timing(
+        g: &CreditTransferGroup,
+        schema: CreditTransferSchema,
+    ) -> Result<(), ValidationError> {
+        let unsupported = |feature| ValidationError::UnsupportedBySchema {
+            feature,
+            schema: schema.message_id(),
+        };
+        // `LclInstrm` does not exist in every schema, so an SCT Inst group on
+        // the DK schema would silently produce an invalid file.
+        if g.local_instrument == LocalInstrument::Inst && !schema.supports_local_instrument() {
+            return Err(unsupported("PmtTpInf/LclInstrm (SCT Inst)"));
+        }
+        // A timed execution exists only where `ReqdExctnDt` is a choice…
+        let ExecutionMoment::At(moment) = g.execution else {
+            return Ok(());
+        };
+        if !schema.supports_execution_time() {
+            return Err(unsupported("ReqdExctnDt/DtTm (timed execution)"));
+        }
+        // …and only for SCT Inst. The DK validation subset annotates `DtTm`
+        // "Only allowed for SCTinst": an ordinary SCT settles some time during
+        // the banking day, so a time of day on one instructs nothing.
+        if g.local_instrument != LocalInstrument::Inst {
+            return Err(ValidationError::Requires {
+                feature: "ReqdExctnDt/DtTm (timed execution)",
+                requires: "PmtTpInf/LclInstrm = INST (SCT Inst)",
+            });
+        }
+        // The same annotation carries the usage rule "Only UTC time format or
+        // local time with UTC offset format can be used" — a bare local time
+        // does not name an instant, and naming one is the whole point.
+        if moment.offset_minutes().is_none() {
+            return Err(ValidationError::Requires {
+                feature: "ReqdExctnDt/DtTm (timed execution)",
+                requires: "a UTC offset — see IsoDateTime::in_utc",
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate one `PmtInf` and add its amounts to the running control sum.
+    fn validate_group(
+        &self,
+        i: usize,
+        g: &CreditTransferGroup,
+        seen_ids: &mut std::collections::BTreeSet<String>,
+        total: &mut i64,
+    ) -> Result<(), BuildError> {
+        {
             let at = Location::group(i);
             if g.entries.is_empty() {
                 return Err(BuildError::group(i, ValidationError::EmptyBatch));
             }
-            check_id("PmtInf/PmtInfId", &self.payment_info_id(i)).at(at)?;
+            // `PmtInfId` is what a bank echoes back in pain.002 and in a camt
+            // `Btch` block, so two groups sharing one make the booking
+            // unattributable — and duplicate detection may drop the second.
+            let id = self.payment_info_id(i);
+            check_id("PmtInf/PmtInfId", &id).at(at)?;
+            if !seen_ids.insert(id.clone()) {
+                return Err(BuildError::group(
+                    i,
+                    ValidationError::Duplicate {
+                        field: "PmtInf/PmtInfId",
+                        value: id,
+                    },
+                ));
+            }
             check_name(
                 "Dbtr/Nm",
                 &self.charset.apply("Dbtr/Nm", &g.debtor_name).at(at)?,
             )
             .at(at)?;
-            // `LclInstrm` does not exist in every schema, so an SCT Inst group
-            // on the DK schema would silently produce an invalid file.
-            if g.local_instrument == LocalInstrument::Inst
-                && !self.schema.supports_local_instrument()
-            {
-                return Err(BuildError::group(
-                    i,
-                    ValidationError::UnsupportedBySchema {
-                        feature: "PmtTpInf/LclInstrm (SCT Inst)",
-                        schema: self.schema.message_id(),
-                    },
-                ));
+            Self::check_instrument_and_timing(g, self.schema).at(at)?;
+            if let Some(a) = &g.debtor_address {
+                self.check_address_supported("Dbtr/PstlAdr").at(at)?;
+                a.validate(self.charset).at(at)?;
             }
             if let Some(p) = &g.category_purpose {
                 p.validate("PmtTpInf/CtgyPurp/Cd").at(at)?;
@@ -698,6 +963,10 @@ impl Pain001Builder {
                     &self.charset.apply("Cdtr/Nm", &e.creditor_name).at(at)?,
                 )
                 .at(at)?;
+                if let Some(a) = &e.creditor_address {
+                    self.check_address_supported("Cdtr/PstlAdr").at(at)?;
+                    a.validate(self.charset).at(at)?;
+                }
                 if let Some(p) = &e.ultimate_debtor {
                     p.validate("CdtTrfTxInf/UltmtDbtr", self.charset).at(at)?;
                 }
@@ -708,17 +977,9 @@ impl Pain001Builder {
                     p.validate("CdtTrfTxInf/Purp/Cd").at(at)?;
                 }
                 if let Some(r) = &e.remittance {
-                    if let RemittanceInfo::Unstructured(text) = r {
-                        check_remittance(
-                            "RmtInf/Ustrd",
-                            &self.charset.apply("RmtInf/Ustrd", text).at(at)?,
-                        )
-                        .at(at)?;
-                    } else {
-                        r.validate("RmtInf/Strd").at(at)?;
-                    }
+                    r.validate(remittance_field(r), self.charset).at(at)?;
                 }
-                total = total.checked_add(e.amount_ct).ok_or(BuildError {
+                *total = total.checked_add(e.amount_ct).ok_or(BuildError {
                     location: at,
                     kind: ValidationError::ControlSumOverflow,
                 })?;
@@ -786,10 +1047,7 @@ impl Pain001Builder {
 
         let now = self.created_at.unwrap_or_else(IsoDateTime::now);
         let namespace = self.schema.namespace();
-        let initiating = self
-            .charset
-            .apply("InitgPty/Nm", &self.initiating_party)
-            .unwrap_or(std::borrow::Cow::Borrowed(&self.initiating_party));
+        let initiating = self.charset.render(&self.initiating_party);
 
         w.write_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
         writeln!(w, "<Document xmlns=\"{namespace}\">")?;
@@ -824,10 +1082,7 @@ impl Pain001Builder {
         use crate::xml_util::write_escaped;
 
         let bic_el = self.schema.bic_element();
-        let debtor_name = self
-            .charset
-            .apply("Dbtr/Nm", &g.debtor_name)
-            .unwrap_or(std::borrow::Cow::Borrowed(&g.debtor_name));
+        let debtor_name = self.charset.render(&g.debtor_name);
 
         w.write_str("    <PmtInf>\n      <PmtInfId>")?;
         write_escaped(w, payment_info_id)?;
@@ -850,20 +1105,29 @@ impl Pain001Builder {
         }
         w.write_str("      </PmtTpInf>\n")?;
 
-        // pain.001.001.09 types ReqdExctnDt as a date/time choice.
-        if self.schema.wraps_execution_date() {
-            writeln!(
-                w,
-                "      <ReqdExctnDt><Dt>{}</Dt></ReqdExctnDt>",
-                g.execution_date
-            )?;
-        } else {
-            writeln!(w, "      <ReqdExctnDt>{}</ReqdExctnDt>", g.execution_date)?;
+        // pain.001.001.09 types ReqdExctnDt as a date/time choice; the older
+        // schemas take a bare ISODate.
+        match (self.schema.supports_execution_time(), g.execution) {
+            (true, ExecutionMoment::On(date)) => {
+                writeln!(w, "      <ReqdExctnDt><Dt>{date}</Dt></ReqdExctnDt>")?;
+            }
+            (true, ExecutionMoment::At(moment)) => {
+                writeln!(w, "      <ReqdExctnDt><DtTm>{moment}</DtTm></ReqdExctnDt>")?;
+            }
+            // `validate` has already refused a timed moment here.
+            (false, moment) => {
+                writeln!(w, "      <ReqdExctnDt>{}</ReqdExctnDt>", moment.date())?;
+            }
         }
 
         w.write_str("      <Dbtr><Nm>")?;
         write_escaped(w, &debtor_name)?;
-        w.write_str("</Nm></Dbtr>\n")?;
+        // XSD sequence inside PartyIdentification: Nm, PstlAdr, Id, …
+        w.write_str("</Nm>")?;
+        if let Some(address) = &g.debtor_address {
+            address.write_xml(w, self.charset)?;
+        }
+        w.write_str("</Dbtr>\n")?;
         writeln!(
             w,
             "      <DbtrAcct><Id><IBAN>{}</IBAN></Id></DbtrAcct>",
@@ -896,10 +1160,7 @@ impl Pain001Builder {
         use crate::xml_util::{write_escaped, write_eur};
 
         let bic_el = self.schema.bic_element();
-        let name = self
-            .charset
-            .apply("Cdtr/Nm", &e.creditor_name)
-            .unwrap_or(std::borrow::Cow::Borrowed(&e.creditor_name));
+        let name = self.charset.render(&e.creditor_name);
 
         w.write_str("    <CdtTrfTxInf>\n      <PmtId>\n        <EndToEndId>")?;
         write_escaped(w, &e.end_to_end_id)?;
@@ -927,7 +1188,11 @@ impl Pain001Builder {
 
         w.write_str("      <Cdtr><Nm>")?;
         write_escaped(w, &name)?;
-        w.write_str("</Nm></Cdtr>\n      <CdtrAcct><Id><IBAN>")?;
+        w.write_str("</Nm>")?;
+        if let Some(address) = &e.creditor_address {
+            address.write_xml(w, self.charset)?;
+        }
+        w.write_str("</Cdtr>\n      <CdtrAcct><Id><IBAN>")?;
         w.write_str(e.creditor_iban.as_str())?;
         w.write_str("</IBAN></Id></CdtrAcct>\n")?;
 
@@ -1046,6 +1311,59 @@ mod tests {
     }
 
     #[test]
+    fn two_groups_may_not_share_a_payment_info_id() {
+        // A bank echoes PmtInfId back in pain.002 and in the camt `Btch` block.
+        // Two groups sharing one make a booking unattributable, and duplicate
+        // detection may drop the second outright.
+        let g = |id: &str| {
+            CreditTransferGroup::new("Acme", &de_iban())
+                .payment_info_id(id)
+                .execution_date(d("2026-07-20"))
+                .add_entry(entry(100))
+        };
+        let err = Pain001Builder::new("Acme")
+            .msg_id("CT-DUP")
+            .add_group(g("PMT-1"))
+            .add_group(g("PMT-1"))
+            .build()
+            .unwrap_err();
+        assert_eq!(err.location, Location::group(1));
+        assert_eq!(
+            err.kind,
+            ValidationError::Duplicate {
+                field: "PmtInf/PmtInfId",
+                value: "PMT-1".to_owned(),
+            }
+        );
+        // Distinct identifiers, and the generated defaults, are fine.
+        assert!(
+            Pain001Builder::new("Acme")
+                .msg_id("CT-OK")
+                .add_group(g("PMT-1"))
+                .add_group(g("PMT-2"))
+                .build()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_generated_message_id_is_unique_per_message() {
+        // Regression: the default was `sct-<epoch seconds>`, so two messages
+        // built in the same second shared a MsgId — which is precisely the key
+        // a bank de-duplicates submissions by.
+        let ids: std::collections::BTreeSet<String> = (0..64)
+            .map(|_| Pain001Builder::new("Acme").msg_id.clone())
+            .collect();
+        assert_eq!(ids.len(), 64, "generated MsgIds collided");
+        for id in &ids {
+            assert!(
+                crate::validate::check_id("GrpHdr/MsgId", id).is_ok(),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
     fn single_group_reuses_the_msg_id_verbatim() {
         let xml = one_group("Acme").build().unwrap();
         assert!(xml.contains("<PmtInfId>CT-001</PmtInfId>"));
@@ -1092,6 +1410,94 @@ mod tests {
             .unwrap();
         assert!(xml.contains("pain.001.001.09"));
         assert!(xml.contains("<LclInstrm><Cd>INST</Cd></LclInstrm>"));
+    }
+
+    #[test]
+    fn postal_addresses_sit_inside_the_party_after_the_name() {
+        // PartyIdentification is a sequence: Nm, then PstlAdr. Emitting them the
+        // other way round is schema-invalid even though both elements are legal.
+        let xml = Pain001Builder::new("Acme GmbH")
+            .msg_id("CT-ADR")
+            .add_group(
+                CreditTransferGroup::new("Acme GmbH", &de_iban())
+                    .execution_date(d("2026-07-20"))
+                    .debtor_address(
+                        crate::PostalAddress::new("Berlin", "DE")
+                            .unwrap()
+                            .street("Unter den Linden")
+                            .building_number("77")
+                            .post_code("10117"),
+                    )
+                    .add_entry(entry(12_000).with_creditor_address(
+                        crate::PostalAddress::new("Amsterdam", "NL").unwrap(),
+                    )),
+            )
+            .build()
+            .unwrap();
+
+        assert!(xml.contains(
+            "<Dbtr><Nm>Acme GmbH</Nm><PstlAdr><StrtNm>Unter den Linden</StrtNm>\
+             <BldgNb>77</BldgNb><PstCd>10117</PstCd><TwnNm>Berlin</TwnNm>\
+             <Ctry>DE</Ctry></PstlAdr></Dbtr>"
+        ));
+        assert!(xml.contains(
+            "<Cdtr><Nm>Max Mustermann</Nm><PstlAdr><TwnNm>Amsterdam</TwnNm>\
+             <Ctry>NL</Ctry></PstlAdr></Cdtr>"
+        ));
+    }
+
+    #[test]
+    fn an_address_on_a_schema_without_one_is_rejected() {
+        // pain.001.003.03's PostalAddressSEPA holds only Ctry and two AdrLines,
+        // so a town and a street have nowhere to go.
+        let err = Pain001Builder::new("Acme")
+            .schema(CreditTransferSchema::DkV2_7)
+            .msg_id("CT-DK-ADR")
+            .add_group(
+                CreditTransferGroup::new("Acme", &de_iban())
+                    .execution_date(d("2026-07-20"))
+                    .debtor_address(crate::PostalAddress::new("Berlin", "DE").unwrap())
+                    .add_entry(entry(100)),
+            )
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            err.kind,
+            ValidationError::UnsupportedBySchema {
+                feature: "Dbtr/PstlAdr",
+                schema: "pain.001.003.03",
+            }
+        );
+        assert_eq!(err.location, Location::group(0));
+    }
+
+    #[test]
+    fn address_violations_name_the_element_and_the_transaction() {
+        let err = Pain001Builder::new("Acme")
+            .msg_id("CT-ADR-BAD")
+            .add_group(
+                CreditTransferGroup::new("Acme", &de_iban())
+                    .execution_date(d("2026-07-20"))
+                    .add_entry(entry(100))
+                    .add_entry(
+                        entry(100).with_creditor_address(
+                            crate::PostalAddress::new("Berlin", "DE")
+                                .unwrap()
+                                .post_code("1".repeat(17)),
+                        ),
+                    ),
+            )
+            .build()
+            .unwrap_err();
+        assert_eq!(err.location, Location::transaction(0, 1));
+        assert!(matches!(
+            err.kind,
+            ValidationError::TooLong {
+                field: "PstlAdr/PstCd",
+                max: 16,
+                ..
+            }
+        ));
     }
 
     #[test]

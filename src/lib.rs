@@ -5,11 +5,14 @@
 //!   national BBAN structure, 89-country registry, SEPA membership
 //! - **BIC validation** ([`bic`]) — ISO 9362, including the country code
 //! - **Creditor Identifier validation** ([`creditor_id`]) — EPC AT-02
+//! - **Postal addresses** ([`address`]) — structured and hybrid `PstlAdr`
 //! - **pain.001 builder** ([`pain001`]) — SEPA Credit Transfer + SCT Instant
 //! - **pain.008 builder** ([`pain008`]) — SEPA Direct Debit (CORE + B2B)
-//! - **pain.002 parser** ([`pain002`]) — Customer Payment Status Report (bank→customer)
+//! - **pain.007 builder** ([`pain007`]) — SEPA Direct Debit reversal
+//! - **pain.002 parser** ([`pain002`]) — Payment Status Report, incl. Verification of Payee
+//! - **camt.052 parser** ([`camt052`]) — Bank-to-Customer Report (intraday)
 //! - **camt.053 parser** ([`camt053`]) — Bank-to-Customer Statement (end-of-day)
-//! - **camt.054 types** ([`camt054`]) — Bank-to-Customer Notification
+//! - **camt.054 parser** ([`camt054`]) — Bank-to-Customer Notification, returns
 //! - **EPC field validation** ([`validate`]) — the rules the XSD does not enforce
 //! - **SEPA character set** ([`charset`]) — validation and transliteration
 //! - **Typed dates** ([`date`]) — [`IsoDate`] / [`IsoDateTime`] for every date field
@@ -21,7 +24,6 @@
 //! **Dependencies:** [`thiserror`](https://crates.io/crates/thiserror) and
 //! [`quick-xml`](https://crates.io/crates/quick-xml) (required);
 //! [`serde`](https://crates.io/crates/serde),
-//! [`serde_json`](https://crates.io/crates/serde_json),
 //! [`time`](https://crates.io/crates/time) and
 //! [`chrono`](https://crates.io/crates/chrono) (optional features).
 //!
@@ -36,6 +38,7 @@
 //! |---|---|
 //! | pain.001 | `pain.001.001.09` (default), `pain.001.001.03`, `pain.001.003.03` |
 //! | pain.008 | `pain.008.001.08` (default), `pain.008.001.02`, `pain.008.003.02` |
+//! | pain.007 | `pain.007.001.09` — the only version SEPA defines |
 //!
 //! Select one with [`Pain001Builder::schema`] / [`Pain008Builder::schema`].
 //! Both enums implement `FromStr` over the message identifier and the namespace
@@ -50,6 +53,18 @@
 //! Every generated document is validated against the real ISO 20022 schema in
 //! CI, one test per version.
 //!
+//! ### These are deliberately not ISO's newest versions
+//!
+//! ISO advises using the most recent message definition available, and has
+//! published `pain.001.001.13`, `pain.008.001.12` and `pain.002.001.15`. That
+//! advice is aimed at communities free to choose their own version; a SEPA
+//! participant is not one, because the version is fixed by the scheme rulebook.
+//! Sending `pain.001.001.13` to a SEPA bank gets it rejected. The versions
+//! above are the ones the EPC rulebooks have mandated since 19 November 2023,
+//! and nothing on the published roadmap moves SEPA past them — the
+//! 15 November 2026 deadline is about structured *addresses*, not about a newer
+//! message version.
+//!
 //! ## Regulatory references
 //!
 //! | Standard | Module | Usage |
@@ -57,10 +72,15 @@
 //! | ISO 13616-1 + SWIFT IBAN Registry | [`iban`] | IBAN validation + country-length registry |
 //! | EPC409-09 v8.0 | [`iban`] | SEPA scheme country list |
 //! | ISO 9362 | [`bic`] | BIC/SWIFT validation |
+//! | ISO 3166-1 alpha-2 | [`country`] | Country codes for BICs and addresses |
+//! | EPC153-22 v2.1 | [`address`] | Structured addresses, 15 Nov 2026 cut-over |
 //! | EPC262-08 | [`creditor_id`] | Creditor Identifier check digits |
 //! | ISO 20022 pain.001 | [`pain001`] | SEPA Credit Transfer (SCT + SCT Inst) |
 //! | ISO 20022 pain.008 | [`pain008`] | SEPA Direct Debit (CORE + B2B) |
+//! | ISO 20022 pain.007 | [`pain007`] | SEPA Direct Debit reversal |
 //! | ISO 20022 pain.002 | [`pain002`] | Payment Status Report |
+//! | EPC103-24 | [`pain002`] | Verification of Payee outcomes |
+//! | ISO 20022 camt.052 | [`camt052`] | Bank-to-Customer Report (intraday) |
 //! | ISO 20022 camt.053 | [`camt053`] | Bank-to-Customer Statement |
 //! | ISO 20022 camt.054 | [`camt054`] | Payment notifications |
 //! | EPC217-08 | [`charset`] | SEPA character set + conversion table |
@@ -139,9 +159,12 @@
 //! the ISO 20022 element, plus the [`Location`] — group and transaction index —
 //! it came from, so a rejected collection run points at the row to fix.
 //!
-//! Dates are not on that list because they cannot fail there: [`IsoDate`]
-//! validates at construction, so an impossible `ReqdColltnDt` is unrepresentable
-//! rather than caught late.
+//! Two classes of mistake are absent from that list because they cannot fail
+//! there — they are unrepresentable rather than caught late. [`IsoDate`]
+//! validates at construction, so an impossible `ReqdColltnDt` never reaches a
+//! batch; and [`PostalAddress`] requires a town and a country, so the
+//! unstructured address form the EPC schemes reject from 15 November 2026 is
+//! not a value this crate can be asked to emit.
 //!
 //! ## Reading bank files
 //!
@@ -149,7 +172,9 @@
 //! read — a reconciliation import can always say *why* it skipped a row, not
 //! just that it did. For a batch-booked camt entry, read
 //! [`EntryDetail::signed_ct`] per transaction and check
-//! [`CashEntry::details_reconcile`] before posting.
+//! [`CashEntry::details_reconcile`] before posting; [`CashEntry::batch`] carries
+//! the `PmtInfId` of the group you submitted, which is what matches a booking
+//! back to your own file.
 //!
 //! Bank input is kept verbatim and typed alongside, never in place of, the raw
 //! value: [`CashEntry::booking_date`] returns an [`IsoDate`] and
@@ -159,6 +184,7 @@
 //! [`EntryDetail::signed_ct`]: camt::EntryDetail::signed_ct
 //! [`CashEntry::details_reconcile`]: camt::CashEntry::details_reconcile
 //! [`CashEntry::booking_date`]: camt::CashEntry::booking_date
+//! [`CashEntry::batch`]: camt::CashEntry::batch
 
 // The panic-oriented lints (`unwrap_used`, `indexing_slicing`, …) guard the
 // library's own code paths, where a panic on bank input is a real defect.
@@ -179,6 +205,33 @@
 #[doc = include_str!("../README.md")]
 pub struct ReadmeDoctests;
 
+/// Compile-tests every Rust example on the documentation site.
+///
+/// A published guide that no longer compiles is worse than no guide, so the
+/// site's pages are run through the same doctest harness as the crate's own
+/// documentation. Adding a page without adding it here is the one way a sample
+/// could drift, which is why the list is explicit rather than a glob.
+#[cfg(doctest)]
+mod site_doctests {
+    macro_rules! guide {
+        ($name:ident, $path:literal) => {
+            #[doc = include_str!($path)]
+            pub struct $name;
+        };
+    }
+    guide!(Landing, "../site/content/_index.md");
+    guide!(GettingStarted, "../site/content/docs/getting-started.md");
+    guide!(CreditTransfers, "../site/content/docs/credit-transfers.md");
+    guide!(DirectDebits, "../site/content/docs/direct-debits.md");
+    guide!(Reversals, "../site/content/docs/reversals.md");
+    guide!(StatusReports, "../site/content/docs/status-reports.md");
+    guide!(BankStatements, "../site/content/docs/bank-statements.md");
+    guide!(Addresses, "../site/content/docs/addresses.md");
+    guide!(Validation, "../site/content/docs/validation.md");
+    guide!(SchemaVersions, "../site/content/docs/schema-versions.md");
+}
+
+pub mod address;
 pub mod bic;
 pub mod camt;
 pub mod camt052;
@@ -186,11 +239,13 @@ pub mod camt053;
 pub mod camt054;
 pub mod charset;
 mod charset_table;
+pub mod country;
 pub mod creditor_id;
 pub mod date;
 pub mod iban;
 pub mod pain001;
 pub mod pain002;
+pub mod pain007;
 pub mod pain008;
 pub mod party;
 pub mod purpose;
@@ -199,17 +254,19 @@ pub mod validate;
 mod xml;
 mod xml_util;
 
-pub use bic::{Bic, BicError, is_bic_country_code, validate_bic};
-pub use camt::{BalanceType, CashEntry, EntryDetail, EntryStatus, StatementBalance};
+pub use address::{AddressError, AddressFormat, PostalAddress};
+pub use bic::{Bic, BicError, validate_bic};
+pub use camt::{
+    AccountRef, BalanceType, BatchInfo, CashEntry, EntryDetail, EntryStatus, StatementBalance,
+};
 pub use camt052::{Camt052Document, Camt052ParseError, Camt052Report, parse_camt052};
 pub use camt053::{Camt053Document, Camt053ParseError, Camt053Statement, parse_camt053};
 pub use camt054::{
-    Camt054Document, Camt054Notification, Camt054ParseError, CreditDebitIndicator, ReturnInfo,
+    Camt054Document, Camt054Notification, Camt054ParseError, CreditDebitIndicator,
     UnknownIndicator, parse_camt054,
 };
-#[cfg(feature = "json")]
-pub use camt054::{SimpleJsonError, parse_simple_json};
 pub use charset::{Transliteration, is_sepa_text, transliterate};
+pub use country::is_country_code;
 pub use creditor_id::{
     CreditorId, CreditorIdError, creditor_id_check_digits, validate_creditor_id,
 };
@@ -219,11 +276,15 @@ pub use iban::{
     validate_iban,
 };
 pub use pain001::{
-    CreditTransferEntry, CreditTransferGroup, CreditTransferSchema, LocalInstrument, Pain001Builder,
+    CreditTransferEntry, CreditTransferGroup, CreditTransferSchema, ExecutionMoment,
+    LocalInstrument, Pain001Builder,
 };
 pub use pain002::{
     OriginalMessageType, Pain002Document, Pain002ParseError, PaymentInfoStatus, PaymentStatus,
-    ReasonCode, TransactionStatus, parse_pain002,
+    ReasonCode, StatusCount, TransactionStatus, VerificationOutcome, parse_pain002,
+};
+pub use pain007::{
+    OriginalCollection, Pain007Builder, ReversalEntry, ReversalGroup, ReversalReason,
 };
 pub use pain008::{
     DirectDebitEntry, DirectDebitGroup, DirectDebitSchema, DirectDebitScheme, MandateAmendment,
@@ -298,6 +359,10 @@ pub enum AmountError {
 ///
 /// Extra decimal places beyond 2 are truncated (not rounded).
 ///
+/// The grammar is exactly `-?[0-9]*(\.[0-9]*)?` with at least one digit. A
+/// leading `+`, a repeated sign and trailing junk are all rejected rather than
+/// silently reinterpreted — `i64::from_str` would accept every one of them.
+///
 /// # Errors
 ///
 /// [`AmountError`], naming which of empty, malformed or overflowing input was
@@ -313,6 +378,7 @@ pub enum AmountError {
 /// assert_eq!(ct_from_eur_str("100"),    Ok(10000));
 /// assert_eq!(ct_from_eur_str(""),       Err(AmountError::Empty));
 /// assert!(matches!(ct_from_eur_str("1,50"), Err(AmountError::Malformed { .. })));
+/// assert!(matches!(ct_from_eur_str("--5"), Err(AmountError::Malformed { .. })));
 /// ```
 #[inline]
 pub fn ct_from_eur_str(s: &str) -> Result<i64, AmountError> {
@@ -323,68 +389,53 @@ pub fn ct_from_eur_str(s: &str) -> Result<i64, AmountError> {
         value: s.to_owned(),
     };
 
-    // `i64::from_str` reports "too many digits" and "not a number" through the
-    // same error type; the caller needs to tell those apart.
-    let classify = |e: &std::num::ParseIntError| {
-        use std::num::IntErrorKind::{NegOverflow, PosOverflow};
-        if matches!(e.kind(), PosOverflow | NegOverflow) {
-            overflow()
-        } else {
-            malformed()
-        }
-    };
-
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Err(AmountError::Empty);
     }
-    let (sign, digits) = if let Some(rest) = trimmed.strip_prefix('-') {
-        (-1i64, rest)
-    } else {
-        (1i64, trimmed)
+    let (negative, magnitude) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed),
     };
 
-    let ct: i64 = if let Some(dot) = digits.find('.') {
-        let euro_str = &digits[..dot];
-        let frac_str = &digits[dot + 1..];
-        let euros: i64 = if euro_str.is_empty() {
-            0
-        } else {
-            euro_str.parse().map_err(|e| classify(&e))?
-        };
-        // `get(..2)` rather than `[..2]`: the fractional part comes from
-        // bank-supplied XML, and a byte index of 2 can land inside a multi-byte
-        // character (`"1.€5"`), which would panic. A non-boundary index yields
-        // `None` here, which correctly rejects the amount instead.
-        //
-        // The digit check is not redundant with `parse`: `i64::from_str`
-        // accepts a leading sign, so `"1.-5"` would otherwise parse as −5
-        // cents and silently turn 1.50 EUR into 0.95 EUR.
-        let frac = match frac_str.len() {
-            0 | 1 => frac_str,
-            _ => frac_str.get(..2).ok_or_else(malformed)?,
-        };
-        if !frac.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(malformed());
-        }
-        let cents: i64 = match frac.len() {
-            0 => 0,
-            1 => frac.parse::<i64>().map_err(|_| malformed())? * 10,
-            _ => frac.parse().map_err(|_| malformed())?,
-        };
-        euros
-            .checked_mul(100)
-            .and_then(|e| e.checked_add(cents))
-            .ok_or_else(overflow)?
+    // Split on the decimal point first, then require both halves to be bare
+    // ASCII digits. Deferring to `i64::from_str` instead would accept a second
+    // sign in either half: `"--5"` parsed as +5.00 EUR and `"1.-5"` turned
+    // 1.50 EUR into 0.95 EUR. Checking the *whole* fractional part — not just
+    // the two digits that survive truncation — also rejects `"1.50abc"`.
+    let (euro_str, frac_str) = magnitude.split_once('.').unwrap_or((magnitude, ""));
+    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    if (euro_str.is_empty() && frac_str.is_empty()) || !digits(euro_str) || !digits(frac_str) {
+        return Err(malformed());
+    }
+
+    let euros: i64 = if euro_str.is_empty() {
+        0
     } else {
-        digits
-            .parse::<i64>()
-            .map_err(|e| classify(&e))?
-            .checked_mul(100)
-            .ok_or_else(overflow)?
+        // Every byte is an ASCII digit, so the only way to fail is overflow.
+        euro_str.parse().map_err(|_| overflow())?
+    };
+    // Truncated, not rounded, and safe to index: the part is pure ASCII.
+    let cents: i64 = match frac_str.len() {
+        0 => 0,
+        1 => frac_str.parse::<i64>().map_err(|_| malformed())? * 10,
+        _ => frac_str
+            .get(..2)
+            .ok_or_else(malformed)?
+            .parse()
+            .map_err(|_| malformed())?,
     };
 
-    ct.checked_mul(sign).ok_or_else(overflow)
+    let ct = euros
+        .checked_mul(100)
+        .and_then(|e| e.checked_add(cents))
+        .ok_or_else(overflow)?;
+
+    if negative {
+        ct.checked_neg().ok_or_else(overflow)
+    } else {
+        Ok(ct)
+    }
 }
 
 #[cfg(test)]
@@ -426,13 +477,31 @@ mod tests {
     }
 
     #[test]
-    fn a_signed_fraction_is_not_a_subtraction() {
-        // Regression: `i64::from_str` accepts a leading sign, so "1.-5" parsed
-        // its fraction as −5 cents and quietly turned 1.50 into 0.95.
-        for bad in ["1.-5", "1.+5", "1.-50", "-1.-5"] {
+    fn a_sign_is_accepted_once_and_only_at_the_front() {
+        // Regression: `i64::from_str` accepts a leading sign wherever it is
+        // handed one, so "1.-5" parsed its fraction as −5 cents and quietly
+        // turned 1.50 into 0.95, while "--5" came back as +5.00 and "-+5"
+        // as −5.00.
+        for bad in [
+            "1.-5", "1.+5", "1.-50", "-1.-5", "--5", "-+5", "+5", "+5.00", "5-", "-",
+        ] {
             assert!(
                 matches!(ct_from_eur_str(bad), Err(AmountError::Malformed { .. })),
-                "{bad:?} must be rejected"
+                "{bad:?} must be rejected, got {:?}",
+                ct_from_eur_str(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_junk_after_the_cents_is_rejected() {
+        // Regression: only the first two fractional characters were checked, so
+        // "1.50abc" silently parsed as 1.50 EUR.
+        for bad in ["1.50abc", "1.5x", "1.005 EUR", "100x", "1.2.3"] {
+            assert!(
+                matches!(ct_from_eur_str(bad), Err(AmountError::Malformed { .. })),
+                "{bad:?} must be rejected, got {:?}",
+                ct_from_eur_str(bad)
             );
         }
     }

@@ -566,11 +566,18 @@ impl IsoDateTime {
 
         // Split off the offset before touching the time, so `+` inside an
         // offset is never mistaken for part of the seconds field.
+        //
+        // `split_at_checked`, not `split_at`: the input is untrusted, and byte
+        // `len - 6` can land inside a multi-byte character — `"…T€€a"` is
+        // seven bytes, and splitting it at index 1 would panic.
+        let offset_split = rest
+            .len()
+            .checked_sub(6)
+            .and_then(|at| rest.split_at_checked(at));
         let (time_part, offset_minutes) = if let Some(head) = rest.strip_suffix('Z') {
             (head, Some(0i16))
-        } else if rest.len() >= 6 {
+        } else if let Some((head, tail)) = offset_split {
             // The offset, if present, is the final `±hh:mm`.
-            let (head, tail) = rest.split_at(rest.len() - 6);
             match parse_offset(tail) {
                 Some(off) => (head, Some(off)),
                 None => (rest, None),
@@ -1034,6 +1041,22 @@ mod tests {
             "2026-07-20T12:60:00",
             "2026-02-30T12:00:00",
             "",
+        ] {
+            assert!(IsoDateTime::parse(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn a_multibyte_time_part_is_rejected_rather_than_panicking() {
+        // Regression: the offset was split off with `rest.split_at(len - 6)`,
+        // and for `"€€a"` — seven bytes — index 1 falls inside the first '€'.
+        // `IsoDateTime` parses untrusted text, so that was a reachable panic.
+        for bad in [
+            "2026-07-20T€€a",
+            "2026-07-20T€€",
+            "2026-07-20T12:30:0€",
+            "2026-07-20T€€€€€€€",
+            "2026-07-20T12:30:00+0€:00",
         ] {
             assert!(IsoDateTime::parse(bad).is_err(), "{bad:?} must be rejected");
         }

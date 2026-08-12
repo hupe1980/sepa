@@ -21,7 +21,7 @@ fuzz_target!(|data: &[u8]| {
     // Takes the first ten *bytes* of bank-supplied text, so a multi-byte
     // character straddling the boundary must not panic.
     let _ = sepa::IsoDate::parse_date_part(s);
-    let _ = sepa::is_bic_country_code(s);
+    let _ = sepa::is_country_code(s);
     let _ = sepa::iban_bban_format(s);
     let _ = sepa::iban_country_length(s);
     let _ = s.parse::<sepa::RfReference>();
@@ -72,4 +72,23 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(ts) = s.parse::<sepa::IsoDateTime>() {
         assert_eq!(sepa::IsoDateTime::parse(&ts.to_string()), Ok(ts));
     }
+
+    // A constructed address must always render to SEPA-legal XML, and its
+    // validation must decide rather than panic on arbitrary text.
+    if let Ok(address) = sepa::PostalAddress::new(s, "DE") {
+        assert_eq!(address.country(), "DE");
+        let _ = address.format();
+        let _ = address
+            .clone()
+            .street(s)
+            .post_code(s)
+            .line(s)
+            .validate(sepa::CharsetPolicy::default());
+    }
+    // Only a real country may be accepted, whatever the input looks like.
+    assert_eq!(
+        sepa::PostalAddress::new("Berlin", s).is_ok(),
+        sepa::is_country_code(s),
+        "address country acceptance must match the country table",
+    );
 });

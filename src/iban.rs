@@ -87,19 +87,25 @@ impl Iban {
 }
 
 impl std::fmt::Display for Iban {
+    /// Printed format: groups of four, e.g. `"DE89 3704 0044 0532 0130 00"`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Display in groups of 4: "DE89 3704 0044 ..."
-        let s = &self.0;
-        let mut first = true;
-        for chunk in s.as_bytes().chunks(4) {
-            if !first {
-                write!(f, " ")?;
+        // Validation guarantees pure ASCII, so every 4-byte boundary is also a
+        // character boundary and `as_chunks`-style slicing cannot split one.
+        for (i, chunk) in group_of_four(&self.0).enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
             }
-            first = false;
-            f.write_str(std::str::from_utf8(chunk).unwrap_or(""))?;
+            f.write_str(chunk)?;
         }
         Ok(())
     }
+}
+
+/// Split an all-ASCII string into four-character groups.
+pub(crate) fn group_of_four(s: &str) -> impl Iterator<Item = &str> {
+    (0..s.len())
+        .step_by(4)
+        .filter_map(move |i| s.get(i..(i + 4).min(s.len())))
 }
 
 impl AsRef<str> for Iban {
@@ -318,7 +324,7 @@ impl std::fmt::Display for BbanCharClass {
 /// check — it accepts a letter where the registry requires a digit roughly 96
 /// times in 97.
 ///
-/// Source: SWIFT IBAN Registry release 101.
+/// Source: SWIFT IBAN Registry release 102 (June 2026) — 89 entries.
 ///
 /// # Examples
 ///
@@ -470,6 +476,10 @@ pub fn iban_country_length(country: &str) -> Option<usize> {
 /// - SEPA is **not** the eurozone. `DK`, `SE`, `PL`, `CZ`, `HU`, `RO`, `BG`,
 ///   `GB`, `CH`, `NO`, `IS`, `AL`, `MD`, `MK` and `RS` are SEPA countries with
 ///   non-EUR national currencies. SEPA membership never implies EUR.
+///
+/// The list grew by five between 2024 and 2025 — `AL`, `ME` (November 2024),
+/// `MK`, `MD` (March 2025) and `RS` (May 2025) — so a hard-coded list written
+/// before then is missing them.
 const SEPA_COUNTRIES: [&str; 42] = [
     "AD", "AL", "AT", "BE", "BG", "CH", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB", "GI",
     "GR", "HR", "HU", "IE", "IS", "IT", "LI", "LT", "LU", "LV", "MC", "MD", "ME", "MK", "MT", "NL",
@@ -481,8 +491,10 @@ const SEPA_COUNTRIES: [&str; 42] = [
 /// Takes the two-letter **IBAN** country code — the first two characters of an
 /// IBAN, e.g. [`Iban::country_code`]. Comparison is case-insensitive.
 ///
-/// Source: EPC409-09 v8.0 (24 December 2025), which added Albania, Moldova,
-/// Montenegro, North Macedonia and Serbia.
+/// Source: EPC409-09 v8.0 (24 December 2025). Five countries joined across
+/// 2024–2025 and are easy to miss in an older list: Albania and Montenegro
+/// (November 2024), North Macedonia and Moldova (March 2025) and Serbia
+/// (May 2025).
 ///
 /// # Examples
 ///
@@ -653,25 +665,22 @@ pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
         }
     }
 
-    let rearranged = format!("{}{}", &normalised[4..], &normalised[..4]);
-
-    let numeric: String = rearranged
-        .chars()
-        .flat_map(|c| {
-            if c.is_ascii_alphabetic() {
-                let n = (c as u8 - b'A' + 10).to_string();
-                n.chars().collect::<Vec<_>>()
-            } else {
-                vec![c]
-            }
-        })
-        .collect();
-
-    // Rolling mod-97 using groups of digits to avoid u64 overflow
+    // ISO 13616 §5.3: move the first four characters to the end, expand each
+    // letter to its two-digit value (A=10 … Z=35), then take the whole thing
+    // mod 97. Folded in one pass over the rotated byte order — materialising
+    // the expanded decimal string would be three allocations for a value that
+    // is consumed a digit at a time, and a 34-character IBAN expands past what
+    // any integer type could hold anyway.
+    let (header, bban) = (&normalised[..4], &normalised[4..]);
     let mut remainder: u64 = 0;
-    for ch in numeric.chars() {
-        let digit = ch.to_digit(10).ok_or(IbanError::InvalidCharacter { ch })?;
-        remainder = (remainder * 10 + u64::from(digit)) % 97;
+    for &b in bban.as_bytes().iter().chain(header.as_bytes()) {
+        remainder = if b.is_ascii_digit() {
+            remainder * 10 + u64::from(b - b'0')
+        } else {
+            // Every byte is ASCII alphanumeric by the check above, so this is
+            // A–Z: two decimal places, 10–35.
+            remainder * 100 + u64::from(b - b'A') + 10
+        } % 97;
     }
 
     if remainder == 1 {

@@ -14,7 +14,6 @@
 
 /// `(code point, replacement)` pairs, sorted by code point for binary search.
 pub(super) static EPC_CONVERSION_TABLE: &[(u32, &str)] = &[
-    (0x00020, "."),
     (0x00021, "."),
     (0x00023, "."),
     (0x00024, "."),

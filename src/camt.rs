@@ -20,9 +20,12 @@
 //!
 //! ## Batch bookings
 //!
-//! A batch-booked entry carries one `TxDtls` per original transaction. Read
-//! [`EntryDetail::signed_ct`] for each — it resolves the amount and its sign
-//! from whichever level reported them — and use
+//! A batch-booked entry carries a `Btch` block plus one `TxDtls` per original
+//! transaction. [`CashEntry::batch`] exposes the former — including the
+//! `PmtInfId` of the group that produced the booking, which is what matches a
+//! statement entry back to a submitted pain.008 — and [`CashEntry::details`]
+//! the latter. Read [`EntryDetail::signed_ct`] for each detail (it resolves the
+//! amount and its sign from whichever level reported them) and use
 //! [`CashEntry::details_reconcile`] to check the parts add up to the whole
 //! before posting.
 
@@ -203,6 +206,11 @@ pub struct EntryDetail {
     /// SEPA Creditor Identifier (`CdtrId`).
     pub creditor_id: Option<String>,
     /// Remittance information / payment reference (`RmtInf/Ustrd`).
+    ///
+    /// `Ustrd` is unbounded in camt, and German banks routinely split one
+    /// *Verwendungszweck* across several occurrences of 35 characters each.
+    /// All of them are joined with a single space, so the reference reads as
+    /// the payer wrote it rather than being cut at the first line.
     pub reference: Option<String>,
     /// Counterparty name (debtor for credits; creditor for debits).
     pub counterparty_name: Option<String>,
@@ -210,6 +218,10 @@ pub struct EntryDetail {
     pub counterparty_iban: Option<String>,
     /// ISO 20022 return reason code, when this transaction is a return.
     pub return_reason_code: Option<String>,
+    /// `TxDtls/RtrInf/AddtlInf` — the bank's free text about the return.
+    pub return_additional_info: Option<String>,
+    /// `TxDtls/AddtlTxInf` — the bank's free text about this transaction.
+    pub additional_info: Option<String>,
 }
 
 impl EntryDetail {
@@ -247,6 +259,95 @@ impl EntryDetail {
     }
 }
 
+// ── AccountRef ────────────────────────────────────────────────────────────────
+
+/// The account a statement, report or notification is about (`Acct`).
+///
+/// ISO 20022 types the identifier as a choice — an `IBAN` **or** a proprietary
+/// `Othr/Id` — so an account that is not IBAN-addressable is a legal thing for
+/// a bank to send. Both are exposed, because collapsing the choice to a single
+/// string cannot distinguish "no account identifier" from "an identifier that
+/// is not an IBAN".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AccountRef {
+    /// `Acct/Id/IBAN`, when the account is IBAN-addressable.
+    pub iban: Option<String>,
+    /// `Acct/Id/Othr/Id` — the proprietary alternative to an IBAN.
+    pub other_id: Option<String>,
+    /// `Acct/Ccy` — the currency the account is denominated in.
+    ///
+    /// Worth checking before treating an entry amount as EUR: camt is not a
+    /// EUR-only format, and an entry carries its own `Ccy` too.
+    pub currency: Option<String>,
+    /// BIC of the account servicing institution (`Acct/Svcr`).
+    pub servicer_bic: Option<String>,
+}
+
+impl AccountRef {
+    /// The IBAN, or the proprietary identifier when there is no IBAN.
+    ///
+    /// For display and logging. Match on [`iban`](Self::iban) directly when the
+    /// distinction matters — only an IBAN can be validated or paid to.
+    #[must_use]
+    pub fn any_id(&self) -> Option<&str> {
+        self.iban.as_deref().or(self.other_id.as_deref())
+    }
+
+    fn parse(node: &Node) -> Self {
+        let Some(acct) = node.child("Acct") else {
+            return Self::default();
+        };
+        let id = acct.child("Id");
+        Self {
+            iban: id.and_then(|i| i.text_of("IBAN")).map(str::to_owned),
+            other_id: id
+                .and_then(|i| i.text_at(&["Othr", "Id"]))
+                .map(str::to_owned),
+            currency: acct.text_of("Ccy").map(str::to_owned),
+            servicer_bic: acct.child("Svcr").and_then(agent_bic).map(str::to_owned),
+        }
+    }
+}
+
+// ── BatchInfo ─────────────────────────────────────────────────────────────────
+
+/// The `NtryDtls/Btch` block a bank attaches to an aggregate booking.
+///
+/// This is the element that closes the loop on a direct debit run: a batch
+/// booking carries back the `PmtInfId` of the `PmtInf` that produced it, so a
+/// camt entry can be matched to the group of a submitted pain.008 without
+/// guessing from amounts and dates.
+///
+/// Its presence — not the number of `TxDtls` — is what the bank actually
+/// asserts about a booking being aggregate; see
+/// [`CashEntry::batch_booked`](CashEntry::batch_booked).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BatchInfo {
+    /// `Btch/MsgId` — the `GrpHdr/MsgId` of the message that was submitted.
+    pub message_id: Option<String>,
+    /// `Btch/PmtInfId` — the `PmtInf/PmtInfId` of the group that was submitted.
+    pub payment_info_id: Option<String>,
+    /// `Btch/NbOfTxs` — how many transactions the bank aggregated.
+    ///
+    /// This is the bank's own count, which may exceed the number of `TxDtls`
+    /// elements it chose to itemise.
+    pub transaction_count: Option<u64>,
+}
+
+impl BatchInfo {
+    fn parse(node: &Node) -> Self {
+        Self {
+            message_id: node.text_of("MsgId").map(str::to_owned),
+            payment_info_id: node.text_of("PmtInfId").map(str::to_owned),
+            transaction_count: node.text_of("NbOfTxs").and_then(|n| n.parse().ok()),
+        }
+    }
+}
+
 // ── CashEntry ──────────────────────────────────────────────────────────────
 
 /// A single booked or pending entry, shared by camt.052, camt.053 and camt.054.
@@ -271,7 +372,18 @@ pub struct CashEntry {
     /// Booking status.
     pub status: EntryStatus,
     /// `true` when the bank booked several transactions as one aggregate entry.
+    ///
+    /// Taken from the presence of [`batch`](Self::batch) — the bank's own
+    /// assertion — and only otherwise inferred from there being more than one
+    /// `TxDtls`. Counting details alone misses a batch of one, which is exactly
+    /// the case where treating the entry as a single payment double-books it
+    /// against a collection run.
     pub batch_booked: bool,
+    /// The `NtryDtls/Btch` block, when the bank sent one.
+    ///
+    /// Carries the `MsgId` and `PmtInfId` of the message that produced this
+    /// booking — see [`BatchInfo`].
+    pub batch: Option<BatchInfo>,
     /// Booking date (`BookgDt`) exactly as the bank reported it.
     ///
     /// ISO 20022 types this as a date/time choice, so it arrives as
@@ -285,6 +397,12 @@ pub struct CashEntry {
     pub account_servicer_ref: Option<String>,
     /// Bank transaction code (`BkTxCd`), domain code where available.
     pub bank_tx_code: Option<String>,
+    /// `Ntry/AddtlNtryInf` — the bank's free-text description of the booking.
+    ///
+    /// This is where several German banks put the text a customer sees on the
+    /// statement, and for an entry with no `NtryDtls` at all it is often the
+    /// only remittance information there is.
+    pub additional_info: Option<String>,
     /// Underlying transactions. Empty when the bank sends no `NtryDtls`.
     pub details: Vec<EntryDetail>,
 }
@@ -460,6 +578,26 @@ const fn signed(indicator: CreditDebitIndicator, amount_ct: i64) -> i64 {
     }
 }
 
+/// Every `Ustrd` under `RmtInf`, joined with a single space.
+///
+/// `RmtInf/Ustrd` is `0..n`. A German bank splits a long *Verwendungszweck*
+/// across several 35-character occurrences, so reading only the first one
+/// truncates the reference an invoice is matched by — usually right where the
+/// invoice number sits. `None` when there is no non-empty occurrence.
+fn joined_unstructured(rmt_inf: &Node) -> Option<String> {
+    let mut out = String::new();
+    for part in rmt_inf.children_named("Ustrd") {
+        if part.text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&part.text);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// A party name, handling both the flat and the `Party40Choice` shapes.
 ///
 /// camt.053.001.02 nests the name as `Dbtr/Nm`; from `.001.08` the party is
@@ -528,7 +666,21 @@ pub(crate) fn parse_entry(e: &Node) -> Option<CashEntry> {
     // yielding an entry with no details at all.
     let details_parent = e.child("NtryDtls").unwrap_or(e);
     let detail_count = details_parent.children_named("TxDtls").count();
-    let batch_booked = detail_count > 1;
+    // `Btch` is the bank's own statement that this booking is an aggregate,
+    // and it is authoritative: a batch of one transaction carries `Btch` but
+    // only one `TxDtls`, so counting details alone would call it a single
+    // payment.
+    let batch = details_parent.child("Btch").map(BatchInfo::parse);
+    let batch_booked = batch.is_some() || detail_count > 1;
+    // The entry total may stand in for a detail's amount only when there is
+    // exactly one transaction to attribute it to. Spreading it across a batch
+    // would multiply the booking, so the bank's own `NbOfTxs` overrules the
+    // number of details it happened to itemise.
+    let sole_detail = detail_count == 1
+        && batch
+            .as_ref()
+            .and_then(|b| b.transaction_count)
+            .is_none_or(|n| n == 1);
     let details = details_parent
         .children_named("TxDtls")
         .map(|td| {
@@ -538,10 +690,7 @@ pub(crate) fn parse_entry(e: &Node) -> Option<CashEntry> {
                     indicator,
                     amount_ct,
                     currency: &currency,
-                    // The entry total may stand in for the detail's amount only
-                    // when there is exactly one transaction to attribute it to.
-                    // Spreading it across a batch would multiply the booking.
-                    sole_detail: detail_count == 1,
+                    sole_detail,
                 },
             )
         })
@@ -553,10 +702,12 @@ pub(crate) fn parse_entry(e: &Node) -> Option<CashEntry> {
         indicator,
         status,
         batch_booked,
+        batch,
         booking_date_raw: date_of("BookgDt"),
         value_date_raw: date_of("ValDt"),
         account_servicer_ref: e.text_of("AcctSvcrRef").map(str::to_owned),
         bank_tx_code,
+        additional_info: e.text_of("AddtlNtryInf").map(str::to_owned),
         details,
     })
 }
@@ -614,7 +765,7 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
         end_to_end_id: ref_of("EndToEndId"),
         mandate_id: ref_of("MndtId"),
         creditor_id: ref_of("CdtrId"),
-        reference: td.text_at(&["RmtInf", "Ustrd"]).map(str::to_owned),
+        reference: td.child("RmtInf").and_then(joined_unstructured),
         counterparty_name: party_name(parties, name_tag),
         counterparty_iban: parties
             .and_then(|p| p.text_at(&[acct_tag, "Id", "IBAN"]))
@@ -623,16 +774,16 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
             .path(&["RtrInf", "Rsn"])
             .and_then(Node::code)
             .map(str::to_owned),
+        return_additional_info: td.text_at(&["RtrInf", "AddtlInf"]).map(str::to_owned),
+        additional_info: td.text_of("AddtlTxInf").map(str::to_owned),
     }
 }
 
 // ── shared account / group helpers ────────────────────────────────────────────
 
-/// The account IBAN of a statement, report or notification (`Acct/Id/IBAN`).
-pub(crate) fn account_iban(node: &Node) -> String {
-    node.path(&["Acct", "Id", "IBAN"])
-        .map(|n| n.text.clone())
-        .unwrap_or_default()
+/// The account a statement, report or notification is about.
+pub(crate) fn account_of(node: &Node) -> AccountRef {
+    AccountRef::parse(node)
 }
 
 /// `FinInstnId/BIC` (pre-2019) or `FinInstnId/BICFI` (2019 onwards).
@@ -841,6 +992,134 @@ mod tests {
         );
         assert_eq!(nonsense.booking_date(), None);
         assert_eq!(nonsense.booking_date_raw.as_deref(), Some("14.07.2026"));
+    }
+
+    #[test]
+    fn the_btch_element_identifies_the_submitted_group() {
+        // The reconciliation loop closes here: a batch booking names the
+        // PmtInfId of the PmtInf that produced it.
+        let e = entry(
+            r#"<Ntry>
+                 <Amt Ccy="EUR">125.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+                 <NtryDtls>
+                   <Btch>
+                     <MsgId>DD-2026-07</MsgId>
+                     <PmtInfId>DD-2026-07-1</PmtInfId>
+                     <NbOfTxs>2</NbOfTxs>
+                   </Btch>
+                   <TxDtls><Amt Ccy="EUR">100.00</Amt></TxDtls>
+                   <TxDtls><Amt Ccy="EUR">25.00</Amt></TxDtls>
+                 </NtryDtls>
+               </Ntry>"#,
+        );
+        let batch = e.batch.as_ref().unwrap();
+        assert_eq!(batch.message_id.as_deref(), Some("DD-2026-07"));
+        assert_eq!(batch.payment_info_id.as_deref(), Some("DD-2026-07-1"));
+        assert_eq!(batch.transaction_count, Some(2));
+        assert!(e.batch_booked);
+        assert!(e.details_reconcile());
+    }
+
+    #[test]
+    fn a_batch_of_one_is_still_a_batch() {
+        // Regression: `batch_booked` was `TxDtls count > 1`, so a single-
+        // transaction collection run read as an ordinary payment — and the
+        // entry total was then attributed to the one itemised detail even
+        // though the bank said it aggregated three.
+        let e = entry(
+            r#"<Ntry>
+                 <Amt Ccy="EUR">125.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+                 <NtryDtls>
+                   <Btch><PmtInfId>DD-1</PmtInfId><NbOfTxs>3</NbOfTxs></Btch>
+                   <TxDtls><Refs><EndToEndId>E1</EndToEndId></Refs></TxDtls>
+                 </NtryDtls>
+               </Ntry>"#,
+        );
+        assert!(e.batch_booked, "Btch is the bank's own assertion");
+        assert_eq!(
+            e.details[0].signed_ct(),
+            None,
+            "3 transactions were aggregated; the entry total is not this one's"
+        );
+        assert!(!e.details_reconcile());
+
+        // With NbOfTxs = 1 the identity is safe again.
+        let single = entry(
+            r#"<Ntry>
+                 <Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+                 <NtryDtls>
+                   <Btch><NbOfTxs>1</NbOfTxs></Btch>
+                   <TxDtls><Refs><MndtId>MND-1</MndtId></Refs></TxDtls>
+                 </NtryDtls>
+               </Ntry>"#,
+        );
+        assert!(single.batch_booked);
+        assert_eq!(single.details[0].signed_ct(), Some(-7_500));
+    }
+
+    #[test]
+    fn the_banks_free_text_survives_at_both_levels() {
+        // `AddtlNtryInf` is where several German banks put the statement text,
+        // and for an entry with no NtryDtls it is the only description there
+        // is. Both it and `AddtlTxInf` used to be dropped on the floor.
+        let e = entry(
+            r#"<Ntry>
+                 <Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+                 <AddtlNtryInf>SEPA-LASTSCHRIFT EINZUG</AddtlNtryInf>
+                 <NtryDtls><TxDtls>
+                   <AddtlTxInf>Kundennummer 4711</AddtlTxInf>
+                   <RtrInf><Rsn><Cd>AM04</Cd></Rsn><AddtlInf>Konto nicht gedeckt</AddtlInf></RtrInf>
+                 </TxDtls></NtryDtls>
+               </Ntry>"#,
+        );
+        assert_eq!(
+            e.additional_info.as_deref(),
+            Some("SEPA-LASTSCHRIFT EINZUG")
+        );
+        assert_eq!(
+            e.details[0].additional_info.as_deref(),
+            Some("Kundennummer 4711")
+        );
+        assert_eq!(e.details[0].return_reason_code.as_deref(), Some("AM04"));
+        assert_eq!(
+            e.details[0].return_additional_info.as_deref(),
+            Some("Konto nicht gedeckt")
+        );
+    }
+
+    #[test]
+    fn a_remittance_split_across_several_ustrd_is_read_whole() {
+        // Regression: only the first `Ustrd` was read. German banks split a
+        // long Verwendungszweck into 35-character occurrences, so the invoice
+        // number — which usually sits at the end — was being thrown away.
+        let e = entry(
+            r#"<Ntry>
+                 <Amt Ccy="EUR">75.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>
+                 <NtryDtls><TxDtls><RmtInf>
+                   <Ustrd>Rechnung 2026-07 Teilzahlung 1 von</Ustrd>
+                   <Ustrd>3, Kundennummer 4711</Ustrd>
+                   <Ustrd>RG-NR 2026-000815</Ustrd>
+                 </RmtInf></TxDtls></NtryDtls>
+               </Ntry>"#,
+        );
+        assert_eq!(
+            e.reference(),
+            Some("Rechnung 2026-07 Teilzahlung 1 von 3, Kundennummer 4711 RG-NR 2026-000815")
+        );
+
+        // A single occurrence is unchanged, and an empty one reads as absent.
+        let one = entry(
+            r#"<Ntry><Amt Ccy="EUR">1.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>
+                 <NtryDtls><TxDtls><RmtInf><Ustrd>Miete Juli</Ustrd></RmtInf></TxDtls></NtryDtls>
+               </Ntry>"#,
+        );
+        assert_eq!(one.reference(), Some("Miete Juli"));
+        let none = entry(
+            r#"<Ntry><Amt Ccy="EUR">1.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>
+                 <NtryDtls><TxDtls><RmtInf><Ustrd/></RmtInf></TxDtls></NtryDtls>
+               </Ntry>"#,
+        );
+        assert_eq!(none.reference(), None);
     }
 
     #[test]

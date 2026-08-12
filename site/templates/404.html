@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="wrap prose">
+  <h1>Page not found</h1>
+  <p class="lede">That URL does not exist on this site.</p>
+  <ul class="cards">
+    <li><a href="{{ get_url(path='@/_index.md') | safe }}"><strong>Home</strong><span>What the crate does and why</span></a></li>
+    <li><a href="{{ get_url(path='@/docs/_index.md') | safe }}"><strong>Documentation</strong><span>Guides for every payment scenario</span></a></li>
+    <li><a href="{{ config.extra.api_url }}"><strong>API reference</strong><span>Every type and function, on docs.rs</span></a></li>
+  </ul>
+</div>
+{% endblock %}

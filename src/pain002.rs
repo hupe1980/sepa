@@ -1,13 +1,23 @@
 //! ISO 20022 pain.002 — Customer Payment Status Report parser.
 //!
 //! Parses the bank's response to an initiated payment batch (pain.001 or pain.008).
-//! Supports all DK/EPC SEPA namespace variants:
+//! The parser is namespace- and version-agnostic, so every generation below is
+//! read by the same code:
 //!
 //! | Schema | Used by |
 //! |---|---|
+//! | `pain.002.001.10` | The EPC 2025 Customer-to-PSP guidelines — the reply to a `pain.001.001.09` / `pain.008.001.08` |
+//! | `pain.002.001.03` | ISO namespace of the pre-2023 generation |
 //! | `pain.002.003.03` | Deutsche Kreditwirtschaft (DK) standard |
 //! | `pain.002.002.03` | DFÜ-Abkommen reference, some banks |
-//! | `pain.002.001.03` | ISO standard namespace, some banks |
+//!
+//! ## Which fields a bank may omit
+//!
+//! `OrgnlEndToEndId` and `TxSts` are both `0..1` in every version, so they are
+//! [`Option`]s here rather than being filled with a stand-in. That matters:
+//! `OrgnlEndToEndId` is what a rejection is matched back to a transaction with,
+//! and a substituted `"NOTPROVIDED"` is indistinguishable from a bank sending
+//! that string for real.
 //!
 //! ## Pain.002 message lifecycle
 //!
@@ -47,19 +57,75 @@
 //! assert_eq!(doc.group_status, Some(PaymentStatus::Actc));
 //! assert!(doc.group_status.unwrap().is_accepted());
 //! ```
+//!
+//! ## Verification of Payee
+//!
+//! Mandatory for euro credit transfers since 9 October 2025: the payer's PSP
+//! checks the payee name against the account before execution and reports the
+//! outcome here. A status report is therefore no longer only about acceptance
+//! and rejection, and a verification status is deliberately **not** an
+//! acceptance — `RCVC` says a name matched, which is a different question from
+//! whether the payment was taken.
+//!
+//! ```rust
+//! use sepa::{VerificationOutcome, parse_pain002};
+//!
+//! let xml = r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+//!   <CstmrPmtStsRpt>
+//!     <GrpHdr><MsgId>M</MsgId><CreDtTm>2025-11-10T09:31:30Z</CreDtTm></GrpHdr>
+//!     <OrgnlGrpInfAndSts>
+//!       <OrgnlMsgId>K563</OrgnlMsgId><OrgnlMsgNmId>pain.001</OrgnlMsgNmId>
+//!       <GrpSts>RVCM</GrpSts>
+//!       <NbOfTxsPerSts><DtldNbOfTxs>454</DtldNbOfTxs><DtldSts>RCVC</DtldSts></NbOfTxsPerSts>
+//!     </OrgnlGrpInfAndSts>
+//!     <OrgnlPmtInfAndSts>
+//!       <OrgnlPmtInfId>B001</OrgnlPmtInfId>
+//!       <TxInfAndSts>
+//!         <OrgnlEndToEndId>T087</OrgnlEndToEndId>
+//!         <TxSts>RVMC</TxSts>
+//!         <StsRsnInf><AddtlInf>Peter Schmitz</AddtlInf></StsRsnInf>
+//!         <OrgnlTxRef><Cdtr><Pty><Nm>P. Schmitz</Nm></Pty></Cdtr></OrgnlTxRef>
+//!       </TxInfAndSts>
+//!     </OrgnlPmtInfAndSts>
+//!   </CstmrPmtStsRpt>
+//! </Document>"#;
+//!
+//! let doc = parse_pain002(xml)?;
+//!
+//! // 454 payments matched — reported as a count, not 454 elements.
+//! assert_eq!(doc.group_status_counts[0].count, 454);
+//!
+//! // The one that needs a decision, with the name the payee's bank holds.
+//! let tx = &doc.payment_info_statuses[0].transactions[0];
+//! assert_eq!(
+//!     tx.status.as_ref().unwrap().verification(),
+//!     Some(VerificationOutcome::CloseMatch),
+//! );
+//! assert_eq!(tx.original_creditor_name.as_deref(), Some("P. Schmitz"));
+//! assert_eq!(tx.additional_info, ["Peter Schmitz"]);
+//! # Ok::<(), sepa::Pain002ParseError>(())
+//! ```
 
 use crate::xml::{Document, Node, XmlError};
 
 // ── known namespaces ──────────────────────────────────────────────────────────
 
 /// Known pain.002 XML namespace URIs.
+///
+/// Informational: [`parse_pain002`] is namespace-agnostic and does not consult
+/// these. They are here so an application can recognise or log which generation
+/// a bank replied in.
 pub mod ns {
-    /// Deutsche Kreditwirtschaft DK V2.7 — most common in Germany.
-    pub const PAIN002_003_03: &str = "urn:iso:std:iso:20022:tech:xsd:pain.002.003.03";
-    /// DFÜ-Abkommen reference schema.
-    pub const PAIN002_002_03: &str = "urn:iso:std:iso:20022:tech:xsd:pain.002.002.03";
-    /// ISO 20022 standard namespace.
+    /// `pain.002.001.10` — the version the EPC 2025 Customer-to-PSP
+    /// Implementation Guidelines specify, and the reply to a
+    /// `pain.001.001.09` / `pain.008.001.08` submission.
+    pub const PAIN002_001_10: &str = "urn:iso:std:iso:20022:tech:xsd:pain.002.001.10";
+    /// `pain.002.001.03` — the ISO namespace of the pre-2023 generation.
     pub const PAIN002_001_03: &str = "urn:iso:std:iso:20022:tech:xsd:pain.002.001.03";
+    /// `pain.002.003.03` — legacy Deutsche Kreditwirtschaft DK V2.7.
+    pub const PAIN002_003_03: &str = "urn:iso:std:iso:20022:tech:xsd:pain.002.003.03";
+    /// `pain.002.002.03` — DFÜ-Abkommen reference schema.
+    pub const PAIN002_002_03: &str = "urn:iso:std:iso:20022:tech:xsd:pain.002.002.03";
 }
 
 // ── PaymentStatus ─────────────────────────────────────────────────────────────
@@ -87,8 +153,53 @@ pub enum PaymentStatus {
     Pdng,
     /// Rejected — not processed (see [`ReasonCode`] for details).
     Rjct,
+
+    // ── Verification of Payee ────────────────────────────────────────────────
+    /// `RCVC` — verification completed, the payee name **matched**.
+    Rcvc,
+    /// `RVMC` — verification completed, the payee name was a **close match**.
+    ///
+    /// The name the payee's PSP holds is returned in
+    /// [`TransactionStatus::additional_info`], so it can be shown to the payer.
+    Rvmc,
+    /// `RVNM` — verification completed, the payee name did **not** match.
+    Rvnm,
+    /// `RVNA` — verification **not applicable**: no answer from the payee's
+    /// PSP, a timeout, or a PSP outside the scheme.
+    Rvna,
+    /// `RVCM` — group level: verification completed **with mismatches**.
+    ///
+    /// Summarises a file in which at least one payment did not match; the
+    /// per-payment outcomes are the four codes above.
+    Rvcm,
+
     /// Unknown or bank-specific status code.
     Other(String),
+}
+
+/// The outcome of a Verification of Payee check on one payment.
+///
+/// `VoP` has been mandatory for euro credit transfers since 9 October 2025 under
+/// the Instant Payments Regulation. The payer's PSP checks the payee name
+/// against the account before execution and reports the result back in the
+/// pain.002 — so a `pain.002` is no longer only about acceptance and rejection.
+///
+/// Read it with [`PaymentStatus::verification`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum VerificationOutcome {
+    /// The name matched (`RCVC`). Nothing to do.
+    Match,
+    /// A close match (`RVMC`) — the payee's actual name is in
+    /// [`TransactionStatus::additional_info`]. Show it to the payer and let
+    /// them decide.
+    CloseMatch,
+    /// No match (`RVNM`). Executing anyway shifts liability to the payer.
+    NoMatch,
+    /// Not applicable (`RVNA`) — no answer, a timeout, or a PSP outside the
+    /// scheme. The reason code distinguishes them: `AB11` is a timeout, `AG03`
+    /// a PSP that does not offer `VoP`.
+    NotApplicable,
 }
 
 impl PaymentStatus {
@@ -104,11 +215,20 @@ impl PaymentStatus {
             Self::Part => "PART",
             Self::Pdng => "PDNG",
             Self::Rjct => "RJCT",
+            Self::Rcvc => "RCVC",
+            Self::Rvmc => "RVMC",
+            Self::Rvnm => "RVNM",
+            Self::Rvna => "RVNA",
+            Self::Rvcm => "RVCM",
             Self::Other(s) => s,
         }
     }
 
     /// Returns `true` for accepted statuses (ACTC, ACCP, ACSP, ACSC, ACWC).
+    ///
+    /// The Verification of Payee codes are **not** acceptances: `RCVC` says a
+    /// name matched, which is a different question from whether the payment was
+    /// taken. Read [`verification`](Self::verification) for those.
     #[inline]
     #[must_use]
     pub fn is_accepted(&self) -> bool {
@@ -116,6 +236,31 @@ impl PaymentStatus {
             self,
             Self::Actc | Self::Accp | Self::Acsp | Self::Acsc | Self::Acwc
         )
+    }
+
+    /// The Verification of Payee outcome, when this status reports one.
+    ///
+    /// `None` for every ordinary acceptance or rejection status, and for the
+    /// group-level `RVCM` summary, which is about a whole file rather than one
+    /// payee.
+    #[inline]
+    #[must_use]
+    pub const fn verification(&self) -> Option<VerificationOutcome> {
+        match self {
+            Self::Rcvc => Some(VerificationOutcome::Match),
+            Self::Rvmc => Some(VerificationOutcome::CloseMatch),
+            Self::Rvnm => Some(VerificationOutcome::NoMatch),
+            Self::Rvna => Some(VerificationOutcome::NotApplicable),
+            _ => None,
+        }
+    }
+
+    /// Whether this status is about payee verification rather than payment
+    /// processing — including the group-level `RVCM` summary.
+    #[inline]
+    #[must_use]
+    pub const fn is_verification(&self) -> bool {
+        matches!(self, Self::Rvcm) || self.verification().is_some()
     }
 
     /// Returns `true` for terminal statuses (ACSC = fully settled, RJCT = fully rejected).
@@ -142,6 +287,11 @@ impl PaymentStatus {
             "PART" => Self::Part,
             "PDNG" => Self::Pdng,
             "RJCT" => Self::Rjct,
+            "RCVC" => Self::Rcvc,
+            "RVMC" => Self::Rvmc,
+            "RVNM" => Self::Rvnm,
+            "RVNA" => Self::Rvna,
+            "RVCM" => Self::Rvcm,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -348,6 +498,54 @@ impl std::str::FromStr for OriginalMessageType {
     }
 }
 
+// ── StatusCount ───────────────────────────────────────────────────────────────
+
+/// One `NbOfTxsPerSts` row — how many transactions carry a given status.
+///
+/// A Verification of Payee report leans on this: rather than listing 462
+/// matched payments, the bank reports the counts per outcome and itemises only
+/// the ones that need the payer's attention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StatusCount {
+    /// `DtldSts` — the status these transactions share.
+    pub status: PaymentStatus,
+    /// `DtldNbOfTxs` — how many there are.
+    pub count: u64,
+    /// `DtldCtrlSum` — their total in **ct**, when the bank reported one.
+    pub total_ct: Option<i64>,
+}
+
+fn parse_status_counts(block: &Node) -> Vec<StatusCount> {
+    block
+        .children_named("NbOfTxsPerSts")
+        .filter_map(|n| {
+            Some(StatusCount {
+                status: PaymentStatus::from_code(n.text_of("DtldSts")?),
+                count: n.text_of("DtldNbOfTxs")?.parse().ok()?,
+                total_ct: n
+                    .text_of("DtldCtrlSum")
+                    .and_then(|v| crate::ct_from_eur_str(v).ok()),
+            })
+        })
+        .collect()
+}
+
+/// A party name, accepting both the flat and the `Party40Choice` nestings.
+///
+/// `pain.002.001.03` types `Dbtr` and `Cdtr` as a plain party, so the name is
+/// `Cdtr/Nm`. From `.001.10` they are a `Party40Choice`, which wraps it as
+/// `Cdtr/Pty/Nm`. Reading only the flat form silently loses every party name in
+/// a current-version report.
+fn party_name(reference: &Node, tag: &str) -> Option<String> {
+    let party = reference.child(tag)?;
+    party
+        .text_of("Nm")
+        .or_else(|| party.text_at(&["Pty", "Nm"]))
+        .map(str::to_owned)
+}
+
 // ── TransactionStatus ─────────────────────────────────────────────────────────
 
 /// Status of a single transaction within a pain.002 report.
@@ -356,13 +554,26 @@ impl std::str::FromStr for OriginalMessageType {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TransactionStatus {
     /// Original end-to-end ID from the initiating message (`OrgnlEndToEndId`).
-    pub original_end_to_end_id: String,
-    /// Transaction-level status code.
-    pub status: PaymentStatus,
+    ///
+    /// Optional in every pain.002 version, so `None` is a real answer and not
+    /// an error — but it is also the key you match a rejection back to your own
+    /// transaction with, so a `None` here needs escalating rather than
+    /// defaulting. See [`original_instruction_id`](Self::original_instruction_id)
+    /// for the alternative key some banks echo instead.
+    pub original_end_to_end_id: Option<String>,
+    /// Original `InstrId` from the initiating message (`OrgnlInstrId`).
+    pub original_instruction_id: Option<String>,
+    /// Transaction-level status code (`TxSts`), when the bank reported one.
+    pub status: Option<PaymentStatus>,
     /// Reason codes explaining a rejection (`StsRsnInf/Rsn/Cd`).
     pub reason_codes: Vec<ReasonCode>,
-    /// Optional additional reason information (`StsRsnInf/AddtlInf`).
-    pub additional_info: Option<String>,
+    /// Additional reason information (`StsRsnInf/AddtlInf`), in document order.
+    ///
+    /// `maxOccurs="unbounded"`, and banks use that: a legal notice runs to
+    /// several lines, and on a Verification of Payee **close match** this is
+    /// where the payee's actual name comes back — split across two entries when
+    /// it exceeds 105 characters.
+    pub additional_info: Vec<String>,
     /// Original instructed amount in **ct** (1/100 EUR), if present in `OrgnlTxRef`.
     pub original_amount_ct: Option<i64>,
     /// Original debtor name, if echoed back.
@@ -385,19 +596,31 @@ pub struct TransactionStatus {
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PaymentInfoStatus {
-    /// Original `PmtInfId` from the initiating message.
-    pub original_payment_info_id: String,
+    /// Original `PmtInfId` from the initiating message (`OrgnlPmtInfId`).
+    pub original_payment_info_id: Option<String>,
     /// Payment-information-level status, if present.
     pub status: Option<PaymentStatus>,
+    /// `NbOfTxsPerSts` — how many transactions carry each status.
+    pub status_counts: Vec<StatusCount>,
     /// Per-transaction statuses within this payment info block.
     pub transactions: Vec<TransactionStatus>,
+}
+
+impl TransactionStatus {
+    /// Whether this transaction was rejected (`TxSts` = `RJCT`).
+    ///
+    /// A transaction the bank listed without a status is **not** a rejection.
+    #[must_use]
+    pub fn is_rejected(&self) -> bool {
+        self.status.as_ref().is_some_and(PaymentStatus::is_rejected)
+    }
 }
 
 impl PaymentInfoStatus {
     /// Returns `true` when any transaction in this block was rejected.
     #[must_use]
     pub fn has_rejections(&self) -> bool {
-        self.transactions.iter().any(|t| t.status.is_rejected())
+        self.transactions.iter().any(TransactionStatus::is_rejected)
             || self.status.as_ref().is_some_and(PaymentStatus::is_rejected)
     }
 
@@ -406,7 +629,7 @@ impl PaymentInfoStatus {
     pub fn rejection_reasons(&self) -> Vec<&ReasonCode> {
         self.transactions
             .iter()
-            .filter(|t| t.status.is_rejected())
+            .filter(|t| t.is_rejected())
             .flat_map(|t| &t.reason_codes)
             .collect()
     }
@@ -431,11 +654,21 @@ pub struct Pain002Document {
     /// Detected XML namespace URI (e.g. `pain.002.003.03`).
     pub namespace: Option<String>,
     /// `OrgnlMsgId` — message ID of the original pain.001 or pain.008.
+    ///
+    /// Mandatory in every pain.002 version, so a report without it is rejected
+    /// as [`Pain002ParseError::MissingElement`] rather than parsed with a
+    /// stand-in: this is the identifier you match the report to your own
+    /// submission with.
     pub original_msg_id: String,
     /// `OrgnlMsgNmId` — identifies whether this is a SCT or SDD response.
-    pub original_msg_type: OriginalMessageType,
+    ///
+    /// Mandatory in the schema; `None` means the bank omitted it, which is
+    /// reported rather than papered over with an empty code.
+    pub original_msg_type: Option<OriginalMessageType>,
     /// Group-level status, if present in `OrgnlGrpInfAndSts/GrpSts`.
     pub group_status: Option<PaymentStatus>,
+    /// `OrgnlGrpInfAndSts/NbOfTxsPerSts` — file-wide counts per status.
+    pub group_status_counts: Vec<StatusCount>,
     /// Per-payment-info statuses (one per `<PmtInf>` in the original message).
     pub payment_info_statuses: Vec<PaymentInfoStatus>,
 }
@@ -448,13 +681,18 @@ impl Pain002Document {
     /// on [`group_status`](Self::group_status) if you need to wait for a terminal state.
     #[must_use]
     pub fn is_fully_accepted(&self) -> bool {
-        self.group_status
-            .as_ref()
-            .is_some_and(PaymentStatus::is_accepted)
+        let reported = self.group_status.is_some() || !self.payment_info_statuses.is_empty();
+        reported
             && self
-                .payment_info_statuses
-                .iter()
-                .all(|p| !p.has_rejections())
+                .group_status
+                .as_ref()
+                .is_none_or(PaymentStatus::is_accepted)
+            && self.payment_info_statuses.iter().all(|p| {
+                p.status.as_ref().is_none_or(PaymentStatus::is_accepted)
+                    && p.transactions
+                        .iter()
+                        .all(|t| t.status.as_ref().is_none_or(PaymentStatus::is_accepted))
+            })
     }
 
     /// `true` if any transaction was rejected.
@@ -475,7 +713,7 @@ impl Pain002Document {
         self.payment_info_statuses
             .iter()
             .flat_map(|p| &p.transactions)
-            .filter(|t| t.status.is_rejected())
+            .filter(|t| t.is_rejected())
             .collect()
     }
 }
@@ -494,16 +732,14 @@ pub enum Pain002ParseError {
     #[error("not a pain.002 document: root element <CstmrPmtStsRpt> not found")]
     NotPain002,
     /// A required XML element was absent.
+    ///
+    /// Only the elements a status report is useless without: `GrpHdr`,
+    /// `GrpHdr/MsgId`, `OrgnlGrpInfAndSts` and `OrgnlGrpInfAndSts/OrgnlMsgId`.
+    /// Everything else is optional and simply reads as `None`.
     #[error("missing required pain.002 element: <{tag}>")]
     MissingElement {
         /// Name of the missing XML element.
         tag: &'static str,
-    },
-    /// An amount string could not be parsed as EUR cents.
-    #[error("invalid amount value in pain.002: {raw:?}")]
-    InvalidAmount {
-        /// The raw string that failed to parse.
-        raw: String,
     },
 }
 
@@ -559,12 +795,12 @@ pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
         .ok_or(Pain002ParseError::MissingElement { tag: "OrgnlMsgId" })?
         .to_owned();
 
-    let original_msg_type = orig_grp.text_of("OrgnlMsgNmId").map_or_else(
-        || OriginalMessageType::Other(String::new()),
-        OriginalMessageType::from_msg_name_id,
-    );
+    let original_msg_type = orig_grp
+        .text_of("OrgnlMsgNmId")
+        .map(OriginalMessageType::from_msg_name_id);
 
     let group_status = orig_grp.text_of("GrpSts").map(PaymentStatus::from_code);
+    let group_status_counts = parse_status_counts(orig_grp);
 
     let payment_info_statuses = root
         .children_named("OrgnlPmtInfAndSts")
@@ -579,6 +815,7 @@ pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
         original_msg_id,
         original_msg_type,
         group_status,
+        group_status_counts,
         payment_info_statuses,
     })
 }
@@ -591,11 +828,12 @@ fn bic_of_agent(agent: &Node) -> Option<&str> {
 
 fn parse_payment_info_status(block: &Node) -> PaymentInfoStatus {
     PaymentInfoStatus {
-        original_payment_info_id: block
-            .text_of("OrgnlPmtInfId")
-            .unwrap_or("NOTPROVIDED")
-            .to_owned(),
+        // Mandatory in the schema, so `None` means the bank sent a malformed
+        // block. Reported as absent rather than substituted: `"NOTPROVIDED"` is
+        // a legal `PmtInfId`, and inventing it here could match a real group.
+        original_payment_info_id: block.text_of("OrgnlPmtInfId").map(str::to_owned),
         status: block.text_of("PmtInfSts").map(PaymentStatus::from_code),
+        status_counts: parse_status_counts(block),
         transactions: block
             .children_named("TxInfAndSts")
             .map(parse_transaction_status)
@@ -604,29 +842,32 @@ fn parse_payment_info_status(block: &Node) -> PaymentInfoStatus {
 }
 
 fn parse_transaction_status(tx: &Node) -> TransactionStatus {
-    let original_end_to_end_id = tx
-        .text_of("OrgnlEndToEndId")
-        .unwrap_or("NOTPROVIDED")
-        .to_owned();
-
-    let status = tx.text_of("TxSts").map_or_else(
-        || PaymentStatus::Other("UNKNOWN".to_owned()),
-        PaymentStatus::from_code,
-    );
+    // Both are `0..1` in the schema. The previous stand-ins — `"NOTPROVIDED"`
+    // for the reference and `Other("UNKNOWN")` for the status — were
+    // indistinguishable from a bank genuinely sending those values, and the
+    // reference is what a rejection is matched back to a transaction with.
+    let original_end_to_end_id = tx.text_of("OrgnlEndToEndId").map(str::to_owned);
+    let original_instruction_id = tx.text_of("OrgnlInstrId").map(str::to_owned);
+    let status = tx.text_of("TxSts").map(PaymentStatus::from_code);
 
     // One reason code per StsRsnInf block. `Rsn` is a choice between a typed
     // `Cd` and a bank-proprietary `Prtry`; each block is inspected separately so
     // a proprietary code in a later block is not masked by a typed code in an
     // earlier one.
     let mut reason_codes = Vec::new();
-    let mut additional_info: Option<String> = None;
+    let mut additional_info: Vec<String> = Vec::new();
     for rsn_block in tx.children_named("StsRsnInf") {
         if let Some(code) = rsn_block.child("Rsn").and_then(Node::code) {
             reason_codes.push(ReasonCode::from_code(code));
         }
-        if additional_info.is_none() {
-            additional_info = rsn_block.text_of("AddtlInf").map(str::to_owned);
-        }
+        // `AddtlInf` is unbounded and every occurrence matters — a legal notice
+        // spans lines, and a VoP close match returns the payee's real name here.
+        additional_info.extend(
+            rsn_block
+                .children_named("AddtlInf")
+                .map(|n| n.text.clone())
+                .filter(|t| !t.is_empty()),
+        );
     }
 
     let orig_tx_ref = tx.child("OrgnlTxRef");
@@ -643,7 +884,7 @@ fn parse_transaction_status(tx: &Node) -> TransactionStatus {
     let party = |tags: [&str; 2]| -> (Option<String>, Option<String>) {
         orig_tx_ref.map_or((None, None), |r| {
             (
-                r.text_at(&[tags[0], "Nm"]).map(str::to_owned),
+                party_name(r, tags[0]),
                 r.text_at(&[tags[1], "Id", "IBAN"]).map(str::to_owned),
             )
         })
@@ -654,6 +895,7 @@ fn parse_transaction_status(tx: &Node) -> TransactionStatus {
 
     TransactionStatus {
         original_end_to_end_id,
+        original_instruction_id,
         status,
         reason_codes,
         additional_info,
@@ -741,7 +983,10 @@ mod tests {
             doc.namespace.as_deref(),
             Some("urn:iso:std:iso:20022:tech:xsd:pain.002.003.03")
         );
-        assert_eq!(doc.original_msg_type, OriginalMessageType::CreditTransfer);
+        assert_eq!(
+            doc.original_msg_type,
+            Some(OriginalMessageType::CreditTransfer)
+        );
         assert_eq!(doc.forwarding_agent_bic.as_deref(), Some("COBADEFFXXX"));
         assert!(!doc.has_rejections());
         assert!(doc.is_fully_accepted());
@@ -758,7 +1003,7 @@ mod tests {
         assert_eq!(rejected.len(), 2);
 
         let tx1 = &rejected[0];
-        assert_eq!(tx1.original_end_to_end_id, "E2E-001");
+        assert_eq!(tx1.original_end_to_end_id.as_deref(), Some("E2E-001"));
         assert_eq!(tx1.reason_codes, vec![ReasonCode::Ac04]);
         assert_eq!(tx1.original_amount_ct, Some(8888));
         assert_eq!(
@@ -772,10 +1017,252 @@ mod tests {
 
         let tx2 = &rejected[1];
         assert_eq!(tx2.reason_codes, vec![ReasonCode::Ds02]);
-        assert_eq!(
-            tx2.additional_info.as_deref(),
-            Some("Customer order to stop")
+        assert_eq!(tx2.additional_info, ["Customer order to stop"]);
+    }
+
+    #[test]
+    fn omitted_optional_fields_read_as_absent_not_as_a_stand_in() {
+        // `OrgnlEndToEndId` and `TxSts` are both 0..1 in every pain.002
+        // version. They used to be filled with "NOTPROVIDED" and
+        // Other("UNKNOWN") — values a bank can also send for real, so a caller
+        // could not tell an unattributable rejection from an attributed one.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-14T10:00:00</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>CT-1</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.001.001.09</OrgnlMsgNmId>
+      <GrpSts>PART</GrpSts>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>PMT-1</OrgnlPmtInfId>
+      <TxInfAndSts>
+        <OrgnlInstrId>INSTR-7</OrgnlInstrId>
+        <TxSts>RJCT</TxSts>
+        <StsRsnInf><Rsn><Cd>AC01</Cd></Rsn></StsRsnInf>
+      </TxInfAndSts>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>E2E-2</OrgnlEndToEndId>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#;
+
+        let doc = parse_pain002(xml).unwrap();
+        let txs = &doc.payment_info_statuses[0].transactions;
+
+        // No end-to-end reference: absent, not "NOTPROVIDED". The instruction
+        // id is the only key this rejection can be matched by.
+        assert_eq!(txs[0].original_end_to_end_id, None);
+        assert_eq!(txs[0].original_instruction_id.as_deref(), Some("INSTR-7"));
+        assert!(txs[0].is_rejected());
+
+        // No status at all: absent, not Other("UNKNOWN"), and not a rejection.
+        assert_eq!(txs[1].status, None);
+        assert!(!txs[1].is_rejected());
+
+        assert!(doc.has_rejections());
+        assert!(!doc.is_fully_accepted());
+    }
+
+    #[test]
+    fn full_acceptance_looks_at_all_three_status_levels() {
+        let report = |grp: &str, pmt: &str| {
+            format!(
+                r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>T</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts><OrgnlMsgId>O</OrgnlMsgId><GrpSts>{grp}</GrpSts></OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts><OrgnlPmtInfId>P</OrgnlPmtInfId><PmtInfSts>{pmt}</PmtInfSts></OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#
+            )
+        };
+
+        assert!(
+            parse_pain002(&report("ACTC", "ACTC"))
+                .unwrap()
+                .is_fully_accepted()
         );
+        assert!(
+            !parse_pain002(&report("ACTC", "RJCT"))
+                .unwrap()
+                .is_fully_accepted()
+        );
+        assert!(
+            !parse_pain002(&report("PART", "ACTC"))
+                .unwrap()
+                .is_fully_accepted()
+        );
+
+        // The case the old implementation got wrong: it asked only whether any
+        // status was *rejected*, so a payment-information block that was
+        // merely pending or partially accepted counted as fully accepted.
+        for not_yet in ["PDNG", "PART", "ZZZZ"] {
+            assert!(
+                !parse_pain002(&report("ACTC", not_yet))
+                    .unwrap()
+                    .is_fully_accepted(),
+                "PmtInfSts {not_yet} is not an acceptance"
+            );
+        }
+
+        // A report that states no status at all is not an acceptance.
+        let silent = r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>T</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts><OrgnlMsgId>O</OrgnlMsgId></OrgnlGrpInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#;
+        let doc = parse_pain002(silent).unwrap();
+        assert_eq!(doc.group_status, None);
+        assert!(!doc.is_fully_accepted());
+    }
+
+    /// Abridged from the Deutsche Kreditwirtschaft's published example
+    /// `pain.002.001.10-VOP Status Report.xml` (Anlage 3, status April 2025).
+    /// Verification of Payee has been mandatory since 9 October 2025, so this
+    /// is the shape a payer now gets back for every credit transfer file.
+    const VOP_REPORT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr>
+      <MsgId>B78567267384</MsgId>
+      <CreDtTm>2025-11-10T09:31:30Z</CreDtTm>
+      <DbtrAgt><FinInstnId><BICFI>SPUEDE2UXXX</BICFI></FinInstnId></DbtrAgt>
+    </GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>K563</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.001</OrgnlMsgNmId>
+      <OrgnlNbOfTxs>462</OrgnlNbOfTxs>
+      <GrpSts>RVCM</GrpSts>
+      <StsRsnInf>
+        <AddtlInf>RVMC Message text e.g. with legal notice</AddtlInf>
+        <AddtlInf>RVMC continuation of the message text</AddtlInf>
+      </StsRsnInf>
+      <NbOfTxsPerSts><DtldNbOfTxs>454</DtldNbOfTxs><DtldSts>RCVC</DtldSts></NbOfTxsPerSts>
+      <NbOfTxsPerSts><DtldNbOfTxs>3</DtldNbOfTxs><DtldSts>RVNM</DtldSts></NbOfTxsPerSts>
+      <NbOfTxsPerSts><DtldNbOfTxs>2</DtldNbOfTxs><DtldSts>RVMC</DtldSts></NbOfTxsPerSts>
+      <NbOfTxsPerSts><DtldNbOfTxs>3</DtldNbOfTxs><DtldSts>RVNA</DtldSts></NbOfTxsPerSts>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>B001</OrgnlPmtInfId>
+      <OrgnlNbOfTxs>350</OrgnlNbOfTxs>
+      <NbOfTxsPerSts><DtldNbOfTxs>344</DtldNbOfTxs><DtldSts>RCVC</DtldSts></NbOfTxsPerSts>
+      <NbOfTxsPerSts><DtldNbOfTxs>1</DtldNbOfTxs><DtldSts>RVNM</DtldSts></NbOfTxsPerSts>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>K563-B001-T021</OrgnlEndToEndId>
+        <TxSts>RVNM</TxSts>
+        <OrgnlTxRef>
+          <Cdtr><Pty><Nm>Creditor Name</Nm></Pty></Cdtr>
+          <CdtrAcct><Id><IBAN>DE21500500009876543210</IBAN></Id></CdtrAcct>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>K563-B001-T087</OrgnlEndToEndId>
+        <TxSts>RVMC</TxSts>
+        <StsRsnInf><AddtlInf>Peter Schmitz</AddtlInf></StsRsnInf>
+        <OrgnlTxRef>
+          <Cdtr><Pty><Nm>P. Schmitz</Nm></Pty></Cdtr>
+          <CdtrAcct><Id><IBAN>DE34500500009876543210</IBAN></Id></CdtrAcct>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#;
+
+    #[test]
+    fn a_verification_of_payee_report_is_read_as_such() {
+        let doc = parse_pain002(VOP_REPORT).unwrap();
+
+        // The group summarises a file that completed with mismatches. That is
+        // not an acceptance, and must not be reported as one.
+        assert_eq!(doc.group_status, Some(PaymentStatus::Rvcm));
+        assert!(doc.group_status.as_ref().unwrap().is_verification());
+        assert!(!doc.is_fully_accepted());
+        assert!(!doc.has_rejections(), "a name mismatch is not a rejection");
+
+        // 462 payments, reported as counts rather than 462 elements.
+        assert_eq!(doc.group_status_counts.len(), 4);
+        let matched = doc
+            .group_status_counts
+            .iter()
+            .find(|c| c.status == PaymentStatus::Rcvc)
+            .unwrap();
+        assert_eq!(matched.count, 454);
+        assert_eq!(
+            doc.group_status_counts.iter().map(|c| c.count).sum::<u64>(),
+            462
+        );
+
+        let block = &doc.payment_info_statuses[0];
+        assert_eq!(block.status_counts.len(), 2);
+
+        // A no-match: the payer must decide whether to proceed.
+        let no_match = &block.transactions[0];
+        assert_eq!(
+            no_match.status.as_ref().unwrap().verification(),
+            Some(VerificationOutcome::NoMatch)
+        );
+        // `Cdtr` is a Party40Choice from .001.10 — the name lives under `Pty`,
+        // and reading only the flat form lost every party name in a current
+        // report.
+        assert_eq!(
+            no_match.original_creditor_name.as_deref(),
+            Some("Creditor Name")
+        );
+        assert_eq!(
+            no_match.original_creditor_iban.as_deref(),
+            Some("DE21500500009876543210")
+        );
+
+        // A close match carries the payee's *actual* name for display.
+        let close = &block.transactions[1];
+        assert_eq!(
+            close.status.as_ref().unwrap().verification(),
+            Some(VerificationOutcome::CloseMatch)
+        );
+        assert_eq!(close.original_creditor_name.as_deref(), Some("P. Schmitz"));
+        assert_eq!(close.additional_info, ["Peter Schmitz"]);
+    }
+
+    #[test]
+    fn every_addtlinf_occurrence_is_kept() {
+        // `AddtlInf` is maxOccurs="unbounded"; a legal notice spans lines and a
+        // close-match name over 105 characters arrives split in two. Keeping
+        // only the first truncated both.
+        let doc = parse_pain002(VOP_REPORT).unwrap();
+        let _ = doc;
+        let xml = VOP_REPORT.replace(
+            "<StsRsnInf><AddtlInf>Peter Schmitz</AddtlInf></StsRsnInf>",
+            "<StsRsnInf><AddtlInf>Peter</AddtlInf><AddtlInf>Schmitz</AddtlInf></StsRsnInf>",
+        );
+        let doc = parse_pain002(&xml).unwrap();
+        assert_eq!(
+            doc.payment_info_statuses[0].transactions[1].additional_info,
+            ["Peter", "Schmitz"]
+        );
+    }
+
+    #[test]
+    fn verification_statuses_are_not_acceptances() {
+        // `RCVC` says a name matched, which is a different question from
+        // whether the payment was taken.
+        for code in ["RCVC", "RVMC", "RVNM", "RVNA", "RVCM"] {
+            let status = PaymentStatus::from_code(code);
+            assert!(!status.is_accepted(), "{code} is not an acceptance");
+            assert!(!status.is_rejected(), "{code} is not a rejection");
+            assert!(status.is_verification(), "{code} is a verification status");
+            assert_eq!(status.as_code(), code);
+        }
+        assert_eq!(
+            PaymentStatus::Rcvc.verification(),
+            Some(VerificationOutcome::Match)
+        );
+        // The group-level summary is about a file, not one payee.
+        assert_eq!(PaymentStatus::Rvcm.verification(), None);
+        assert!(!PaymentStatus::Actc.is_verification());
     }
 
     #[test]
@@ -895,10 +1382,7 @@ mod tests {
             tx.reason_codes[1],
             ReasonCode::Other("BANK-INTERNAL-007".into())
         );
-        assert_eq!(
-            tx.additional_info.as_deref(),
-            Some("Proprietary bank reason")
-        );
+        assert_eq!(tx.additional_info, ["Proprietary bank reason"]);
     }
 
     #[test]
@@ -952,7 +1436,10 @@ mod tests {
         let doc = parse_pain002(xml).unwrap();
         assert_eq!(doc.msg_id, "MSG-PREFIX-001");
         assert_eq!(doc.original_msg_id, "ORIG-001");
-        assert_eq!(doc.original_msg_type, OriginalMessageType::DirectDebit);
+        assert_eq!(
+            doc.original_msg_type,
+            Some(OriginalMessageType::DirectDebit)
+        );
         assert_eq!(doc.group_status, Some(PaymentStatus::Actc));
     }
 }

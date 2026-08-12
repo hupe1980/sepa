@@ -102,10 +102,9 @@ jobs:
           - "--no-default-features"
           - ""
           - "--features serde"
-          - "--features json"
           - "--features time"
           - "--features chrono"
-          - "--features serde,json"
+          - "--features serde,time,chrono"
           - "--features time,chrono"
           - "--all-features"
     steps:

@@ -192,11 +192,8 @@ impl Party {
     ) -> std::fmt::Result {
         write!(w, "{indent}<{tag}>")?;
         if let Some(name) = &self.name {
-            let name = charset
-                .apply("Nm", name)
-                .unwrap_or(std::borrow::Cow::Borrowed(name));
             w.write_str("<Nm>")?;
-            write_escaped(w, &name)?;
+            write_escaped(w, &charset.render(name))?;
             w.write_str("</Nm>")?;
         }
         if let Some(id) = &self.identifier {

@@ -5,7 +5,9 @@
 //! - A pain.008 direct debit run carrying **both** FRST and RCUR collections
 //!   in one file — the reason payment groups exist
 //! - A pain.001 credit transfer batch
+//! - A pain.007 reversal of one of those collections
 //! - Structured ISO 11649 references and ultimate parties
+//! - Structured postal addresses, ready for the 15 Nov 2026 EPC cut-over
 //! - Typed `IsoDate` values, so no date is ever hand-formatted
 //! - Integer-safe money formatting — no f64
 //! - Build errors that name the group and transaction that failed
@@ -20,8 +22,9 @@
 
 use sepa::{
     CreditTransferEntry, CreditTransferGroup, DirectDebitEntry, DirectDebitGroup, IsoDate,
-    Pain001Builder, Pain008Builder, Party, Purpose, RfReference, SequenceType, validate_bic,
-    validate_creditor_id, validate_iban,
+    Pain001Builder, Pain007Builder, Pain008Builder, Party, PostalAddress, Purpose, ReversalEntry,
+    ReversalGroup, ReversalReason, RfReference, SequenceType, validate_bic, validate_creditor_id,
+    validate_iban,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +39,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor_a = validate_iban("NL91ABNA0417164300").expect("debtor A IBAN is valid");
     let debtor_b = validate_iban("GB29NWBK60161331926819").expect("debtor B IBAN is valid");
 
+    // From 15 November 2026 an address the EPC schemes accept must carry a town
+    // and a country, so `PostalAddress` takes both up front — the unstructured
+    // form is simply not constructible.
+    let creditor_address = PostalAddress::new("Musterstadt", "DE")?
+        .street("Rathausplatz")
+        .building_number("1")
+        .post_code("12345");
+
     println!("Creditor: {} ({creditor_bic})", creditor_iban.as_str());
     println!("Debtor A: {debtor_a}"); // Display groups in fours
     println!("SEPA area: {}", creditor_iban.is_sepa());
@@ -45,25 +56,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A real collection run mixes first and recurring collections. Each needs
     // its own PmtInf block, because SeqTp lives at that level.
 
+    // Held in variables so the reversal below can be built from them rather
+    // than from hand-retyped values.
+    let first_group = DirectDebitGroup::new("Stadtwerke Muster GmbH", &creditor_iban, &creditor_id)
+        .sequence_type(SequenceType::Frst)
+        .collection_date(IsoDate::new(2026, 7, 20)?)
+        .creditor_bic(creditor_bic.clone())
+        .creditor_address(creditor_address.clone());
+    let first_entry = DirectDebitEntry::new(
+        "MND-00042",
+        "2026-06-01".parse()?, // rejected here if malformed, not by the bank
+        "Max Mustermann",
+        debtor_a,
+        8_500, // 85.00 EUR — integer cents, no f64
+        "ABSCHLAG-2026-07-A",
+    )
+    .with_description("Abschlag Juli 2026");
+
     let pain008_xml = Pain008Builder::new("Stadtwerke Muster GmbH")
         .msg_id("DD-2026-07-001")
-        .add_group(
-            DirectDebitGroup::new("Stadtwerke Muster GmbH", &creditor_iban, &creditor_id)
-                .sequence_type(SequenceType::Frst)
-                .collection_date(IsoDate::new(2026, 7, 20)?)
-                .creditor_bic(creditor_bic.clone())
-                .add_entry(
-                    DirectDebitEntry::new(
-                        "MND-00042",
-                        "2026-06-01".parse()?, // rejected here if malformed, not by the bank
-                        "Max Mustermann",
-                        debtor_a,
-                        8_500, // 85.00 EUR — integer cents, no f64
-                        "ABSCHLAG-2026-07-A",
-                    )
-                    .with_description("Abschlag Juli 2026"),
-                ),
-        )
+        .add_group(first_group.clone().add_entry(first_entry.clone()))
         .add_group(
             DirectDebitGroup::new("Stadtwerke Muster GmbH", &creditor_iban, &creditor_id)
                 .sequence_type(SequenceType::Rcur)
@@ -92,6 +104,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(pain008_xml.contains("<SeqTp>FRST</SeqTp>"));
     assert!(pain008_xml.contains("<SeqTp>RCUR</SeqTp>"));
     assert!(pain008_xml.contains("<CtrlSum>208.00</CtrlSum>"));
+    assert!(pain008_xml.contains("<TwnNm>Musterstadt</TwnNm><Ctry>DE</Ctry>"));
+    println!("XML valid: ok");
+
+    // ── pain.007 — reverse one of those collections ───────────────────────────
+    //
+    // The collection settled, then turned out to be wrong. `reverse` copies the
+    // mandate, creditor identifier, scheme, sequence type, collection date and
+    // both parties from the objects that produced it, so the reversal cannot
+    // disagree with what was actually sent.
+
+    let pain007_xml = Pain007Builder::new("Stadtwerke Muster GmbH", "DD-2026-07-001")
+        .msg_id("STORNO-2026-07-001")
+        .creditor_agent(validate_bic("COBADEFFXXX")?)
+        .add_group(
+            ReversalGroup::new("DD-2026-07-001").add_entry(ReversalEntry::reverse(
+                &first_group,
+                &first_entry,
+                ReversalReason::Ms02,
+            )),
+        )
+        .build()?;
+
+    println!("\n── pain.007 Reversal ──");
+    println!("Reversing: {}", sepa::ct_to_eur_str(8_500));
+    assert!(pain007_xml.contains("<CstmrPmtRvsl>"));
+    assert!(pain007_xml.contains("<OrgnlEndToEndId>ABSCHLAG-2026-07-A</OrgnlEndToEndId>"));
+    assert!(pain007_xml.contains("<RvsdInstdAmt Ccy=\"EUR\">85.00</RvsdInstdAmt>"));
+    assert!(pain007_xml.contains("<MndtId>MND-00042</MndtId>"));
     println!("XML valid: ok");
 
     // ── pain.001 — credit transfer with a structured reference ────────────────
@@ -106,6 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_group(
             CreditTransferGroup::new("Stadtwerke Muster GmbH", &creditor_iban)
                 .execution_date(IsoDate::new(2026, 7, 22)?)
+                .debtor_address(creditor_address)
                 .add_entry(
                     CreditTransferEntry::new(
                         "Franz Huber",
@@ -113,7 +154,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         3_200, // 32.00 EUR Erstattung
                         "ERSTATTUNG-2025",
                     )
-                    .with_reference(reference),
+                    .with_reference(reference)
+                    // Hybrid: the town and country are structured, the rest is
+                    // one free-text line.
+                    .with_creditor_address(
+                        PostalAddress::new("Wien", "AT")?.line("Stephansplatz 3/2"),
+                    ),
                 ),
         )
         .build()?;
