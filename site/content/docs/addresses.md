@@ -1,7 +1,7 @@
 +++
 title = "Postal addresses"
-description = "Structured and hybrid postal addresses (PstlAdr) for SEPA payments in Rust, ahead of the 15 November 2026 deadline when unstructured addresses stop being accepted."
-weight = 7
+description = "Structured and hybrid PstlAdr postal addresses for SEPA payments in Rust, ahead of the 15 November 2026 deadline for unstructured addresses."
+weight = 9
 +++
 
 An address is optional in the SEPA schemes and most domestic batches carry
@@ -68,8 +68,7 @@ use sepa::{CreditTransferEntry, CreditTransferGroup, IsoDate, PostalAddress, val
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("DE89370400440532013000")?;
     let creditor = validate_iban("NL91ABNA0417164300")?;
-    let group = CreditTransferGroup::new("Acme GmbH", &debtor)
-        .execution_date(IsoDate::new(2026, 7, 20)?)
+    let group = CreditTransferGroup::new("Acme GmbH", &debtor, IsoDate::new(2026, 7, 20)?)
         .debtor_address(PostalAddress::new("Berlin", "DE")?.street("Unter den Linden"))
         .add_entry(
             CreditTransferEntry::new("Supplier BV", creditor, 12_000, "E2E-1")

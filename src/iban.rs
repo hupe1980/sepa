@@ -546,6 +546,117 @@ impl Iban {
     }
 }
 
+// ── Construction ──────────────────────────────────────────────────────────────
+
+/// The mod-97 remainder of an IBAN's characters in ISO 13616 rotated order.
+///
+/// Folded in one pass: materialising the expanded decimal string would be three
+/// allocations for a value consumed a digit at a time, and a 34-character IBAN
+/// expands past what any integer type could hold. Non-alphanumerics are
+/// skipped, so a spaced or hyphenated BBAN behaves like the stripped one.
+fn mod97_rotated(header: &str, bban: &str) -> u64 {
+    bban.bytes()
+        .chain(header.bytes())
+        .fold(0u64, |acc, b| match b {
+            b'0'..=b'9' => (acc * 10 + u64::from(b - b'0')) % 97,
+            b'A'..=b'Z' => (acc * 100 + u64::from(b - b'A') + 10) % 97,
+            _ => acc,
+        })
+}
+
+/// The two ISO 13616 check digits an IBAN would carry for `country` + `bban`.
+///
+/// The third of the crate's check-digit functions, beside
+/// [`creditor_id_check_digits`](crate::creditor_id_check_digits) and
+/// [`RfReference::check_digits_for`](crate::RfReference::check_digits_for) —
+/// and the one whose absence made building an IBAN from a national bank code
+/// and account number a job for somebody else's snippet.
+///
+/// The algorithm is `98 − (mod-97 of "<bban><country>00")`, expanding letters
+/// to `A=10 … Z=35`. Whitespace and separators in `bban` are ignored and
+/// lower-case letters are upper-cased, so `"3704 0044 0532 0130 00"` and
+/// `"370400440532013000"` give the same answer.
+///
+/// This computes; it does not check. Nothing here says the country is real or
+/// the BBAN is the right shape for it — [`Iban::from_bban`] does both.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::iban::iban_check_digits;
+///
+/// assert_eq!(iban_check_digits("DE", "370400440532013000"), "89");
+/// assert_eq!(iban_check_digits("de", "3704 0044 0532 0130 00"), "89");
+/// assert_eq!(iban_check_digits("NL", "ABNA0417164300"), "91");
+/// ```
+#[must_use]
+pub fn iban_check_digits(country: &str, bban: &str) -> String {
+    let country: String = country
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let bban: String = bban
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    // `98 − n mod 97` lands in 2..=98, which is the ISO 7064 MOD 97-10 range.
+    format!("{:02}", 98 - mod97_rotated(&format!("{country}00"), &bban))
+}
+
+impl Iban {
+    /// Build an IBAN from a country code and a national account number.
+    ///
+    /// The check digits are computed with [`iban_check_digits`] and the result
+    /// then goes through [`validate_iban`], so the country's registered BBAN
+    /// structure is enforced exactly as it is for a parsed IBAN. A digit typed
+    /// where the registry wants a letter fails here rather than at the bank.
+    ///
+    /// Whitespace and separators in `bban` are ignored; letters are
+    /// upper-cased.
+    ///
+    /// # Errors
+    ///
+    /// Every [`IbanError`] [`validate_iban`] can produce, except
+    /// [`IbanError::InvalidChecksum`] — the digits are computed, so they always
+    /// agree. A country outside the registry has no published structure, so it
+    /// gets the length and character rules and nothing more.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::{Iban, iban::IbanError};
+    ///
+    /// let iban = Iban::from_bban("DE", "3704 0044 0532 0130 00")?;
+    /// assert_eq!(iban.as_str(), "DE89370400440532013000");
+    ///
+    /// // The registry structure still applies: a German BBAN is all digits.
+    /// assert!(matches!(
+    ///     Iban::from_bban("DE", "37O400440532013000"),
+    ///     Err(IbanError::InvalidBbanFormat { .. })
+    /// ));
+    ///
+    /// // As does the registry length: 20 BBAN digits is a legal IBAN length,
+    /// // and the wrong one for Germany.
+    /// assert!(matches!(
+    ///     Iban::from_bban("DE", "12345678901234567890"),
+    ///     Err(IbanError::WrongLengthForCountry { expected: 22, actual: 24, .. })
+    /// ));
+    /// # Ok::<(), IbanError>(())
+    /// ```
+    pub fn from_bban(country: &str, bban: &str) -> Result<Self, IbanError> {
+        let check = iban_check_digits(country, bban);
+        let normalised: String = country
+            .chars()
+            .chain(check.chars())
+            .chain(bban.chars())
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        validate_iban(&normalised)
+    }
+}
+
 // ── Validation ────────────────────────────────────────────────────────────────
 
 /// Validate an IBAN using the ISO 13616 mod-97 algorithm.
@@ -667,21 +778,9 @@ pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
 
     // ISO 13616 §5.3: move the first four characters to the end, expand each
     // letter to its two-digit value (A=10 … Z=35), then take the whole thing
-    // mod 97. Folded in one pass over the rotated byte order — materialising
-    // the expanded decimal string would be three allocations for a value that
-    // is consumed a digit at a time, and a 34-character IBAN expands past what
-    // any integer type could hold anyway.
-    let (header, bban) = (&normalised[..4], &normalised[4..]);
-    let mut remainder: u64 = 0;
-    for &b in bban.as_bytes().iter().chain(header.as_bytes()) {
-        remainder = if b.is_ascii_digit() {
-            remainder * 10 + u64::from(b - b'0')
-        } else {
-            // Every byte is ASCII alphanumeric by the check above, so this is
-            // A–Z: two decimal places, 10–35.
-            remainder * 100 + u64::from(b - b'A') + 10
-        } % 97;
-    }
+    // mod 97. The same fold `iban_check_digits` runs, so a generated IBAN and a
+    // validated one cannot disagree about the arithmetic.
+    let remainder = mod97_rotated(&normalised[..4], &normalised[4..]);
 
     if remainder == 1 {
         Ok(Iban(normalised))
@@ -693,6 +792,75 @@ pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_registry_example_is_reproduced_from_its_own_bban() {
+        // The generator is checked against the same artefact the validator is:
+        // SWIFT's published examples. Round-tripping the two against each other
+        // would only prove they share an implementation — which they do.
+        for example in REGISTRY_EXAMPLES {
+            let iban = validate_iban(example).unwrap();
+            let rebuilt = Iban::from_bban(iban.country_code(), iban.bban())
+                .unwrap_or_else(|e| panic!("{example} must rebuild: {e}"));
+            assert_eq!(rebuilt, iban, "{example} did not reproduce");
+            assert_eq!(
+                iban_check_digits(iban.country_code(), iban.bban()),
+                iban.check_digits(),
+                "{example} check digits"
+            );
+        }
+    }
+
+    #[test]
+    fn from_bban_applies_the_registry_structure_not_just_the_checksum() {
+        // The whole point of computing the digits here rather than in a
+        // caller's snippet: the result still has to be a well-formed IBAN.
+        assert!(matches!(
+            Iban::from_bban("DE", "37O400440532013000"),
+            Err(IbanError::InvalidBbanFormat {
+                position: 7,
+                expected: BbanCharClass::Digit,
+                ..
+            })
+        ));
+        // 20 BBAN digits is a legal IBAN length overall, and the wrong one
+        // for Germany — which is the error the registry is there to give.
+        assert!(matches!(
+            Iban::from_bban("DE", "12345678901234567890"),
+            Err(IbanError::WrongLengthForCountry {
+                expected: 22,
+                actual: 24,
+                ..
+            })
+        ));
+        // Below the ISO 13616 floor, so the generic rule fires first.
+        assert!(matches!(
+            Iban::from_bban("DE", "12345"),
+            Err(IbanError::InvalidLength { len: 9 })
+        ));
+        // A country outside the registry keeps the checksum and nothing more.
+        assert!(Iban::from_bban("ZZ", "12345678901234").is_ok());
+    }
+
+    #[test]
+    fn separators_in_a_bban_do_not_change_the_check_digits() {
+        assert_eq!(
+            Iban::from_bban("DE", "3704 0044 0532 0130 00").unwrap(),
+            Iban::from_bban("de", "370400440532013000").unwrap()
+        );
+    }
+
+    #[test]
+    fn generated_check_digits_are_always_two_digits_in_range() {
+        // ISO 7064 MOD 97-10 yields 02..=98; a bare `98 - n` would print "2"
+        // rather than "02" and silently shorten the IBAN by a character.
+        for n in 0..2_000u32 {
+            let cd = iban_check_digits("DE", &format!("{n:018}"));
+            assert_eq!(cd.len(), 2, "{n} gave {cd:?}");
+            let value: u32 = cd.parse().unwrap();
+            assert!((2..=98).contains(&value), "{n} gave {cd:?}");
+        }
+    }
 
     #[test]
     fn de_iban_with_spaces() {

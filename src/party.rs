@@ -175,14 +175,21 @@ impl Party {
         }
         if let Some(id) = &self.identifier {
             crate::validate::check_id(field, &id.id)?;
+            // `SchmeNm/Prtry` names a scheme; it is a plain `Max35Text`, not a
+            // reference, so EPC230-15's slash rule does not reach it — but it
+            // is still text on the wire and has to pass the charset policy.
             if let Some(scheme) = &id.scheme_name {
-                crate::validate::check_id(field, scheme)?;
+                crate::validate::check_text(
+                    field,
+                    &charset.apply(field, scheme)?,
+                    crate::validate::MAX_ID_LEN,
+                )?;
             }
         }
         Ok(())
     }
 
-    /// Write this party as `<tag>…</tag>`.
+    /// Write this party as `<tag>…</tag>` on its own line, at `indent`.
     pub(crate) fn write_xml<W: std::fmt::Write>(
         &self,
         w: &mut W,
@@ -190,7 +197,24 @@ impl Party {
         indent: &str,
         charset: CharsetPolicy,
     ) -> std::fmt::Result {
-        write!(w, "{indent}<{tag}>")?;
+        write!(w, "{indent}")?;
+        self.write_xml_inline(w, tag, charset)?;
+        writeln!(w)
+    }
+
+    /// Write this party as `<tag>…</tag>` with no surrounding whitespace.
+    ///
+    /// The `PartyIdentification` shape is the same wherever it appears, so
+    /// camt.055's `Assgnr`/`Assgne`/`Cretr` reuse it rather than re-deriving
+    /// which children SEPA admits — the answer is `Nm` and `Id`, and nothing
+    /// else, in every message.
+    pub(crate) fn write_xml_inline<W: std::fmt::Write>(
+        &self,
+        w: &mut W,
+        tag: &str,
+        charset: CharsetPolicy,
+    ) -> std::fmt::Result {
+        write!(w, "<{tag}>")?;
         if let Some(name) = &self.name {
             w.write_str("<Nm>")?;
             write_escaped(w, &charset.render(name))?;
@@ -206,12 +230,12 @@ impl Party {
             w.write_str("</Id>")?;
             if let Some(scheme) = &id.scheme_name {
                 w.write_str("<SchmeNm><Prtry>")?;
-                write_escaped(w, scheme)?;
+                write_escaped(w, &charset.render(scheme))?;
                 w.write_str("</Prtry></SchmeNm>")?;
             }
             write!(w, "</Othr></{branch}></Id>")?;
         }
-        writeln!(w, "</{tag}>")
+        write!(w, "</{tag}>")
     }
 }
 

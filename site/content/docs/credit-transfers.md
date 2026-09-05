@@ -1,7 +1,7 @@
 +++
 title = "Credit transfers"
-description = "Build SEPA Credit Transfer files (pain.001) in Rust: ordinary transfers, SCT Instant, scheduled instant transfers with a time, structured references, purpose codes and ultimate parties."
-weight = 2
+description = "Build SEPA Credit Transfer files (pain.001) in Rust: ordinary transfers, SCT Instant, scheduled instant, structured references and purpose codes."
+weight = 3
 +++
 
 A credit transfer is money you send. The message is `pain.001`, and the crate
@@ -16,11 +16,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("DE89370400440532013000")?;
     let creditor = validate_iban("NL91ABNA0417164300")?;
 
-    let xml = Pain001Builder::new("Acme GmbH")
-        .msg_id("CT-2026-07-001")
+    let xml = Pain001Builder::new("Acme GmbH", "CT-2026-07-001")
         .add_group(
-            CreditTransferGroup::new("Acme GmbH", &debtor)
-                .execution_date(IsoDate::new(2026, 7, 20)?)
+            CreditTransferGroup::new("Acme GmbH", &debtor, IsoDate::new(2026, 7, 20)?)
                 .add_entry(CreditTransferEntry::new(
                     "Supplier AG",
                     creditor,
@@ -50,12 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("DE89370400440532013000")?;
     let creditor = validate_iban("NL91ABNA0417164300")?;
 
-    let xml = Pain001Builder::new("Acme GmbH")
-        .msg_id("CT-INST-001")
+    let xml = Pain001Builder::new("Acme GmbH", "CT-INST-001")
         .add_group(
-            CreditTransferGroup::new("Acme GmbH", &debtor)
+            CreditTransferGroup::new("Acme GmbH", &debtor, IsoDate::new(2026, 7, 20)?)
                 .local_instrument(LocalInstrument::Inst)
-                .execution_date(IsoDate::new(2026, 7, 20)?)
                 .add_entry(CreditTransferEntry::new("Payee", creditor, 5_000, "E2E-1")),
         )
         .build()?;
@@ -87,12 +83,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A time of day only names an instant once it says which zone it is in.
     let due: IsoDateTime = "2026-07-20T11:00:00Z".parse()?;
 
-    let xml = Pain001Builder::new("Acme GmbH")
-        .msg_id("CT-TIMED")
+    let xml = Pain001Builder::new("Acme GmbH", "CT-TIMED")
         .add_group(
-            CreditTransferGroup::new("Acme GmbH", &debtor)
+            CreditTransferGroup::new("Acme GmbH", &debtor, due)
                 .local_instrument(LocalInstrument::Inst)   // required for a timed execution
-                .execution_at(due)
                 .add_entry(CreditTransferEntry::new("Payee", creditor, 5_000, "E2E-1")),
         )
         .build()?;
@@ -110,17 +104,15 @@ used"*. `build()` enforces both:
 
 ```rust
 # use sepa::pain001::LocalInstrument;
-# use sepa::{CreditTransferEntry, CreditTransferGroup, Pain001Builder, ValidationError, validate_iban};
+# use sepa::{CreditTransferEntry, CreditTransferGroup, IsoDateTime, Pain001Builder, ValidationError, validate_iban};
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 # let debtor = validate_iban("DE89370400440532013000")?;
 # let creditor = validate_iban("NL91ABNA0417164300")?;
-let err = Pain001Builder::new("Acme GmbH")
-    .msg_id("CT-TIMED")
+let err = Pain001Builder::new("Acme GmbH", "CT-TIMED")
     .add_group(
-        CreditTransferGroup::new("Acme GmbH", &debtor)
-            // No local instrument: an ordinary SCT settles some time during
-            // the banking day, so a time of day on one instructs nothing.
-            .execution_at("2026-07-20T11:00:00Z".parse()?)
+        // No local instrument: an ordinary SCT settles some time during the
+        // banking day, so a time of day on one instructs nothing.
+        CreditTransferGroup::new("Acme GmbH", &debtor, "2026-07-20T11:00:00Z".parse::<IsoDateTime>()?)
             .add_entry(CreditTransferEntry::new("Payee", creditor, 5_000, "E2E-1")),
     )
     .build()

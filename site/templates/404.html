@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{# A 404 that gets indexed is a 404 in somebody's search results. #}
+{% block robots %}<meta name="robots" content="noindex, follow">{% endblock %}
 {% block content %}
 <div class="wrap prose">
   <h1>Page not found</h1>

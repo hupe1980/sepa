@@ -65,9 +65,9 @@ pub struct Camt052Report {
     /// servicing institution. See [`AccountRef`].
     pub account: AccountRef,
     /// Reporting period start, ISO 8601.
-    pub from_date: Option<String>,
+    pub from_date_raw: Option<String>,
     /// Reporting period end, ISO 8601.
-    pub to_date: Option<String>,
+    pub to_date_raw: Option<String>,
     /// Balances reported so far. Often interim (`ITBD`) rather than closing.
     pub balances: Vec<StatementBalance>,
     /// Entries reported so far — **provisional**, see the module docs.
@@ -75,6 +75,26 @@ pub struct Camt052Report {
 }
 
 impl Camt052Report {
+    /// The period start, typed.
+    ///
+    /// `FrToDt` is a date/time choice, so it arrives as `"2026-07-14"` from one
+    /// bank and `"2026-07-14T00:00:00"` from the next. The text that arrived is
+    /// kept in [`from_date_raw`](Self::from_date_raw) either way — the same
+    /// verbatim-and-typed rule [`CashEntry::booking_date`] follows, applied
+    /// here so the whole read path answers dates the same way.
+    ///
+    /// [`CashEntry::booking_date`]: crate::CashEntry::booking_date
+    #[must_use]
+    pub fn from_date(&self) -> Option<crate::IsoDate> {
+        crate::IsoDate::parse_date_part(self.from_date_raw.as_deref()?).ok()
+    }
+
+    /// The period end, typed. See [`from_date`](Self::from_date).
+    #[must_use]
+    pub fn to_date(&self) -> Option<crate::IsoDate> {
+        crate::IsoDate::parse_date_part(self.to_date_raw.as_deref()?).ok()
+    }
+
     /// Net movement in ct across all entries in this report.
     #[must_use]
     pub fn net_movement_ct(&self) -> i64 {
@@ -103,11 +123,22 @@ pub struct Camt052Document {
     /// Document message ID.
     pub msg_id: String,
     /// Document creation timestamp.
-    pub created_at: String,
+    pub created_at_raw: String,
     /// Detected XML namespace URI.
     pub namespace: Option<String>,
     /// One or more reports (typically one per account).
     pub reports: Vec<Camt052Report>,
+}
+
+impl Camt052Document {
+    /// When the bank generated this document, typed.
+    ///
+    /// `None` when it reported none, or one this crate cannot read;
+    /// [`created_at_raw`](Self::created_at_raw) still holds whatever arrived.
+    #[must_use]
+    pub fn created_at(&self) -> Option<crate::IsoDateTime> {
+        crate::IsoDateTime::parse(&self.created_at_raw).ok()
+    }
 }
 
 /// Error returned when camt.052 XML cannot be parsed.
@@ -151,7 +182,7 @@ pub fn parse_camt052(xml: &str) -> Result<Camt052Document, Camt052ParseError> {
 
     Ok(Camt052Document {
         msg_id: text("MsgId"),
-        created_at: text("CreDtTm"),
+        created_at_raw: text("CreDtTm"),
         namespace: doc.namespace,
         reports: root.children_named("Rpt").map(parse_report).collect(),
     })
@@ -163,8 +194,8 @@ fn parse_report(r: &Node) -> Camt052Report {
         report_id: r.text_of("Id").unwrap_or_default().to_owned(),
         sequence_number: r.text_of("ElctrncSeqNb").and_then(|v| v.parse().ok()),
         account: camt::account_of(r),
-        from_date,
-        to_date,
+        from_date_raw: from_date,
+        to_date_raw: to_date,
         balances: camt::balances_of(r),
         entries: camt::entries_of(r),
     }
@@ -227,8 +258,17 @@ mod tests {
         assert_eq!(rpt.sequence_number, Some(7));
         assert_eq!(rpt.account.iban.as_deref(), Some("DE89370400440532013000"));
         assert_eq!(rpt.account.servicer_bic.as_deref(), Some("COBADEFFXXX"));
-        assert_eq!(rpt.from_date.as_deref(), Some("2026-07-14T00:00:00"));
-        assert_eq!(rpt.to_date.as_deref(), Some("2026-07-14T11:00:00"));
+        assert_eq!(rpt.from_date_raw.as_deref(), Some("2026-07-14T00:00:00"));
+        assert_eq!(rpt.to_date_raw.as_deref(), Some("2026-07-14T11:00:00"));
+        // The raw text is kept and the day is typed alongside it.
+        assert_eq!(
+            rpt.from_date(),
+            Some(crate::IsoDate::new(2026, 7, 14).unwrap())
+        );
+        assert_eq!(
+            rpt.to_date(),
+            Some(crate::IsoDate::new(2026, 7, 14).unwrap())
+        );
     }
 
     #[test]

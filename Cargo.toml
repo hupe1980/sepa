@@ -1,21 +1,23 @@
 [package]
 name         = "sepa"
-version      = "0.6.0"
+version      = "0.7.0"
 rust-version = "1.88"
 edition      = "2024"
 authors      = ["hupe1980"]
 description  = """\
 SEPA payment utilities: IBAN validation (ISO 13616 + 89-country registry), \
-BIC validation (ISO 9362), SEPA Creditor Identifier (EPC AT-02), \
+BIC validation (ISO 9362:2022), SEPA Creditor Identifier (EPC AT-02), \
 pain.001 SCT + SCT Inst XML builder (pain.001.001.09 / .001.03 / .003.03), \
 pain.008 SDD CORE + B2B XML builder (pain.008.001.08 / .001.02 / .003.02), \
 pain.007 SDD reversal XML builder (pain.007.001.09), \
 pain.002 status report parser incl. Verification of Payee, \
+camt.055 payment cancellation (recall) builder + camt.029 resolution parser, \
 camt.052/053/054 parsers, \
 structured and hybrid postal addresses for the Nov 2026 EPC cut-over, \
 ISO 11649 RF creditor references, EPC field validation and SEPA charset \
-transliteration. Output is XSD-validated in CI. \
-Typed ISO 8601 dates. Zero I/O. No async. No f64 in monetary arithmetic.\
+transliteration. Output is XSD-validated in CI against the ISO schemas and the \
+German GBIC 5 subsets. Typed ISO 8601 dates, never defaulted from a clock. \
+No I/O. No async. No f64 in monetary arithmetic.\
 """
 repository   = "https://github.com/hupe1980/sepa"
 license      = "MIT OR Apache-2.0"

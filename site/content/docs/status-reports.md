@@ -1,7 +1,7 @@
 +++
 title = "Status reports & Verification of Payee"
-description = "Parse pain.002 payment status reports in Rust, including Verification of Payee outcomes — match, close match, no match — which have been mandatory for euro credit transfers since 9 October 2025."
-weight = 5
+description = "Parse pain.002 status reports in Rust: Verification of Payee outcomes, and why a rejection explains itself at only one of three levels."
+weight = 7
 +++
 
 `pain.002` is the bank's answer to a file you submitted. The parser is
@@ -37,6 +37,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `ACTC` means the file was technically valid, not that money moved. `ACSC` is
 settlement completed. `PaymentStatus::is_final` tells the two apart when you
 need to wait for a terminal state.
+
+## A rejection explains itself at exactly one level
+
+Which level depends on how far the bank got, and this is the part that catches
+people out. A submission refused outright — a duplicate `MsgId`, an unreadable
+document, an unknown Creditor Identifier — carries `GrpSts = RJCT` and its
+reason at **group** level, with no payment-information or transaction blocks at
+all. A rejected `PmtInf` explains itself at **group-block** level, where again
+no transaction was reached. Only a single failed collection explains itself on
+its transaction.
+
+So iterating `rejected_transactions()` alone finds nothing in the two cases that
+matter most. `reason_codes()` gathers every reason at any level:
+
+```rust
+use sepa::parse_pain002;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+ <CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId></GrpHdr>
+  <OrgnlGrpInfAndSts>
+    <OrgnlMsgId>DD-1</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+    <GrpSts>RJCT</GrpSts>
+    <StsRsnInf><Rsn><Cd>DUPL</Cd></Rsn>
+      <AddtlInf>MsgId already received</AddtlInf></StsRsnInf>
+  </OrgnlGrpInfAndSts>
+ </CstmrPmtStsRpt></Document>"#;
+
+    let doc = parse_pain002(xml)?;
+    assert!(!doc.is_fully_accepted());
+    assert!(doc.rejected_transactions().is_empty()); // nothing to iterate
+    assert_eq!(doc.reason_codes().len(), 1);               // but there is a reason
+    assert_eq!(doc.group_additional_info, ["MsgId already received"]);
+    Ok(())
+}
+```
+
+`DUPL` is not one of the codes the `ReasonCode` enum names, and is carried
+through as `ReasonCode::Other` rather than dropped — the reason you need must
+not depend on whether the enum happens to know the code.
 
 ## Verification of Payee
 

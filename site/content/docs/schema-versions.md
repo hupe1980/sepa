@@ -1,7 +1,7 @@
 +++
 title = "Schema versions"
-description = "Which ISO 20022 message version to send to a SEPA bank, why the newest ISO version is the wrong choice, and how to select a version from configuration in Rust."
-weight = 9
+description = "Which ISO 20022 version to send a SEPA bank, why the newest is the wrong choice, and how to pick a version from configuration in Rust."
+weight = 11
 +++
 
 Which version a bank requires varies by bank and by regulatory cut-over, so it
@@ -13,6 +13,7 @@ is a per-message choice rather than a compile-time constant.
 | `pain.008` | `.001.08` · `.001.02` · `.003.02` (legacy German, end-of-life) |
 | `pain.007` | `.001.09` — the only version SEPA defines |
 | `pain.002` | parses `.001.10`, `.001.03` and the German variants |
+| `camt.055` / `camt.029` | `.001.05` / `.001.06` — the pair the DFÜ-Abkommen names |
 | `camt.052/053/054` | parses `.001.02` through `.001.13` |
 
 ## Selecting one
@@ -26,7 +27,7 @@ use sepa::pain008::DirectDebitSchema;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schema: DirectDebitSchema = "pain.008.001.02".parse()?;
-    let builder = Pain008Builder::new("Stadtwerke GmbH").schema(schema);
+    let builder = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001").schema(schema);
 
     assert_eq!(schema.message_id(), "pain.008.001.02");
     assert_eq!(builder.group_count(), 0);

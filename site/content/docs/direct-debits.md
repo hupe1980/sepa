@@ -1,7 +1,7 @@
 +++
 title = "Direct debits"
-description = "Build SEPA Direct Debit files (pain.008) in Rust: CORE and B2B schemes, FRST and RCUR sequence types in one file, mandate references, mandate amendments and the SMNDA marker."
-weight = 3
+description = "Build SEPA Direct Debit files (pain.008) in Rust: CORE and B2B, FRST and RCUR in one file, mandate references, amendments and the SMNDA marker."
+weight = 4
 +++
 
 A direct debit is money you collect. The message is `pain.008`, and the crate
@@ -27,12 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("NL91ABNA0417164300")?;
     let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 
-    let xml = Pain008Builder::new("Stadtwerke GmbH")
-        .msg_id("DD-2026-07-001")
+    let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
         .add_group(
-            DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci)
+            DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, IsoDate::new(2026, 7, 20)?)
                 .sequence_type(SequenceType::Frst)
-                .collection_date(IsoDate::new(2026, 7, 20)?)
                 .add_entry(DirectDebitEntry::new(
                     "MND-1",
                     "2026-06-01".parse()?,
@@ -43,9 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )),
         )
         .add_group(
-            DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci)
+            DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, IsoDate::new(2026, 7, 18)?)
                 .sequence_type(SequenceType::Rcur)
-                .collection_date(IsoDate::new(2026, 7, 18)?)
                 .add_entry(DirectDebitEntry::new(
                     "MND-2",
                     "2024-06-01".parse()?,
@@ -81,13 +78,13 @@ Both can appear in the same file, again as separate groups:
 
 ```rust
 use sepa::pain008::DirectDebitScheme;
-use sepa::{DirectDebitGroup, validate_creditor_id, validate_iban};
+use sepa::{DirectDebitGroup, IsoDate, validate_creditor_id, validate_iban};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let iban = validate_iban("DE89370400440532013000")?;
     let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 
-    let b2b = DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
+    let b2b = DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, IsoDate::new(2026, 7, 20)?)
         .scheme(DirectDebitScheme::B2b);
 
     assert_eq!(b2b.entry_count(), 0);
@@ -139,5 +136,6 @@ An amendment does **not** reset the sequence type to `FRST`. Carry on with
 
 ## See also
 
+- [Recalls](/docs/recalls/) — stopping this file *before* it settles
 - [Reversals](/docs/reversals/) — sending a settled collection back
 - [Bank statements](/docs/bank-statements/) — matching a batch booking to this file

@@ -144,10 +144,7 @@ impl StatementBalance {
     #[inline]
     #[must_use]
     pub fn signed_ct(&self) -> i64 {
-        match self.indicator {
-            CreditDebitIndicator::Credit => self.amount_ct,
-            CreditDebitIndicator::Debit => -self.amount_ct,
-        }
+        signed(self.indicator, self.amount_ct)
     }
 
     /// The balance date, or `None` if the bank reported none this crate can read.
@@ -222,6 +219,10 @@ pub struct EntryDetail {
     pub return_additional_info: Option<String>,
     /// `TxDtls/AddtlTxInf` — the bank's free text about this transaction.
     pub additional_info: Option<String>,
+    /// `TxDtls/Chrgs` — charges attributed to this transaction.
+    ///
+    /// On a returned direct debit this is the return fee. See [`Charges`].
+    pub charges: Option<Charges>,
 }
 
 impl EntryDetail {
@@ -256,6 +257,139 @@ impl EntryDetail {
     #[must_use]
     pub const fn is_return(&self) -> bool {
         self.return_reason_code.is_some()
+    }
+}
+
+// ── Charges ───────────────────────────────────────────────────────────────────
+
+/// One charge a bank levied on an entry or a transaction (`Chrgs/Rcrd`).
+///
+/// For SEPA the case that matters is a **returned direct debit**: the debtor's
+/// bank returns the collection and the creditor's bank passes on a return fee.
+/// That fee is real money and has to be booked, and it is reported here rather
+/// than in the entry amount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ChargeRecord {
+    /// Charge amount in **ct** (1/100 of `currency`). Always positive.
+    pub amount_ct: i64,
+    /// ISO 4217 currency of `amount_ct`.
+    pub currency: String,
+    /// Whether the charge is a debit (the usual case) or a credit.
+    pub indicator: CreditDebitIndicator,
+    /// `ChrgInclInd` — whether this charge is **already included** in the
+    /// entry's own amount.
+    ///
+    /// This is the field that decides whether a ledger adds the charge or not.
+    /// `Some(true)` means the entry amount already carries it and posting it
+    /// again double-counts; `Some(false)` means it is separate. `None` means
+    /// the bank did not say, which is not the same as either — treat it as
+    /// unresolved rather than picking a default.
+    pub included_in_amount: Option<bool>,
+    /// `Tp/Cd` or `Tp/Prtry` — what kind of charge, when the bank names one.
+    pub type_code: Option<String>,
+}
+
+impl ChargeRecord {
+    /// The charge as a signed ledger amount: negative for a debit.
+    #[inline]
+    #[must_use]
+    pub fn signed_ct(&self) -> i64 {
+        signed(self.indicator, self.amount_ct)
+    }
+}
+
+/// The `Chrgs` block on an entry or a transaction.
+///
+/// ISO reshaped this across versions: up to `camt.05x.001.02` the charge sits
+/// directly under `Chrgs` as an `Amt`/`CdtDbtInd` pair, and from `.001.04` it
+/// moved into `0..n` `Rcrd` blocks with a total beside them. Both are read, and
+/// the flat form is reported as a single record so a caller has one shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Charges {
+    /// `TtlChrgsAndTaxAmt` — the bank's own total, when it states one.
+    ///
+    /// Present only in the newer shape, and not always then. Prefer
+    /// [`total_signed_ct`](Self::total_signed_ct), which falls back to the
+    /// records.
+    pub total_ct: Option<i64>,
+    /// ISO 4217 currency of `total_ct`.
+    pub total_currency: Option<String>,
+    /// The individual charges.
+    pub records: Vec<ChargeRecord>,
+}
+
+impl Charges {
+    /// The summed signed charge in **ct**, or `None` on overflow.
+    ///
+    /// Taken from the records, which is the level that carries the
+    /// credit/debit indicator; `TtlChrgsAndTaxAmt` is a magnitude with no sign
+    /// of its own.
+    #[must_use]
+    pub fn total_signed_ct(&self) -> Option<i64> {
+        self.records
+            .iter()
+            .try_fold(0i64, |acc, r| acc.checked_add(r.signed_ct()))
+    }
+
+    /// Whether every record says it is already inside the entry amount.
+    ///
+    /// `false` when any record is separate **or** when any record does not say,
+    /// so a caller that adds charges only when this is `false` cannot
+    /// double-count on a bank that omits `ChrgInclInd`.
+    #[must_use]
+    pub fn all_included_in_amount(&self) -> bool {
+        !self.records.is_empty()
+            && self
+                .records
+                .iter()
+                .all(|r| r.included_in_amount == Some(true))
+    }
+
+    fn parse(node: &Node) -> Option<Self> {
+        let chrgs = node.child("Chrgs")?;
+        let record_of = |n: &Node| {
+            let (amount_ct, currency) = amount_of(n, "Amt")?;
+            Some(ChargeRecord {
+                amount_ct,
+                currency,
+                // A charge with no indicator is a debit: that is what a fee is,
+                // and it is the direction that cannot silently inflate a
+                // balance if the assumption is wrong.
+                indicator: n
+                    .text_of("CdtDbtInd")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(CreditDebitIndicator::Debit),
+                included_in_amount: n.text_of("ChrgInclInd").and_then(|v| match v.trim() {
+                    "true" | "1" => Some(true),
+                    "false" | "0" => Some(false),
+                    _ => None,
+                }),
+                type_code: n.child("Tp").and_then(Node::code).map(str::to_owned),
+            })
+        };
+
+        let mut records: Vec<ChargeRecord> =
+            chrgs.children_named("Rcrd").filter_map(record_of).collect();
+        // The pre-.001.04 shape puts the charge directly under `Chrgs`.
+        if records.is_empty()
+            && let Some(flat) = record_of(chrgs)
+        {
+            records.push(flat);
+        }
+
+        let total = amount_of(chrgs, "TtlChrgsAndTaxAmt");
+        if records.is_empty() && total.is_none() {
+            return None;
+        }
+        Some(Self {
+            total_ct: total.as_ref().map(|(ct, _)| *ct),
+            total_currency: total.map(|(_, ccy)| ccy),
+            records,
+        })
     }
 }
 
@@ -403,6 +537,13 @@ pub struct CashEntry {
     /// statement, and for an entry with no `NtryDtls` at all it is often the
     /// only remittance information there is.
     pub additional_info: Option<String>,
+    /// `Ntry/Chrgs` — charges the bank levied on this booking.
+    ///
+    /// A returned SEPA direct debit carries the return fee here or on the
+    /// transaction detail, depending on the bank. Read
+    /// [`Charges::all_included_in_amount`] before adding it to a ledger: a
+    /// charge already inside the entry amount must not be posted twice.
+    pub charges: Option<Charges>,
     /// Underlying transactions. Empty when the bank sends no `NtryDtls`.
     pub details: Vec<EntryDetail>,
 }
@@ -413,10 +554,7 @@ impl CashEntry {
     #[inline]
     #[must_use]
     pub fn signed_ct(&self) -> i64 {
-        match self.indicator {
-            CreditDebitIndicator::Credit => self.amount_ct,
-            CreditDebitIndicator::Debit => -self.amount_ct,
-        }
+        signed(self.indicator, self.amount_ct)
     }
 
     /// The booking date — the day the entry hits the account balance.
@@ -551,10 +689,17 @@ impl CashEntry {
     }
 }
 
-/// Read an `Amt` element into `(cents, currency)`.
+/// Read an `Amt` element into `(magnitude in cents, currency)`.
+///
+/// ISO 20022 types every camt amount as a non-negative decimal — the direction
+/// lives in a sibling `CdtDbtInd` — so the value is normalised to a magnitude
+/// here and signed exactly once, by [`signed`]. `None` when the text is not a
+/// decimal, or when its magnitude has no `i64`: `-92233720368547758.08` parses
+/// but `i64::MIN.abs()` does not exist, and a panic on a bank file is the one
+/// outcome a payments parser may not have.
 pub(crate) fn amount_of(node: &Node, tag: &str) -> Option<(i64, String)> {
     let amt = node.child(tag)?;
-    let ct = crate::ct_from_eur_str(&amt.text).ok()?;
+    let ct = crate::ct_from_eur_str(&amt.text).ok()?.checked_abs()?;
     Some((ct, amt.attr("Ccy").unwrap_or("EUR").to_owned()))
 }
 
@@ -571,10 +716,14 @@ fn parse_date(raw: Option<&str>) -> Option<crate::IsoDate> {
 }
 
 /// Apply a credit/debit indicator to a magnitude.
+///
+/// `saturating_neg` rather than `-`: every magnitude reaching here comes from
+/// [`amount_of`] and is non-negative, so the two agree — but negation is the
+/// operation that panics on `i64::MIN`, and the fields it reads are public.
 const fn signed(indicator: CreditDebitIndicator, amount_ct: i64) -> i64 {
     match indicator {
         CreditDebitIndicator::Credit => amount_ct,
-        CreditDebitIndicator::Debit => -amount_ct,
+        CreditDebitIndicator::Debit => amount_ct.saturating_neg(),
     }
 }
 
@@ -708,6 +857,7 @@ pub(crate) fn parse_entry(e: &Node) -> Option<CashEntry> {
         account_servicer_ref: e.text_of("AcctSvcrRef").map(str::to_owned),
         bank_tx_code,
         additional_info: e.text_of("AddtlNtryInf").map(str::to_owned),
+        charges: Charges::parse(e),
         details,
     })
 }
@@ -752,13 +902,13 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
         // A foreign-currency transaction: the figure is real but is not what
         // hit the account, so it must not be summed against the entry total.
         Some((_, ccy)) if !ccy.eq_ignore_ascii_case(entry.currency) => None,
-        Some((ct, _)) => Some(signed(indicator, ct.abs())),
-        None if entry.sole_detail => Some(signed(indicator, entry.amount_ct.abs())),
+        Some((ct, _)) => Some(signed(indicator, *ct)),
+        None if entry.sole_detail => Some(signed(indicator, entry.amount_ct)),
         None => None,
     };
 
     EntryDetail {
-        amount_ct: reported.as_ref().map(|(ct, _)| ct.abs()),
+        amount_ct: reported.as_ref().map(|(ct, _)| *ct),
         currency: reported.map(|(_, ccy)| ccy),
         indicator,
         signed_amount_ct,
@@ -776,6 +926,7 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
             .map(str::to_owned),
         return_additional_info: td.text_at(&["RtrInf", "AddtlInf"]).map(str::to_owned),
         additional_info: td.text_of("AddtlTxInf").map(str::to_owned),
+        charges: Charges::parse(td),
     }
 }
 
@@ -992,6 +1143,85 @@ mod tests {
         );
         assert_eq!(nonsense.booking_date(), None);
         assert_eq!(nonsense.booking_date_raw.as_deref(), Some("14.07.2026"));
+    }
+
+    #[test]
+    fn a_return_fee_is_read_at_either_level_and_in_either_shape() {
+        // A returned direct debit is where charges actually matter: the fee is
+        // real money the creditor is out, and it is reported beside the entry
+        // rather than inside its amount.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S</Id>
+    <Ntry>
+      <Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+      <Chrgs>
+        <TtlChrgsAndTaxAmt Ccy="EUR">3.00</TtlChrgsAndTaxAmt>
+        <Rcrd><Amt Ccy="EUR">3.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+              <ChrgInclInd>false</ChrgInclInd>
+              <Tp><Prtry>RETURN_FEE</Prtry></Tp></Rcrd>
+      </Chrgs>
+      <NtryDtls><TxDtls>
+        <Amt Ccy="EUR">75.00</Amt>
+        <RtrInf><Rsn><Cd>MS02</Cd></Rsn></RtrInf>
+        <Chrgs><Rcrd><Amt Ccy="EUR">1.50</Amt><CdtDbtInd>DBIT</CdtDbtInd></Rcrd></Chrgs>
+      </TxDtls></NtryDtls>
+    </Ntry>
+  </Stmt></BkToCstmrStmt>
+</Document>"#;
+        let doc = crate::parse_camt053(xml).unwrap();
+        let entry = &doc.statements[0].entries[0];
+
+        let charges = entry.charges.as_ref().expect("Ntry/Chrgs must be read");
+        assert_eq!(charges.total_ct, Some(300));
+        assert_eq!(charges.total_signed_ct(), Some(-300));
+        assert_eq!(charges.records[0].type_code.as_deref(), Some("RETURN_FEE"));
+        // Stated as separate, so a ledger must post it in addition to the entry.
+        assert!(!charges.all_included_in_amount());
+        assert_eq!(charges.records[0].included_in_amount, Some(false));
+
+        // The detail carries its own, which is where several German banks put it.
+        let detail = &entry.details[0];
+        assert!(detail.is_return());
+        assert_eq!(
+            detail.charges.as_ref().unwrap().total_signed_ct(),
+            Some(-150)
+        );
+
+        // The pre-.001.04 shape puts the charge directly under `Chrgs`.
+        let flat = xml.replace(
+            "<Chrgs><Rcrd><Amt Ccy=\"EUR\">1.50</Amt><CdtDbtInd>DBIT</CdtDbtInd></Rcrd></Chrgs>",
+            "<Chrgs><Amt Ccy=\"EUR\">1.50</Amt><CdtDbtInd>DBIT</CdtDbtInd></Chrgs>",
+        );
+        let doc = crate::parse_camt053(&flat).unwrap();
+        let detail = &doc.statements[0].entries[0].details[0];
+        assert_eq!(
+            detail.charges.as_ref().unwrap().total_signed_ct(),
+            Some(-150)
+        );
+    }
+
+    #[test]
+    fn a_charge_that_does_not_say_whether_it_is_included_is_not_assumed_to_be() {
+        // `ChrgInclInd` is optional, and "the bank did not say" is a third
+        // answer. Treating silence as "included" would silently drop a fee;
+        // treating it as "separate" would silently double-count one. Both are
+        // wrong, so `all_included_in_amount` is false and the caller decides.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S</Id>
+    <Ntry><Amt Ccy="EUR">10.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+      <Chrgs><Rcrd><Amt Ccy="EUR">2.00</Amt></Rcrd></Chrgs>
+    </Ntry>
+  </Stmt></BkToCstmrStmt>
+</Document>"#;
+        let doc = crate::parse_camt053(xml).unwrap();
+        let charges = doc.statements[0].entries[0].charges.as_ref().unwrap();
+        assert_eq!(charges.records[0].included_in_amount, None);
+        assert!(!charges.all_included_in_amount());
+        // A charge with no indicator is a debit — a fee is money out, and that
+        // is the direction that cannot inflate a balance if the guess is wrong.
+        assert_eq!(charges.records[0].signed_ct(), -200);
     }
 
     #[test]

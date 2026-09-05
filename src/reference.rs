@@ -55,7 +55,9 @@
 
 use std::str::FromStr;
 
-use crate::validate::{ValidationError, check_remittance};
+use crate::validate::{
+    MAX_ID_LEN, MAX_STRUCTURED_REMITTANCE_LEN, ValidationError, check_remittance, check_text,
+};
 
 /// Maximum total length of an RF Creditor Reference, including `RF` and the
 /// check digits (ISO 11649 §5).
@@ -372,13 +374,81 @@ impl RemittanceInfo {
         charset: crate::validate::CharsetPolicy,
     ) -> Result<(), ValidationError> {
         match self {
-            Self::Unstructured(text) => check_remittance(field, &charset.apply(field, text)?),
-            // An RfReference is at most 25 characters, and SEPA-legal, by
-            // construction — there is nothing left to check.
-            Self::Structured(_) => Ok(()),
-            Self::Proprietary { reference, .. } => {
-                // Ref is Max35Text, and the whole Strd block must stay under 140.
-                crate::validate::check_id(field, reference)
+            Self::Unstructured(text) => {
+                return check_remittance(field, &charset.apply(field, text)?);
+            }
+            // An RfReference is at most 25 characters and SEPA-legal by
+            // construction, so only the block length below can still fail.
+            Self::Structured(_) => {}
+            Self::Proprietary { reference, issuer } => {
+                // `Ref` is a reference, so EPC230-15's slash rule applies.
+                crate::validate::check_id("RmtInf/Strd/CdtrRefInf/Ref", reference)?;
+                // `Issr` is a plain `Max35Text` scheme name, not a reference:
+                // no slash rule, but it *is* text on the wire, so it has to
+                // survive the charset policy and the length limit like every
+                // other emitted string.
+                if let Some(issuer) = issuer {
+                    check_text(
+                        "RmtInf/Strd/CdtrRefInf/Tp/Issr",
+                        &charset.apply("RmtInf/Strd/CdtrRefInf/Tp/Issr", issuer)?,
+                        MAX_ID_LEN,
+                    )?;
+                }
+            }
+        }
+
+        // The EPC caps `Strd` at 140 characters *including the XML tags*, which
+        // no XSD expresses and no per-field check catches. Measure what is
+        // actually going to be written, by writing it — the same function the
+        // writer uses, so the two cannot drift.
+        let mut rendered = String::new();
+        // Writing into a String is infallible.
+        let _ = Self::write_structured(&mut rendered, self, charset);
+        let actual = rendered.chars().count();
+        if actual > MAX_STRUCTURED_REMITTANCE_LEN {
+            return Err(ValidationError::TooLong {
+                field: "RmtInf/Strd",
+                max: MAX_STRUCTURED_REMITTANCE_LEN,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    /// Render the `Strd` block, minified.
+    ///
+    /// Shared by [`validate`](Self::validate) and [`write_xml`](Self::write_xml)
+    /// so the length that is checked is the length that is emitted. Writes
+    /// nothing for the unstructured variant.
+    fn write_structured<W: std::fmt::Write>(
+        w: &mut W,
+        remittance: &Self,
+        charset: crate::validate::CharsetPolicy,
+    ) -> std::fmt::Result {
+        use crate::xml_util::write_escaped;
+
+        match remittance {
+            Self::Unstructured(_) => Ok(()),
+            Self::Structured(rf) => {
+                // `CdOrPrtry`, not `CdorPrtry` — the latter is schema-invalid and
+                // is a mistake other implementations have shipped.
+                w.write_str(
+                    "<Strd><CdtrRefInf><Tp><CdOrPrtry><Cd>SCOR</Cd></CdOrPrtry>\
+                     <Issr>ISO</Issr></Tp><Ref>",
+                )?;
+                w.write_str(rf.as_str())?;
+                w.write_str("</Ref></CdtrRefInf></Strd>")
+            }
+            Self::Proprietary { reference, issuer } => {
+                w.write_str("<Strd><CdtrRefInf><Tp><CdOrPrtry><Cd>SCOR</Cd></CdOrPrtry>")?;
+                if let Some(issuer) = issuer {
+                    w.write_str("<Issr>")?;
+                    write_escaped(w, &charset.render(issuer))?;
+                    w.write_str("</Issr>")?;
+                }
+                w.write_str("</Tp><Ref>")?;
+                write_escaped(w, reference)?;
+                w.write_str("</Ref></CdtrRefInf></Strd>")
             }
         }
     }
@@ -403,27 +473,10 @@ impl RemittanceInfo {
                 write_escaped(w, &charset.render(text))?;
                 w.write_str("</Ustrd>")?;
             }
-            Self::Structured(rf) => {
-                // `CdOrPrtry`, not `CdorPrtry` — the latter is schema-invalid and
-                // is a mistake other implementations have shipped.
-                w.write_str(
-                    "<Strd><CdtrRefInf><Tp><CdOrPrtry><Cd>SCOR</Cd></CdOrPrtry>\
-                     <Issr>ISO</Issr></Tp><Ref>",
-                )?;
-                w.write_str(rf.as_str())?;
-                w.write_str("</Ref></CdtrRefInf></Strd>")?;
-            }
-            Self::Proprietary { reference, issuer } => {
-                w.write_str("<Strd><CdtrRefInf><Tp><CdOrPrtry><Cd>SCOR</Cd></CdOrPrtry>")?;
-                if let Some(issuer) = issuer {
-                    w.write_str("<Issr>")?;
-                    write_escaped(w, issuer)?;
-                    w.write_str("</Issr>")?;
-                }
-                w.write_str("</Tp><Ref>")?;
-                write_escaped(w, reference)?;
-                w.write_str("</Ref></CdtrRefInf></Strd>")?;
-            }
+            // Minified, and rendered by the same function `validate` measured:
+            // the EPC's 140-character cap on `Strd` counts the tags, so
+            // pretty-printing alone would overrun it.
+            structured => Self::write_structured(w, structured, charset)?,
         }
         w.write_str("</RmtInf>\n")
     }
@@ -452,6 +505,86 @@ impl From<RfReference> for RemittanceInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_proprietary_issuer_is_length_checked_and_transliterated() {
+        // Regression: `Tp/Issr` was neither validated nor put through the
+        // charset policy, so any text at all reached the wire — non-SEPA
+        // characters included, and with no `Max35Text` bound.
+        use crate::validate::CharsetPolicy;
+
+        let long = RemittanceInfo::Proprietary {
+            reference: "REF-1".to_owned(),
+            issuer: Some("X".repeat(36)),
+        };
+        assert!(matches!(
+            long.validate("RmtInf", CharsetPolicy::default()),
+            Err(ValidationError::TooLong {
+                field: "RmtInf/Strd/CdtrRefInf/Tp/Issr",
+                max: 35,
+                ..
+            })
+        ));
+
+        let umlaut = RemittanceInfo::Proprietary {
+            reference: "REF-1".to_owned(),
+            issuer: Some("Bräuner".to_owned()),
+        };
+        assert!(umlaut.validate("RmtInf", CharsetPolicy::default()).is_ok());
+        let mut out = String::new();
+        umlaut
+            .write_xml(&mut out, "", CharsetPolicy::default())
+            .unwrap();
+        assert!(out.contains("<Issr>Braeuner</Issr>"), "{out}");
+
+        // Strict refuses rather than rewriting, here as everywhere else.
+        assert!(matches!(
+            umlaut.validate("RmtInf", CharsetPolicy::Strict),
+            Err(ValidationError::InvalidCharacter { ch: 'ä', .. })
+        ));
+    }
+
+    #[test]
+    fn the_structured_block_is_capped_at_140_characters_including_tags() {
+        // The EPC caps `Strd` at 140 characters *with* the markup, which no
+        // per-field check can see: a 35-character `Ref` and a 35-character
+        // `Issr` are both legal and together overrun the block.
+        use crate::validate::CharsetPolicy;
+
+        let big = RemittanceInfo::Proprietary {
+            reference: "R".repeat(35),
+            issuer: Some("I".repeat(35)),
+        };
+        let err = big
+            .validate("RmtInf", CharsetPolicy::default())
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ValidationError::TooLong {
+                    field: "RmtInf/Strd",
+                    max: 140,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+
+        // What is measured is what is written: an RF reference plus its
+        // mandatory `Issr` of `ISO` is the longest shape that still fits.
+        let rf = RemittanceInfo::Structured(RfReference::generate(&"9".repeat(21)).unwrap());
+        assert!(rf.validate("RmtInf", CharsetPolicy::default()).is_ok());
+        let mut out = String::new();
+        rf.write_xml(&mut out, "", CharsetPolicy::default())
+            .unwrap();
+        let strd = out.split("<Strd>").nth(1).unwrap();
+        let strd = format!("<Strd>{}", strd.split("</RmtInf>").next().unwrap());
+        assert!(
+            strd.chars().count() <= 140,
+            "{} chars",
+            strd.chars().count()
+        );
+    }
 
     #[test]
     fn iso_11649_annex_b_worked_example() {

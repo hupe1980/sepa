@@ -25,15 +25,27 @@
 //!
 //! ## Interop
 //!
-//! With the `time` or `chrono` feature, the corresponding date types convert in
-//! both directions, so a caller that already has a typed date never formats a
-//! string. The conversions are fallible in both directions: `time` and `chrono`
-//! represent years this type deliberately does not.
+//! With the `time` or `chrono` feature, the matching types convert in **both**
+//! directions, so a caller that already has a typed date never formats a
+//! string. Every conversion is fallible, and each direction fails for its own
+//! reason: `time` and `chrono` represent years this type deliberately does not,
+//! and this type represents timestamps that name no instant.
+//!
+//! | This crate | `time` | `chrono` |
+//! |---|---|---|
+//! | [`IsoDate`] | `Date` | `NaiveDate` |
+//! | [`IsoDateTime`] (offset dropped) | `PrimitiveDateTime` | `NaiveDateTime` |
+//! | [`IsoDateTime`] (offset kept) | `OffsetDateTime` | `DateTime<FixedOffset>` |
+//!
+//! The last row is the one with an opinion. `OffsetDateTime` and `DateTime`
+//! name an *instant*, and an [`IsoDateTime`] with no offset does not — so that
+//! conversion returns [`ConversionError::NoOffset`] rather than assuming UTC.
+//! Reach for [`IsoDateTime::in_utc`] when UTC really is the answer.
 //!
 //! ```
 //! # #[cfg(feature = "time")]
 //! # fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! use sepa::IsoDate;
+//! use sepa::{IsoDate, IsoDateTime, ConversionError};
 //!
 //! let from_time = time::Date::from_calendar_date(2026, time::Month::July, 20)?;
 //! let date = IsoDate::try_from(from_time)?;
@@ -41,6 +53,18 @@
 //!
 //! let back: time::Date = date.try_into()?;
 //! assert_eq!(back, from_time);
+//!
+//! // A timestamp with an offset is an instant, and survives the round trip.
+//! let stamped: IsoDateTime = "2026-07-20T13:00:00+02:00".parse()?;
+//! let offset: time::OffsetDateTime = stamped.try_into()?;
+//! assert_eq!(offset.unix_timestamp(), stamped.unix_seconds().unwrap());
+//!
+//! // One without an offset is not, and says so rather than guessing.
+//! let bare: IsoDateTime = "2026-07-20T13:00:00".parse()?;
+//! assert_eq!(
+//!     time::OffsetDateTime::try_from(bare).unwrap_err(),
+//!     ConversionError::NoOffset,
+//! );
 //! # Ok(())
 //! # }
 //! # #[cfg(feature = "time")]
@@ -120,6 +144,26 @@ pub enum DateTimeError {
         /// Second component.
         second: u32,
     },
+}
+
+/// Error returned when an [`IsoDateTime`] cannot be expressed in an external
+/// date-time type.
+///
+/// Only produced by the `time` and `chrono` conversions, and only in the
+/// direction that needs an instant. A timestamp with no UTC offset is a wall
+/// clock somewhere, and `time::OffsetDateTime` / `chrono::DateTime` both
+/// require the somewhere — so the conversion fails rather than assuming UTC.
+#[cfg(any(feature = "time", feature = "chrono"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConversionError {
+    /// The timestamp carries no UTC offset, so it names no instant.
+    #[error("timestamp has no UTC offset, so it names no instant — see IsoDateTime::in_utc")]
+    NoOffset,
+
+    /// The value falls outside the target type's representable range.
+    #[error("the value is outside the target type's range")]
+    OutOfRange,
 }
 
 // ── IsoDate ───────────────────────────────────────────────────────────────────
@@ -303,6 +347,12 @@ impl IsoDate {
     /// UTC rather than local time: a collection date is a banking-calendar day
     /// agreed with the bank, and deriving it from an ambient timezone makes the
     /// same code emit different files on different machines.
+    ///
+    /// **Nothing in this crate calls it.** No builder defaults a payment date,
+    /// because "today", "today + 5" and every other clock-derived answer is a
+    /// banking-calendar question the crate cannot answer — it depends on the
+    /// scheme, the sequence type, TARGET2 and the bank's cut-off. This is here
+    /// for callers who have already decided that today is the right answer.
     #[must_use]
     pub fn today() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -472,6 +522,23 @@ const fn days_in_month(year: u16, month: u8) -> u8 {
 /// built by [`IsoDateTime::now`] carry no offset, which is the form the EPC and
 /// DK examples use.
 ///
+/// ## Deliberately not `Ord`
+///
+/// A timestamp with no offset does not name an instant — `12:30:00` is a wall
+/// clock somewhere, and which somewhere is not in the value. Comparing the
+/// written fields would therefore be wrong in the one case that matters:
+/// `2026-07-20T13:00:00+02:00` is an hour *earlier* than
+/// `2026-07-20T12:00:00Z`, and any field-order comparison puts it later. Rather
+/// than ship an ordering that is right for same-offset values and silently
+/// wrong for mixed ones, this type has none. Compare
+/// [`unix_seconds`](Self::unix_seconds), which is `None` for exactly the values
+/// that cannot be compared.
+///
+/// Equality is on the written form, for the same reason: two spellings of one
+/// instant are different `CreDtTm` values, and a message must reproduce the one
+/// it was given. [`IsoDate`], which is what every SEPA *payment* date is, has
+/// no offset and so is fully `Ord`.
+///
 /// # Examples
 ///
 /// ```
@@ -484,9 +551,13 @@ const fn days_in_month(year: u16, month: u8) -> u8 {
 /// // An offset survives the round trip.
 /// let z: IsoDateTime = "2026-07-20T12:30:00Z".parse()?;
 /// assert_eq!(z.to_string(), "2026-07-20T12:30:00Z");
+///
+/// // Offsets are honoured when instants are compared.
+/// let berlin: IsoDateTime = "2026-07-20T13:00:00+02:00".parse()?;
+/// assert!(berlin.unix_seconds() < z.unix_seconds());
 /// # Ok::<(), sepa::DateTimeError>(())
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IsoDateTime {
     date: IsoDate,
     hour: u8,
@@ -637,6 +708,71 @@ impl IsoDateTime {
         self.offset_minutes
     }
 
+    /// Seconds since 1970-01-01T00:00:00Z, or `None` without a UTC offset.
+    ///
+    /// This is the only sound way to order two timestamps: it is `None` for
+    /// exactly the values that do not name an instant, so a comparison cannot
+    /// quietly assume a timezone. See the [type docs](Self) for why
+    /// [`IsoDateTime`] is not `Ord`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::IsoDateTime;
+    ///
+    /// let utc: IsoDateTime = "2026-07-20T12:00:00Z".parse()?;
+    /// let berlin: IsoDateTime = "2026-07-20T13:00:00+02:00".parse()?;
+    /// assert_eq!(berlin.unix_seconds(), Some(utc.unix_seconds().unwrap() - 3600));
+    ///
+    /// // A timestamp with no offset is not an instant.
+    /// assert_eq!("2026-07-20T12:00:00".parse::<IsoDateTime>()?.unix_seconds(), None);
+    /// # Ok::<(), sepa::DateTimeError>(())
+    /// ```
+    #[must_use]
+    pub const fn unix_seconds(self) -> Option<i64> {
+        let Some(offset) = self.offset_minutes else {
+            return None;
+        };
+        let local = self.date.epoch_days() * 86_400
+            + self.hour as i64 * 3600
+            + self.minute as i64 * 60
+            + self.second as i64;
+        Some(local - offset as i64 * 60)
+    }
+
+    /// The same instant re-expressed at UTC, or `None` without a UTC offset.
+    ///
+    /// Rendering the result gives the `Z` form, so two timestamps written at
+    /// different offsets can be compared, stored or logged in one spelling.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::IsoDateTime;
+    ///
+    /// let berlin: IsoDateTime = "2026-07-20T13:00:00+02:00".parse()?;
+    /// assert_eq!(berlin.to_utc().unwrap().to_string(), "2026-07-20T11:00:00Z");
+    /// assert_eq!("2026-07-20T13:00:00".parse::<IsoDateTime>()?.to_utc(), None);
+    /// # Ok::<(), sepa::DateTimeError>(())
+    /// ```
+    #[must_use]
+    pub fn to_utc(self) -> Option<Self> {
+        let secs = self.unix_seconds()?;
+        let days = secs.div_euclid(86_400);
+        let rest = secs.rem_euclid(86_400);
+        let date = IsoDate::from_epoch_days(days).ok()?;
+        // `rem_euclid` gives 0..=86_399, so every component is non-negative
+        // and well inside u8 — but say so with a fallible conversion rather
+        // than an `as` cast, since this is arithmetic on parsed input.
+        Some(Self {
+            date,
+            hour: u8::try_from(rest / 3600).ok()?,
+            minute: u8::try_from((rest / 60) % 60).ok()?,
+            second: u8::try_from(rest % 60).ok()?,
+            offset_minutes: Some(0),
+        })
+    }
+
     /// Replace the time of day, with components already known to be in range.
     ///
     /// Used only by the `time` / `chrono` conversions, whose source types
@@ -660,10 +796,13 @@ fn parse_offset(tail: &str) -> Option<i16> {
     }
     let hours = i16::from(h0 - b'0') * 10 + i16::from(h1 - b'0');
     let minutes = i16::from(m0 - b'0') * 10 + i16::from(m1 - b'0');
-    if hours > 23 || minutes > 59 {
+    // `xs:dateTime` bounds the offset at ±14:00; anything beyond it names no
+    // real timezone, and accepting it would let a bogus tail be read as an
+    // offset instead of rejecting the timestamp.
+    let total = hours * 60 + minutes;
+    if minutes > 59 || total > 14 * 60 {
         return None;
     }
-    let total = hours * 60 + minutes;
     Some(if sign == b'-' { -total } else { total })
 }
 
@@ -755,7 +894,7 @@ mod serde_impls {
 
 #[cfg(feature = "time")]
 mod time_interop {
-    use super::{DateError, IsoDate, IsoDateTime};
+    use super::{ConversionError, DateError, IsoDate, IsoDateTime};
 
     impl TryFrom<time::Date> for IsoDate {
         type Error = DateError;
@@ -781,10 +920,70 @@ mod time_interop {
 
     impl TryFrom<time::PrimitiveDateTime> for IsoDateTime {
         type Error = DateError;
+        /// The timestamp with **no** offset — `PrimitiveDateTime` carries none,
+        /// so claiming UTC would invent one.
         fn try_from(t: time::PrimitiveDateTime) -> Result<Self, Self::Error> {
             let date = IsoDate::try_from(t.date())?;
             // `time` guarantees the components are in range, so `new` cannot fail.
             Ok(Self::from(date).with_time(t.hour(), t.minute(), t.second()))
+        }
+    }
+
+    impl TryFrom<IsoDateTime> for time::PrimitiveDateTime {
+        type Error = time::error::ComponentRange;
+        /// Drops the UTC offset, if any: `PrimitiveDateTime` has nowhere to put
+        /// it. Convert to [`time::OffsetDateTime`] instead when the offset is
+        /// the point.
+        fn try_from(t: IsoDateTime) -> Result<Self, Self::Error> {
+            Ok(Self::new(
+                time::Date::try_from(t.date())?,
+                time::Time::from_hms(t.hour(), t.minute(), t.second())?,
+            ))
+        }
+    }
+
+    impl TryFrom<time::OffsetDateTime> for IsoDateTime {
+        type Error = DateError;
+        /// Keeps the offset, so the timestamp still names an instant.
+        fn try_from(t: time::OffsetDateTime) -> Result<Self, Self::Error> {
+            let date = IsoDate::try_from(t.date())?;
+            let mut out = Self::from(date).with_time(t.hour(), t.minute(), t.second());
+            // `time` bounds an offset at ±25:59:59 and ISO 20022 at ±14:00;
+            // beyond that there is no `xs:dateTime` to write, so the value is
+            // rendered at UTC rather than with an offset no schema accepts.
+            // `time` already types whole minutes as `i16`; ISO 20022 bounds an
+            // `xs:dateTime` offset at ±14:00, and beyond that there is no
+            // spelling to write — so re-express the same instant at UTC rather
+            // than emit an offset no schema accepts.
+            let minutes = t.offset().whole_minutes();
+            if minutes.abs() <= 14 * 60 {
+                out.offset_minutes = Some(minutes);
+                Ok(out)
+            } else {
+                let utc = t.to_offset(time::UtcOffset::UTC);
+                let date = IsoDate::try_from(utc.date())?;
+                Ok(Self::from(date)
+                    .with_time(utc.hour(), utc.minute(), utc.second())
+                    .in_utc())
+            }
+        }
+    }
+
+    impl TryFrom<IsoDateTime> for time::OffsetDateTime {
+        type Error = ConversionError;
+        /// # Errors
+        ///
+        /// [`ConversionError::NoOffset`] when the timestamp carries no UTC
+        /// offset: it names a wall clock, not an instant, and picking one would
+        /// be the invention this crate refuses to make. See
+        /// [`IsoDateTime::unix_seconds`].
+        fn try_from(t: IsoDateTime) -> Result<Self, Self::Error> {
+            let minutes = t.offset_minutes().ok_or(ConversionError::NoOffset)?;
+            let offset = time::UtcOffset::from_whole_seconds(i32::from(minutes) * 60)
+                .map_err(|_| ConversionError::OutOfRange)?;
+            let naive =
+                time::PrimitiveDateTime::try_from(t).map_err(|_| ConversionError::OutOfRange)?;
+            Ok(naive.assume_offset(offset))
         }
     }
 }
@@ -793,7 +992,7 @@ mod time_interop {
 
 #[cfg(feature = "chrono")]
 mod chrono_interop {
-    use super::{DateError, IsoDate, IsoDateTime};
+    use super::{ConversionError, DateError, IsoDate, IsoDateTime};
     use chrono::{Datelike, Timelike};
 
     impl TryFrom<chrono::NaiveDate> for IsoDate {
@@ -827,11 +1026,72 @@ mod chrono_interop {
 
     impl TryFrom<chrono::NaiveDateTime> for IsoDateTime {
         type Error = DateError;
+        /// The timestamp with **no** offset — `NaiveDateTime` carries none, so
+        /// claiming UTC would invent one.
         fn try_from(t: chrono::NaiveDateTime) -> Result<Self, Self::Error> {
             let date = IsoDate::try_from(t.date())?;
             // `chrono` guarantees the components are in range.
             #[allow(clippy::cast_possible_truncation)]
             Ok(Self::from(date).with_time(t.hour() as u8, t.minute() as u8, t.second() as u8))
+        }
+    }
+
+    impl TryFrom<IsoDateTime> for chrono::NaiveDateTime {
+        type Error = DateError;
+        /// Drops the UTC offset, if any: `NaiveDateTime` has nowhere to put it.
+        /// Convert to `chrono::DateTime<FixedOffset>` when the offset matters.
+        fn try_from(t: IsoDateTime) -> Result<Self, Self::Error> {
+            let date = chrono::NaiveDate::try_from(t.date())?;
+            date.and_hms_opt(
+                u32::from(t.hour()),
+                u32::from(t.minute()),
+                u32::from(t.second()),
+            )
+            .ok_or(DateError::NotACalendarDate {
+                year: i64::from(t.date().year()),
+                month: u32::from(t.date().month()),
+                day: u32::from(t.date().day()),
+            })
+        }
+    }
+
+    impl<Tz: chrono::TimeZone> TryFrom<chrono::DateTime<Tz>> for IsoDateTime {
+        type Error = DateError;
+        /// Keeps the offset, so the timestamp still names an instant.
+        fn try_from(t: chrono::DateTime<Tz>) -> Result<Self, Self::Error> {
+            use chrono::Offset as _;
+            let fixed = t.offset().fix();
+            let naive = t.naive_local();
+            let mut out = Self::try_from(naive)?;
+            // ISO 20022 bounds `xs:dateTime` offsets at ±14:00; a zone outside
+            // that has no spelling, so fall back to UTC rather than write one.
+            out.offset_minutes = i16::try_from(fixed.local_minus_utc() / 60)
+                .ok()
+                .filter(|m| m.abs() <= 14 * 60);
+            if out.offset_minutes.is_none() {
+                out = Self::try_from(t.naive_utc())?.in_utc();
+            }
+            Ok(out)
+        }
+    }
+
+    impl TryFrom<IsoDateTime> for chrono::DateTime<chrono::FixedOffset> {
+        type Error = ConversionError;
+        /// # Errors
+        ///
+        /// [`ConversionError::NoOffset`] when the timestamp carries no UTC
+        /// offset — it names a wall clock, not an instant. See
+        /// [`IsoDateTime::unix_seconds`].
+        fn try_from(t: IsoDateTime) -> Result<Self, Self::Error> {
+            let minutes = t.offset_minutes().ok_or(ConversionError::NoOffset)?;
+            let offset = chrono::FixedOffset::east_opt(i32::from(minutes) * 60)
+                .ok_or(ConversionError::OutOfRange)?;
+            let naive =
+                chrono::NaiveDateTime::try_from(t).map_err(|_| ConversionError::OutOfRange)?;
+            naive
+                .and_local_timezone(offset)
+                .single()
+                .ok_or(ConversionError::OutOfRange)
         }
     }
 }
@@ -841,6 +1101,120 @@ mod chrono_interop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn time_timestamps_convert_in_both_directions() {
+        // Regression: only `time::PrimitiveDateTime -> IsoDateTime` existed,
+        // while the module docs promised both directions for every type.
+        let bare: IsoDateTime = "2026-07-20T13:00:00".parse().unwrap();
+        let primitive = time::PrimitiveDateTime::try_from(bare).unwrap();
+        assert_eq!(IsoDateTime::try_from(primitive).unwrap(), bare);
+
+        // An offset is an instant, and the instant is what must survive.
+        let berlin: IsoDateTime = "2026-07-20T13:00:00+02:00".parse().unwrap();
+        let offset = time::OffsetDateTime::try_from(berlin).unwrap();
+        assert_eq!(offset.unix_timestamp(), berlin.unix_seconds().unwrap());
+        assert_eq!(IsoDateTime::try_from(offset).unwrap(), berlin);
+
+        // Without one there is no instant to hand over, and none is invented.
+        assert_eq!(
+            time::OffsetDateTime::try_from(bare),
+            Err(ConversionError::NoOffset)
+        );
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn chrono_timestamps_convert_in_both_directions() {
+        let bare: IsoDateTime = "2026-07-20T13:00:00".parse().unwrap();
+        let naive = chrono::NaiveDateTime::try_from(bare).unwrap();
+        assert_eq!(IsoDateTime::try_from(naive).unwrap(), bare);
+
+        let berlin: IsoDateTime = "2026-07-20T13:00:00+02:00".parse().unwrap();
+        let dt = chrono::DateTime::<chrono::FixedOffset>::try_from(berlin).unwrap();
+        assert_eq!(dt.timestamp(), berlin.unix_seconds().unwrap());
+        assert_eq!(IsoDateTime::try_from(dt).unwrap(), berlin);
+
+        assert_eq!(
+            chrono::DateTime::<chrono::FixedOffset>::try_from(bare),
+            Err(ConversionError::NoOffset)
+        );
+
+        // A UTC `DateTime` renders as `Z`, which is the spelling ISO 20022 uses.
+        let utc = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc);
+        assert_eq!(
+            IsoDateTime::try_from(utc).unwrap().to_string(),
+            "2026-07-20T13:00:00Z"
+        );
+    }
+
+    #[test]
+    fn timestamps_compare_as_instants_not_as_written_fields() {
+        // Regression: `IsoDateTime` derived `Ord` over (date, h, m, s, offset),
+        // so `13:00:00+02:00` — an hour *earlier* than `12:00:00Z` — sorted
+        // after it. The type no longer has an ordering; `unix_seconds` does,
+        // and it is `None` for exactly the values that name no instant.
+        let utc: IsoDateTime = "2026-07-20T12:00:00Z".parse().unwrap();
+        let berlin: IsoDateTime = "2026-07-20T13:00:00+02:00".parse().unwrap();
+        let naive: IsoDateTime = "2026-07-20T12:00:00".parse().unwrap();
+
+        assert!(berlin.unix_seconds() < utc.unix_seconds());
+        assert_eq!(
+            utc.unix_seconds().unwrap() - berlin.unix_seconds().unwrap(),
+            3600
+        );
+        assert_eq!(naive.unix_seconds(), None);
+
+        // Equality stays on the written form: a `CreDtTm` must round-trip the
+        // spelling it was given.
+        assert_ne!(utc, berlin);
+        assert_eq!(
+            berlin.to_utc().unwrap(),
+            "2026-07-20T11:00:00Z".parse().unwrap()
+        );
+        assert_eq!(naive.to_utc(), None);
+        assert_eq!(utc.to_utc(), Some(utc));
+    }
+
+    #[test]
+    fn a_utc_offset_beyond_the_xsd_range_is_not_an_offset() {
+        // `xs:dateTime` bounds the offset at ±14:00. Anything past it names no
+        // timezone, so it must not be read as one — the tail then fails to
+        // parse as a time and the whole value is rejected.
+        assert!("2026-07-20T12:00:00+14:00".parse::<IsoDateTime>().is_ok());
+        assert_eq!(
+            "2026-07-20T12:00:00-14:00"
+                .parse::<IsoDateTime>()
+                .unwrap()
+                .offset_minutes(),
+            Some(-840)
+        );
+        for bad in [
+            "2026-07-20T12:00:00+14:01",
+            "2026-07-20T12:00:00+15:00",
+            "2026-07-20T12:00:00+23:59",
+        ] {
+            assert!(
+                bad.parse::<IsoDateTime>().is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn unix_seconds_agrees_with_the_epoch_across_the_calendar() {
+        for (text, secs) in [
+            ("1970-01-01T00:00:00Z", 0i64),
+            ("1970-01-01T00:00:01Z", 1),
+            ("1969-12-31T23:59:59Z", -1),
+            ("2026-07-20T12:34:56Z", 1_784_550_896),
+        ] {
+            let t: IsoDateTime = text.parse().unwrap();
+            assert_eq!(t.unix_seconds(), Some(secs), "{text}");
+            assert_eq!(t.to_utc().unwrap().to_string(), text, "{text} round trip");
+        }
+    }
 
     #[test]
     fn parses_and_renders_the_iso_form() {

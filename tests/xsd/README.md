@@ -15,6 +15,11 @@ generates. They are **test fixtures only** — nothing in `src/` reads them.
 | `pain.002.001.10.xsd` | Status report + Verification of Payee (parser fixtures) |
 | `pain.001.001.09_GBIC_5.xsd` | SCT — the DK's stricter validation subset |
 | `pain.008.001.08_GBIC_5.xsd` | SDD — the DK's stricter validation subset |
+| `camt.055.001.05.xsd` | Payment cancellation request (recall) |
+| `camt.029.001.06.xsd` | Resolution of investigation — the answer to a recall (parser fixtures) |
+| `camt.052.001.08.xsd` | Intraday report (parser fixtures) |
+| `camt.053.001.08.xsd` | End-of-day statement (parser fixtures) |
+| `camt.054.001.08.xsd` | Debit/credit notification (parser fixtures) |
 
 The file name is derived from the schema variant's `message_id()`, so adding a
 variant to `CreditTransferSchema::ALL` / `DirectDebitSchema::ALL` without adding
@@ -81,7 +86,31 @@ packages.
 
 Nothing generates pain.002 — that schema exists to prove the parser's fixtures,
 including the Verification of Payee report, are real documents rather than
-invented shapes.
+invented shapes. The same argument covers the four read-only camt schemas: a
+hand-built fixture that no schema has seen proves only that the parser agrees
+with whoever wrote it.
+
+### Official — Deutsche Kreditwirtschaft, camt bundles
+
+Distributed with the DFÜ-Abkommen Anlage 3 packages alongside the pain schemas
+above, and authoritative for the same reason.
+
+| File | SHA-256 |
+|---|---|
+| `camt.055.001.05.xsd` | `6e18c49a4ff81023d18d9dc499e514697114616671cc462202fd859cefa4eae8` |
+| `camt.029.001.06.xsd` | `39e2209ea36910875076ad7e20bbcc796ba4ae3d0e45bccb311db4e1bf0e848f` |
+| `camt.052.001.08.xsd` | `9bb093a0c39cd278d25b40d9ec8c59d1e8f6ab37536c83b84d41bbf5c7f8bd6c` |
+| `camt.053.001.08.xsd` | `338e9cb0c9989b5181802a7b773eece070d6815fc9d6483ac0579117bc24ccba` |
+| `camt.054.001.08.xsd` | `13d220337d47e22cf25788807c136794a76955791df612c6947277272d440da6` |
+
+`camt.055.001.05` and `camt.029.001.06` are the pair the DFÜ-Abkommen names for
+a customer recall and its answer; unlike the payment-initiation messages there
+is no per-bank version choice. Note that both keep the **pre-2019 BIC pattern**
+under an element named `BICFI` — see `src/bic.rs`, where that is why the
+character pattern and the element name are read from the schema separately.
+
+The three camt.05x schemas are the 2019 versions. They gate the parser fixtures
+rather than any generated output: nothing in this crate writes camt.05x.
 
 ### Mirror-sourced — ISO originals
 
@@ -97,7 +126,8 @@ cross-checked byte-for-byte between two independent copies.
   corroborated byte-for-byte (after CRLF→LF) against a copy attached to
   [php-sepa-xml#161](https://github.com/php-sepa-xml/php-sepa-xml/files/14664481/pain.008.001.08.xsd.zip).
   Generator stamp `Standards Editor (build:R1.6.15) on 2019 Feb 14`.
-- `pain.001.001.09.xsd` — from
+- `pain.001.001.09.xsd` — SHA-256
+  `de038b373e47b0077b1832ddd81f4b2f1eb25d35721f62da1e38b7f5a09fda24`. From
   [fortesp/xsd2xml](https://github.com/fortesp/xsd2xml/blob/master/tests/resources/pain.001.001.09.xsd).
 - `pain.001.001.03.xsd` — SHA-256
   `ae2bbba02a6be0119a26f4afcb65ced067453cb1b81d38b26bcc569f19eca93e`.
@@ -111,13 +141,27 @@ cross-checked byte-for-byte between two independent copies.
   `SWIFTStandards Workstation (build:R6.1.0.2) on 2009 Jan 08`, and their
   `ServiceLevel8Choice` / `LocalInstrument2Choice` / `AccountIdentification4Choice`
   really are `xs:choice` — see the warning above.
-- `pain.001.003.03.xsd`, `pain.008.003.02.xsd` — from
-  [willuhn/hbci4java](https://github.com/willuhn/hbci4java), the German DK
-  schemas per DFÜ-Abkommen Anlage 3 V2.7.
+- `pain.001.003.03.xsd` — SHA-256
+  `58c51f123ac66c4981adfede7478851cfc76c6a5e722f7cbff7e2b9719aa22fc`.
+- `pain.008.003.02.xsd` — SHA-256
+  `2bfaaae0239adef8d62ddf8c48472aec640971724425a26e493fccca586e805a`.
+
+  Both from [willuhn/hbci4java](https://github.com/willuhn/hbci4java), the
+  German DK schemas per DFÜ-Abkommen Anlage 3 V2.7.
 
 Replacing a mirror-sourced file with an archive copy is a welcome change; the
 sensible check afterwards is that the test suite still passes, since the DK
 subsets validate the same documents from the other direction.
+
+## The digests are enforced, not decorative
+
+`scripts/check-vendored-data.sh` re-derives every SHA-256 above and fails on a
+mismatch — and, just as importantly, fails when a `.xsd` in this directory has
+**no** recorded digest. A schema silently swapped for a defective mirror is the
+failure mode that makes correct output look wrong (see the warning above), and
+the natural reaction to it is to "fix" the writer, at which point the crate
+emits genuinely invalid files with a green suite. CI runs the script on every
+push; `just verify-data` runs it locally.
 
 [ebics]: https://www.ebics.de/de/datenformate/ergaenzende-dokumente
 [archive]: https://www.iso20022.org/catalogue-messages/iso-20022-messages-archive?search=pain

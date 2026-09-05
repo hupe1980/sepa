@@ -1,7 +1,7 @@
 +++
 title = "Validation & character set"
-description = "The EPC field rules that decide whether a bank accepts a SEPA file — amount ranges, name lengths, identifier rules — and the EPC217-08 character conversion table, in Rust."
-weight = 8
+description = "The EPC rules that decide whether a bank accepts a SEPA file — amount ranges, name lengths, identifiers — and the EPC217-08 conversion table."
+weight = 10
 +++
 
 Schema validation is necessary and not sufficient. All of the following pass
@@ -20,6 +20,8 @@ the published ISO schemas and are rejected on ingestion:
 | `PmtInfId` | unique across the groups of one message |
 | Any party name | 1–70 chars, where the schema permits 140 |
 | Unstructured remittance | 1–140 chars *after transliteration*, one occurrence |
+| Structured remittance | the whole `Strd` block ≤ 140 chars **including the XML tags** |
+| `CdtrRefInf/Tp/Issr` | 1–35 chars, and inside the SEPA character set |
 | Amount | 0.01 – 999 999 999.99 EUR |
 | Batch | at least one transaction |
 | Address | town and country present, at most two free-text lines |
@@ -55,11 +57,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ci = validate_creditor_id("DE98ZZZ09999999999")?;
     let date = IsoDate::new(2026, 7, 20)?;
 
-    let err = Pain008Builder::new("Stadtwerke GmbH")
-        .msg_id("DD-1")
+    let err = Pain008Builder::new("Stadtwerke GmbH", "DD-1")
         .add_group(
-            DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
-                .collection_date(date)
+            DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, date)
                 .add_entry(DirectDebitEntry::new(
                     "MND-1", date, "Erste", iban.clone(), 100, "E2E-1",
                 ))
@@ -97,6 +97,58 @@ fn main() {
         RemittanceInfo::unstructured(&text)
             .validate("RmtInf/Ustrd", CharsetPolicy::default()),
         Err(ValidationError::TooLong { max: 140, actual: 141, .. }),
+    ));
+}
+```
+
+## One table for every length limit
+
+Every `Max*Text` bound the builders enforce lives in `validate::max_text_len`,
+keyed by the element and its parent — which is what separates the names ISO
+20022 reuses. `SvcLvl/Cd` is a four-character external code; `LclInstrm/Cd` is a
+`Max35Text`. A bare `Id` is a container; `Othr/Id` is an identifier.
+
+```rust
+use sepa::validate::max_text_len;
+
+fn main() {
+    assert_eq!(max_text_len(Some("Cdtr"), "Nm"), Some(70));       // EPC, not the XSD's 140
+    assert_eq!(max_text_len(Some("PstlAdr"), "BldgNb"), Some(16));
+    assert_eq!(max_text_len(Some("SvcLvl"), "Cd"), Some(4));
+    assert_eq!(max_text_len(Some("LclInstrm"), "Cd"), Some(35));
+    assert_eq!(max_text_len(Some("DbtrAcct"), "IBAN"), None);     // bounded by its own type
+}
+```
+
+Use it to pre-check your own data with the same numbers the builders apply,
+rather than copying them into your code where they can drift.
+
+The table is also what the test suite walks a generated document against: every
+element that carries text must either be in it or be on an explicit list of
+values bounded by their own type. An element added to a writer without a bound
+fails the build.
+
+## The `Strd` block counts its own markup
+
+The EPC caps structured remittance information at 140 characters *including the
+XML tags*, which is why the block is emitted minified — pretty-printing alone
+overruns it. No per-field check can see that limit: a 35-character `Ref` and a
+35-character `Issr` are each perfectly legal and together break it.
+
+The block is therefore measured by rendering it, with the same function the
+writer uses, so what is checked is exactly what is emitted:
+
+```rust
+use sepa::{CharsetPolicy, RemittanceInfo, ValidationError};
+
+fn main() {
+    let too_big = RemittanceInfo::Proprietary {
+        reference: "R".repeat(35),
+        issuer: Some("I".repeat(35)),
+    };
+    assert!(matches!(
+        too_big.validate("RmtInf", CharsetPolicy::default()),
+        Err(ValidationError::TooLong { field: "RmtInf/Strd", max: 140, .. }),
     ));
 }
 ```

@@ -41,7 +41,7 @@ test-one FILTER:
     cargo test --all-features {{ FILTER }}
 
 # Full CI gate — run before every commit.
-ci: fmt-check lint test-all test-no-features
+ci: fmt-check lint verify-data test-all test-no-features
     @echo "CI gate passed."
 
 # ── Examples ──────────────────────────────────────────────────────────────────
@@ -80,6 +80,12 @@ deny:
 fuzz TARGET="parse" SECS="60":
     cargo +nightly fuzz run {{ TARGET }} -- -max_total_time={{ SECS }}
 
+# Fuzz every target in turn — what CI runs on each push.
+fuzz-all SECS="60":
+    just fuzz parse {{ SECS }}
+    just fuzz identifiers {{ SECS }}
+    just fuzz build_batch {{ SECS }}
+
 # ── Site ──────────────────────────────────────────────────────────────────────
 
 # Serve the documentation site locally (requires `zola`).
@@ -93,6 +99,28 @@ site-build:
 # Check the site's internal links and anchors.
 site-check:
     cd site && zola check
+
+# ── Vendored reference data ───────────────────────────────────────────────────
+
+# Verify the pinned XSDs against the digests in tests/xsd/README.md.
+verify-data:
+    ./scripts/check-vendored-data.sh
+
+# Re-check every vendored table against the examples its publisher ships.
+# A failure here means the data no longer matches its source, not that a test
+# is flaky — see tests/xsd/README.md for provenance and what to re-fetch.
+verify-tables: verify-data
+    cargo test --all-features --lib -- \
+        iban::tests::every_published_registry_example_validates \
+        iban::tests::every_registry_example_is_reproduced_from_its_own_bban \
+        iban::tests::registry_has_full_swift_entry_count \
+        iban::tests::registry_structures_are_well_formed \
+        country::tests::every_iban_registry_country_is_a_country_code \
+        country::tests::every_sepa_country_is_a_country_code \
+        charset::tests::no_table_entry_maps_a_character_that_is_already_legal \
+        charset::tests::every_replacement_is_itself_legal_and_non_empty \
+        charset::tests::exactly_twenty_entries_lengthen_the_text \
+        --exact
 
 # ── Schema validation ─────────────────────────────────────────────────────────
 

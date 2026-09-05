@@ -44,10 +44,106 @@ pub const MAX_ID_LEN: usize = 35;
 pub const MAX_NAME_LEN: usize = 70;
 /// Maximum length of unstructured remittance information (`Ustrd`).
 pub const MAX_REMITTANCE_LEN: usize = 140;
+/// Maximum length of an external code (`SvcLvl/Cd`, `Purp/Cd`, …) — `Max4Text`.
+pub const MAX_CODE_LEN: usize = 4;
+/// Maximum length of `PstlAdr/BldgNb` and `PstlAdr/PstCd` — `Max16Text`.
+pub const MAX_BUILDING_LEN: usize = 16;
+/// Maximum serialised length of a structured remittance block (`RmtInf/Strd`).
+///
+/// The EPC guidelines cap `Strd` at 140 characters **including the XML tags**,
+/// not just the data — which is why the writers emit the block minified and
+/// why the limit is checked against the rendered bytes rather than against any
+/// one field. Nothing in the XSD expresses this.
+///
+/// The EPC's optional **Extended Remittance Information** scheme (EPC092-19)
+/// raises this to 999 occurrences of 280 characters, but it binds only PSPs
+/// that have adhered to the ERI option separately, and sending an ERI-shaped
+/// message to one that has not is a rejection. This crate emits the base
+/// scheme; see the scope table in the README.
+pub const MAX_STRUCTURED_REMITTANCE_LEN: usize = 140;
+/// Maximum length of `CxlRsnInf/AddtlInf` — `Max105Text`.
+pub const MAX_ADDITIONAL_INFO_LEN: usize = 105;
 /// Smallest permitted amount: 0.01 EUR.
 pub const MIN_AMOUNT_CT: i64 = 1;
 /// Largest permitted amount: 999,999,999.99 EUR.
 pub const MAX_AMOUNT_CT: i64 = 99_999_999_999;
+
+/// The `Max*Text` bound for an emitted element, as the EPC restricts it.
+///
+/// This is the single place the length limits are written down. `element` is
+/// the element's own name and `parent` its immediately enclosing element, which
+/// is what disambiguates the names ISO 20022 reuses: `SvcLvl/Cd` is a
+/// `Max4Text` external code while `LclInstrm/Cd` is a `Max35Text`, and `Othr/Id`
+/// is an identifier while a bare `Id` is a container.
+///
+/// `None` means the element carries no character limit *here* — a container, a
+/// date, an amount, a boolean, or a value whose own type already bounds it
+/// (`IBAN`, `BICFI`, an enumerated code).
+///
+/// A consumer can use this to pre-check its own data with the same numbers the
+/// builders enforce, rather than copying them:
+///
+/// ```
+/// use sepa::validate::max_text_len;
+///
+/// assert_eq!(max_text_len(Some("Cdtr"), "Nm"), Some(70));      // EPC, not the XSD's 140
+/// assert_eq!(max_text_len(Some("PstlAdr"), "TwnNm"), Some(35));
+/// assert_eq!(max_text_len(Some("PstlAdr"), "BldgNb"), Some(16));
+/// assert_eq!(max_text_len(Some("SvcLvl"), "Cd"), Some(4));
+/// assert_eq!(max_text_len(Some("LclInstrm"), "Cd"), Some(35));
+/// assert_eq!(max_text_len(Some("DbtrAcct"), "IBAN"), None);    // bounded by its own type
+/// ```
+// Arms are grouped by *what the element is*, not by the number that happens to
+// bound it. `TwnNm` is a `Max35Text` and so is an identifier; `AdrLine` is a
+// `Max70Text` and so is a name. Merging them to satisfy `match_same_arms` would
+// assert an equivalence the schema does not make, and would silently move the
+// wrong group the next time one of the two limits changes.
+#[allow(
+    clippy::match_same_arms,
+    reason = "grouped by element kind, not by the coincident bound"
+)]
+#[must_use]
+pub fn max_text_len(parent: Option<&str>, element: &str) -> Option<usize> {
+    // Parent-qualified first: these are the names ISO 20022 reuses.
+    if let Some(parent) = parent {
+        match (parent, element) {
+            // External code lists are four characters, and so is every value
+            // of the `DocumentType3Code` enumeration under `CdOrPrtry`. A
+            // local instrument code is not — it is a `Max35Text`.
+            ("SvcLvl" | "CtgyPurp" | "Purp" | "Rsn" | "CdOrPrtry", "Cd") => {
+                return Some(MAX_CODE_LEN);
+            }
+            ("LclInstrm", "Cd") => return Some(MAX_ID_LEN),
+            ("Othr", "Id") => return Some(MAX_ID_LEN),
+            // camt.055's case identifiers. Parent-qualified because a bare
+            // `Id` is a container everywhere else — `DbtrAcct/Id` holds an
+            // `IBAN`, not text.
+            ("Assgnmt" | "Case" | "RslvdCase", "Id") => return Some(MAX_ID_LEN),
+            ("SchmeNm" | "Rsn", "Prtry") => return Some(MAX_ID_LEN),
+            // The structured remittance reference and the scheme that issued it.
+            ("CdtrRefInf", "Ref") | ("Tp", "Issr") => return Some(MAX_ID_LEN),
+            _ => {}
+        }
+    }
+    match element {
+        // Every party name. The EPC caps this at 70 where the XSD permits 140.
+        "Nm" => Some(MAX_NAME_LEN),
+        // Unstructured remittance information.
+        "Ustrd" => Some(MAX_REMITTANCE_LEN),
+        // Every `Max35Text` identifier the builders emit.
+        "MsgId" | "PmtInfId" | "EndToEndId" | "MndtId" | "OrgnlMndtId" | "OrgnlMsgId"
+        | "OrgnlMsgNmId" | "OrgnlPmtInfId" | "OrgnlEndToEndId" | "RvslPmtInfId" | "CxlId"
+        | "PmtCxlId" | "OrgnlInstrId" | "GrpCxlId" => Some(MAX_ID_LEN),
+        // `PostalAddress6` / `PostalAddress24`, in the elements the two share.
+        "Dept" | "SubDept" | "StrtNm" | "AdrLine" => Some(MAX_NAME_LEN),
+        "TwnNm" | "CtrySubDvsn" => Some(MAX_ID_LEN),
+        "BldgNb" | "PstCd" => Some(MAX_BUILDING_LEN),
+        // camt.055 free text about a cancellation — `Max105Text`, which is a
+        // limit nothing else in the crate shares.
+        "AddtlInf" => Some(MAX_ADDITIONAL_INFO_LEN),
+        _ => None,
+    }
+}
 
 // ── error ─────────────────────────────────────────────────────────────────────
 
@@ -168,6 +264,25 @@ pub enum ValidationError {
         schema: &'static str,
     },
 
+    /// Two dates in the same message contradict each other.
+    ///
+    /// Needs no clock: both values are in the document, and one cannot precede
+    /// the other and still describe a real event. A mandate signed *after* the
+    /// collection it authorises is the case in point — the collection has no
+    /// mandate behind it on the day it is taken, which is what the debtor's
+    /// bank checks and refuses with `MD01`.
+    #[error("{later} {later_value} must not be after {earlier} {earlier_value}")]
+    DateOrder {
+        /// ISO 20022 element path of the date that must come first.
+        later: &'static str,
+        /// Its value.
+        later_value: crate::IsoDate,
+        /// ISO 20022 element path of the date it must not follow.
+        earlier: &'static str,
+        /// Its value.
+        earlier_value: crate::IsoDate,
+    },
+
     /// A feature was used without the element the scheme requires beside it.
     ///
     /// Distinct from [`UnsupportedBySchema`](Self::UnsupportedBySchema): the
@@ -180,6 +295,27 @@ pub enum ValidationError {
         feature: &'static str,
         /// What has to accompany it.
         requires: &'static str,
+    },
+
+    /// A value is well-formed but the selected schema's type cannot hold it.
+    ///
+    /// Distinct from [`UnsupportedBySchema`](Self::UnsupportedBySchema), which
+    /// is about an *element* the schema does not have. Here the element exists
+    /// and the value is legal under the current standard — it is the older
+    /// schema's narrower pattern that refuses it. A BIC with a digit in its
+    /// business party prefix is the case in point: ISO 9362:2022 admits it and
+    /// `BICFIDec2014Identifier` accepts it, while the pre-2019 `BICIdentifier`
+    /// of `pain.008.001.02` does not.
+    #[error("{field} {value:?} does not match {expected}, the pattern {schema} uses")]
+    SchemaPattern {
+        /// ISO 20022 element path of the offending field.
+        field: &'static str,
+        /// The value that cannot be written there.
+        value: String,
+        /// The message identifier of the selected schema, e.g. `pain.008.001.02`.
+        schema: &'static str,
+        /// The XSD pattern the value fails, as the schema writes it.
+        expected: &'static str,
     },
 
     /// Two `PmtInf` groups in one message carry the same identifier.
@@ -287,11 +423,9 @@ impl std::fmt::Display for Location {
 /// let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 /// let date = IsoDate::new(2026, 7, 20)?;
 ///
-/// let err = Pain008Builder::new("Stadtwerke GmbH")
-///     .msg_id("DD-1")
+/// let err = Pain008Builder::new("Stadtwerke GmbH", "DD-1")
 ///     .add_group(
-///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
-///             .collection_date(date)
+///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, date)
 ///             .add_entry(DirectDebitEntry::new(
 ///                 "MND-1", date, "Erste Kundin", iban.clone(), 100, "E2E-1",
 ///             ))
@@ -496,8 +630,14 @@ pub fn check_text(field: &'static str, value: &str, max: usize) -> Result<(), Va
 }
 
 /// Non-empty and within `max` **characters** (not bytes).
+///
+/// Measured on the trimmed value, because every ISO 20022 text type derives
+/// from `xs:string` with `whiteSpace="collapse"`: the bank's parser strips the
+/// padding before applying the length facet, so counting it here would reject a
+/// value the bank accepts.
 fn check_len(field: &'static str, value: &str, max: usize) -> Result<(), ValidationError> {
-    if value.trim().is_empty() {
+    let value = value.trim();
+    if value.is_empty() {
         return Err(ValidationError::Empty { field });
     }
     // Counted in chars: the ISO limits are character limits, and a byte-based

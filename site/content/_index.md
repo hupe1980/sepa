@@ -1,6 +1,6 @@
 +++
 title = "sepa — SEPA payment files for Rust"
-description = "A Rust crate for SEPA payments: IBAN and BIC validation, pain.001 credit transfers, pain.008 direct debits, pain.007 reversals, pain.002 status reports with Verification of Payee, and camt.05x statement parsing. Zero I/O, integer-only money, XSD-validated output."
+description = "Rust crate for SEPA payment files: IBAN and BIC validation, pain.001, pain.008, pain.007, pain.002, camt.05x and camt.055 recalls. Integer money, no I/O, XSD-validated output."
 template = "index.html"
 +++
 
@@ -20,7 +20,7 @@ mistakes that cost money hard to express in the first place.
 <li><strong>Integer money only</strong><p>Amounts are <code>i64</code> cents everywhere. No <code>f64</code> touches a monetary value, so 10 000 transactions of one cent total exactly 100.00 EUR.</p></li>
 <li><strong>Errors name the row</strong><p>A failure reports the ISO element <em>and</em> the group and transaction index — actionable in a collection run of ten thousand.</p></li>
 <li><strong>Validated twice over</strong><p>Every generated document is checked in CI against the real ISO schemas and against the stricter German GBIC 5 validation subsets.</p></li>
-<li><strong>Zero I/O, no async</strong><p>The crate builds and parses strings. Transport, retries and storage stay yours; nothing is hidden behind a runtime.</p></li>
+<li><strong>No I/O, no async, one clock read</strong><p>The crate builds and parses strings. Transport, retries and storage stay yours; nothing is hidden behind a runtime. The message id and the payment date are arguments, never defaulted from a clock &mdash; only <code>CreDtTm</code> reads one, and <code>created_at()</code> replaces it.</p></li>
 <li><strong>Two required dependencies</strong><p><code>thiserror</code> and <code>quick-xml</code>. Serde, <code>time</code> and <code>chrono</code> are opt-in features.</p></li>
 </ul>
 
@@ -40,12 +40,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("NL91ABNA0417164300")?;
     let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 
-    let xml = Pain008Builder::new("Stadtwerke GmbH")
-        .msg_id("DD-2026-07-001")
+    let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
         .add_group(
-            DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci)
+            DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, IsoDate::new(2026, 7, 20)?)
                 .sequence_type(SequenceType::Frst)
-                .collection_date(IsoDate::new(2026, 7, 20)?)
                 .add_entry(DirectDebitEntry::new(
                     "MND-1",
                     "2026-06-01".parse()?,
@@ -56,9 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )),
         )
         .add_group(
-            DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci)
+            DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, IsoDate::new(2026, 7, 18)?)
                 .sequence_type(SequenceType::Rcur)
-                .collection_date(IsoDate::new(2026, 7, 18)?)
                 .add_entry(DirectDebitEntry::new(
                     "MND-2",
                     "2024-06-01".parse()?,
@@ -85,8 +82,10 @@ before any XML exists, so a rejected run never reaches your bank.
 |---|---|---|
 | 📤 Send | `pain.001` | Credit transfer — SCT, SCT Instant, scheduled instant |
 | 📤 Send | `pain.008` | Direct debit — CORE and B2B |
-| 📤 Send | `pain.007` | Direct debit reversal |
+| 📤 Send | `pain.007` | Direct debit reversal — after settlement |
+| 📤 Send | `camt.055` | Payment cancellation request — a **recall**, before settlement |
 | 📥 Receive | `pain.002` | Status report, including Verification of Payee |
+| 📥 Receive | `camt.029` | Resolution of investigation — the answer to a recall |
 | 📥 Receive | `camt.052` | Intraday account report |
 | 📥 Receive | `camt.053` | End-of-day statement |
 | 📥 Receive | `camt.054` | Debit/credit notification and returns |

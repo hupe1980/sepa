@@ -1,7 +1,7 @@
 +++
 title = "Reversals"
-description = "Send a settled SEPA direct debit back with pain.007 in Rust. Covers the difference between a reversal, a refund and a reject, partial reversals, and why the original transaction reference is mandatory."
-weight = 4
+description = "Send a settled SEPA direct debit back with pain.007 in Rust: reversal versus refund versus reject, partial reversals and the mandatory OrgnlTxRef."
+weight = 5
 +++
 
 A **reversal** is you, the creditor, undoing a collection that already settled.
@@ -13,6 +13,11 @@ events people often confuse it with:
 | The collection never settled | The bank | `pain.002` with `RJCT` |
 | The debtor claims the money back | The debtor | `camt.054` return |
 | **You collected in error** | **You** | **`pain.007`** |
+
+A reversal is the *late* option. If the collection has not settled yet, a
+[recall](@/docs/recalls.md) — `camt.055` — asks the bank to stop it instead, and
+costs nothing. A recall refused with `ARDT` is the bank saying the window has
+closed and a reversal is what is left.
 
 Only `pain.007.001.09` is defined for SEPA, so there is no version to choose.
 
@@ -35,8 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 
     // The collection that went out last week.
-    let group = DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci)
-        .collection_date(IsoDate::new(2026, 7, 20)?);
+    let group = DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, IsoDate::new(2026, 7, 20)?);
     let entry = DirectDebitEntry::new(
         "MND-42",
         "2024-06-01".parse()?,
@@ -46,8 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "E2E-1",
     );
 
-    let xml = Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-        .msg_id("RVSL-2026-07-001")
+    let xml = Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-2026-07-001")
         .add_group(
             ReversalGroup::new("DD-2026-07-001")
                 .add_entry(ReversalEntry::reverse(&group, &entry, ReversalReason::Ms02)),
@@ -126,3 +129,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 uses. `AM05` covers a duplicate, `FRAD` a fraudulent original, `TECH` a
 technical fault. Unrecognised codes are carried through rather than rejected,
 because ISO revises the list quarterly.
+
+## See also
+
+- [Recalls](@/docs/recalls.md) — the earlier and cheaper option, before settlement
+- [Direct debits](@/docs/direct-debits.md) — the collection this undoes

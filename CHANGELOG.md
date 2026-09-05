@@ -30,7 +30,422 @@ While the crate is `0.x`:
 - A rise in the **minimum supported Rust version** is a minor bump, called out
   under its own heading.
 
-Pin `sepa = "0.6"` and treat a move to `0.7` as a deliberate migration.
+Pin `sepa = "0.7"` and treat a move to `0.8` as a deliberate migration.
+
+## [0.7.0]
+
+The largest revision since 0.4, and two bodies of work in one release.
+
+**Correctness and determinism.** One text field escaped the SEPA character set
+entirely, one comparison was chronologically wrong, one acceptance check
+accepted silence, one validator was **rejecting real BICs**, and the builders
+defaulted the two values that must never be defaulted.
+
+**The message set closed.** `camt.055` recalls and `camt.029` resolutions are
+the last message-level gap, and vendoring the camt schemas to gate them found a
+parser fixture that was not a valid document.
+
+**Breaking API changes with no deprecation path.**
+
+> **Migration in one line.** `MsgId` and the payment date move into the
+> constructors: `Pain001Builder::new(party, msg_id)`,
+> `Pain008Builder::new(party, msg_id)`,
+> `Pain007Builder::new(party, original_msg_id, msg_id)`,
+> `CreditTransferGroup::new(name, iban, execution)` and
+> `DirectDebitGroup::new(name, iban, creditor_id, collection_date)`. The
+> `.msg_id()`, `.execution_date()`, `.execution_at()` and `.collection_date()`
+> setters are gone — pass the value where the type now demands it. A camt
+> reader has three more: `from_date`, `to_date` and `created_at` are now
+> `*_raw` fields with typed accessors of the old names beside them.
+
+### Emitted output
+
+- **New on the wire:** `camt.055.001.05` payment cancellation requests.
+- `SchmeNm/Prtry` and a proprietary remittance `Issr` are now transliterated
+  under the default `CharsetPolicy`, where they were emitted verbatim. For input
+  that was already inside the SEPA character set, nothing changes.
+- Length limits are measured on the trimmed value — see
+  [Changed — emitted output](#changed--emitted-output) below.
+- Everything else is byte-identical to 0.6 for any input 0.6 accepted.
+
+### API
+
+Breaking, with no deprecation path — see the migration note above. Three error
+variants are added (`SchemaPattern`, `DateOrder`, `ConversionError`) and, since
+every error type is `#[non_exhaustive]`, no `match` breaks on them.
+
+### Added — camt.055 recall and camt.029 resolution
+
+The last message-level gap. `Camt055Builder` asks the bank to stop a submission
+before it settles; `parse_camt029` reads the answer. Both are XSD-validated in
+CI against the ISO originals the DFÜ-Abkommen names.
+
+Three cancellation scopes — the whole file, a whole `PmtInf`, or named
+transactions — and they are **alternatives**. The schema makes every part of
+`UnderlyingTransaction12` optional, so "cancel the whole message, and also
+specifically these two" validates cleanly and is not an instruction a bank can
+action; `build()` refuses the combination, and refuses a scope that names
+nothing at all.
+
+Three more rules the XSD does not carry:
+
+- A **reason is a constructor argument**. ISO types `CxlRsnInf` as optional; no
+  bank can act on a reasonless recall, so the reasonless form is not something
+  this crate can be asked to emit.
+- `CancellationReason5Code` is a **closed** enumeration, unlike the purpose code
+  lists. An unrecognised code in `Cd` is schema-*invalid*, not merely unknown,
+  so `CancellationReason::Other` writes to the `Prtry` branch instead.
+  `is_iso_code()` says which branch a value takes.
+- `CtrlData/NbOfTxs` counts what the *message* lists, so a whole-file or
+  whole-group recall writes no `CtrlData` rather than asserting a zero.
+
+`OriginalMessage::from_direct_debit` / `from_credit_transfer` take the
+**builder**, not the XML — every element the recall needs is already in it, and
+re-parsing a document to recall it would be reading back what the caller has.
+When the original pinned no `created_at`, `OrgnlCreDtTm` is omitted rather than
+stamped with "now": the element names the moment the original was created.
+
+On the reading side, `Camt029Document` repeats the pain.002 level structure and
+its failure mode. A refusal at message level carries **no transaction blocks at
+all**, so `is_accepted()` treats an empty document as *not* an acceptance and
+`rejection_reasons()` gathers all three levels. `PDCR` — pending — is neither
+outcome, and `is_final()` exists for that one code: posting it as accepted
+writes off money that is coming back, posting it as rejected collects twice.
+`RejectionReason::is_too_late` separates `ARDT` ("we could not — it settled,
+use pain.007") from `LEGL`/`CUST` ("we would not").
+
+Two builder accessors came with it, and are useful on their own:
+`Pain001Builder`/`Pain008Builder` now expose `message_id()`, `schema_version()`
+and `creation_timestamp()`.
+
+### Fixed — `validate_bic` rejected real BICs
+
+**ISO 9362:2022 §6.3.1 widened the business party prefix from four letters to
+four alphanumerics**, and SWIFT allocates BICs under it. `validate_bic`
+enforced `[A-Z]{6}` over the first six characters — the *pre-2019 ISO 20022*
+pattern, not the standard — so `E097AEXX` was refused. That is a loud failure at
+the caller with nothing the caller can do about it.
+
+Relaxing it alone would have been wrong in the other direction: `pain.008.001.02`
+and the three other pre-2019 schemas genuinely cannot hold such a BIC. So the
+two facts are now separate:
+
+- `validate_bic` enforces the current standard —
+  `[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?` plus a real country code.
+- `BicPattern` (`Alphanumeric` / `LettersOnly`) is the pattern a *schema* uses,
+  `Bic::fits(pattern)` asks whether a value satisfies it, and `build()` refuses
+  a mismatch with the new `ValidationError::SchemaPattern` — naming the XSD
+  pattern string, because two different ISO 20022 types are both called
+  `BICFIIdentifier` with different patterns.
+
+The element name is not the signal, which is what camt.055 proved:
+`pain.008.001.08` writes `BICFI` over the wide pattern, `pain.008.001.02` writes
+`BIC` over the narrow one, and `camt.055.001.05` writes `BICFI` over the
+**narrow** one. Each schema states both facts independently.
+
+### Fixed — a fixture that no bank would ever send
+
+camt was the only message family with no schema gate: every claim about the
+parsers rested on documents this repository had written. Five camt schemas are
+now vendored under the same digest enforcement as the ten pain ones, and the
+shared read-path fixtures go through `xmllint`.
+
+It paid for itself immediately. The camt.053 batch-booking fixture put `Amt`
+before `Refs` inside `TxDtls`, and `EntryTransaction10` sequences `Refs` first —
+so it had been standing in for a real statement for three releases while being
+a document no bank sends. Nothing was mis-parsed, because the parser is keyed by
+local name and does not care about order; but the evidence was not evidence.
+
+### Fixed — `ct_to_eur_str` and `ct_from_eur_str` disagreed about their range
+
+`ct_to_eur_str(i64::MIN)` printed `-92233720368547758.08` and
+`ct_from_eur_str` rejected that string as an overflow: the magnitude was built
+positive and negated afterwards, and `i64::MIN` has no positive counterpart. The
+parser now accumulates in the sign the input asked for and is exact over the
+whole `i64` range.
+
+That fix made `i64::MIN` *reachable* from a bank file, where every `.abs()` and
+unary `-` downstream would panic on it — so camt amounts are now normalised to a
+magnitude once, in `amount_of`, which returns `None` for a value with no
+magnitude in `i64`. `Camt053Statement::net_movement_ct` also stopped using
+`Iterator::sum`, which panics on overflow in a debug build; it saturates like
+its camt.052 and camt.054 counterparts always did.
+
+### Fixed — `ẞ` transliterated to lower case
+
+U+1E9E LATIN CAPITAL LETTER SHARP S shared an arm with `ß` under the German
+style and produced `ss`, so `STRAẞE` came out `STRAssE` on a statement. It is
+now `SS`. Under the EPC style it was falling through to the `.` fallback and
+losing the letter entirely — the character was encoded in Unicode 5.1, after
+EPC217-08 was drawn up, so the published table has no row for it; it now takes
+the upper case of what its lower-case counterpart maps to.
+
+### Fixed — a mandate could be signed after the collection it authorises
+
+`DtOfSgntr` later than `ReqdColltnDt` describes a collection taken on the
+authority of a mandate that did not yet exist. The debtor's bank answers `MD01`
+and charges a return fee. This needs no clock and no banking calendar — both
+values are in the document — and it is now
+`ValidationError::DateOrder`, naming both elements and both values.
+
+### Fixed — pain.007 accepted contradictory group identifiers
+
+Two `OrgnlPmtInfAndRvsl` blocks naming the same `OrgnlPmtInfId`, or sharing a
+`RvslPmtInfId`, left the reversal unattributable. Both are now
+`ValidationError::Duplicate`, which is the rule `PmtInfId` already had in
+pain.001 and pain.008.
+
+### Added — IBAN generation
+
+`iban_check_digits(country, bban)` and `Iban::from_bban(country, bban)` join
+`creditor_id_check_digits` and `RfReference::check_digits_for`; building an IBAN
+from a national bank code was the one check-digit scheme a caller still had to
+paste a snippet for. `from_bban` runs the result back through `validate_iban`,
+so the registry structure applies to a generated IBAN exactly as it does to a
+parsed one, and the two share one mod-97 fold so they cannot disagree about the
+arithmetic. Each of SWIFT's 78 published examples is now regenerated from its
+own BBAN as well as validated.
+
+### Added — the date interop the docs already promised
+
+`IsoDateTime` converted *from* `time::PrimitiveDateTime` and
+`chrono::NaiveDateTime` and back to neither, while the module documentation said
+both directions. All four now exist, plus `time::OffsetDateTime` and
+`chrono::DateTime<FixedOffset>` in both directions.
+
+The offset-carrying conversions are the ones with an opinion:
+`OffsetDateTime` and `DateTime` name an *instant*, and an `IsoDateTime` with no
+offset does not — so that direction returns the new `ConversionError::NoOffset`
+rather than assuming UTC. Same refusal `unix_seconds()` already made.
+
+### Changed — camt documents keep dates verbatim *and* typed
+
+`CashEntry::booking_date()` / `booking_date_raw` was the rule everywhere except
+the document and statement headers, which kept only the raw string. `from_date`,
+`to_date` and `created_at` on `Camt052Report`, `Camt053Statement`,
+`Camt054Notification` and the three documents are now `*_raw` fields with typed
+accessors of the old names beside them.
+
+### Fixed — a remittance issuer bypassed the character set and every length rule
+
+`RmtInf/Strd/CdtrRefInf/Tp/Issr` on the `RemittanceInfo::Proprietary` variant
+was neither validated nor put through the `CharsetPolicy`. Any text at all
+reached the wire: non-SEPA characters, and with no `Max35Text` bound — a
+115-character issuer full of umlauts built and emitted without complaint. It is
+now length-checked, charset-checked, and transliterated on write like every
+other string in the crate.
+
+The test that should have caught it could not: it asserted over a hand-written
+list of tags, and nobody added `Issr` to the list. It now walks **every text
+node** of a generated document, so the next element added to a writer is covered
+the day it is added.
+
+### Fixed — `Strd` overran the EPC's 140-character cap
+
+The EPC limits structured remittance information to 140 characters *including
+the XML tags*, which is why the block is emitted minified — and which nothing
+checked. A 35-character `Ref` beside a 35-character `Issr` is two legal fields
+and one illegal block. The limit is now enforced as
+`ValidationError::TooLong { field: "RmtInf/Strd", max: 140, .. }`, measured by
+rendering the block with the same function the writer uses, so what is checked
+is what is emitted. New `validate::MAX_STRUCTURED_REMITTANCE_LEN`.
+
+### Fixed — `IsoDateTime` compared as written fields, not as instants
+
+`Ord` was derived over `(date, hour, minute, second, offset)`, so
+`2026-07-20T13:00:00+02:00` — an hour *earlier* than `2026-07-20T12:00:00Z` —
+sorted after it. A sort of bank-supplied timestamps was silently wrong whenever
+offsets differed.
+
+`PartialOrd` and `Ord` are **removed**. An offset-less timestamp names no
+instant, so no total order over the type is correct, and one that is right for
+same-offset values and wrong for mixed ones is worse than none. Two new methods
+replace them:
+
+- `IsoDateTime::unix_seconds() -> Option<i64>` — `None` for exactly the values
+  that cannot be compared;
+- `IsoDateTime::to_utc() -> Option<Self>` — the same instant in the `Z` form.
+
+Equality stays on the written form, because a `CreDtTm` must reproduce the
+spelling it was given. `IsoDate` — which is what every SEPA *payment* date is —
+has no offset and keeps its full `Ord`.
+
+### Fixed — `is_fully_accepted` accepted a report that stated nothing
+
+0.6 made a report with no status at all not an acceptance. It did not go far
+enough: "a status was reported" counted an `OrgnlPmtInfAndSts` *block*, not an
+actual status, so a report carrying neither `PmtInfSts` nor `TxSts` came back
+fully accepted. It now requires a real status somewhere.
+
+### Fixed — a UTC offset beyond the `xs:dateTime` range parsed
+
+`IsoDateTime::parse` accepted offsets up to `±23:59`. `xs:dateTime` bounds them
+at `±14:00`; past that the tail is not a timezone, and reading it as one turned
+malformed input into a valid timestamp. It is now rejected.
+
+### Changed — API
+
+- **`MsgId` is a constructor argument.** The generated default was
+  `<prefix>-<epoch seconds>-<counter>`: unique within one process and worthless
+  outside it, because the only property a bank's duplicate detection needs is
+  surviving a restart. A value that looks like an identifier without being one is
+  worse than no value. `Pain001Builder::new`, `Pain008Builder::new` and
+  `Pain007Builder::new` now take it; the `.msg_id()` setters are gone.
+- **The payment date is a constructor argument.**
+  `CreditTransferGroup::new(name, iban, execution)` takes anything convertible
+  into an `ExecutionMoment` — an `IsoDate` for an ordinary transfer, an
+  `IsoDateTime` for a *terminierte Echtzeitüberweisung* — and
+  `DirectDebitGroup::new(name, iban, creditor_id, collection_date)` takes an
+  `IsoDate`. `.execution_date()`, `.execution_at()` and `.collection_date()` are
+  gone.
+
+  The old direct debit default was `IsoDate::today().plus_days(5)`, the SDD Core
+  pre-notification floor. Which day that should be depends on the scheme, the
+  sequence type, TARGET2 and the bank's cut-off — a banking-calendar question
+  this crate cannot answer and should not appear to. The credit transfer default
+  was "today", which is a different way of not answering it.
+- `IsoDate::today()` and `IsoDateTime::now()` remain, but **nothing in the crate
+  calls `today()` any more**. One implicit clock read is left: `GrpHdr/CreDtTm`,
+  which `created_at()` still overrides, so a submitted file regenerates
+  byte-for-byte.
+- `Party` identifiers: `SchmeNm/Prtry` is validated as a `Max35Text` scheme name
+  rather than as an EPC230-15 reference, so a slash in a scheme name is no
+  longer rejected — and it is now transliterated on write.
+
+### Changed — emitted output
+
+- A `Party`'s `SchmeNm/Prtry` and a proprietary remittance `Issr` are
+  transliterated under the default `CharsetPolicy`, where they were previously
+  emitted verbatim. For input the crate already accepted and that was already
+  inside the SEPA character set, nothing changes.
+- Length limits are measured on the trimmed value. Every ISO 20022 text type is
+  an `xs:string` with `whiteSpace="collapse"`, so the bank's parser strips
+  padding before applying the length facet; counting it here rejected values the
+  bank accepts.
+
+### Added — tests
+
+- **The exhaustive transliteration sweep the README already claimed.** All
+  1 112 064 Unicode scalar values through both styles, asserting the output is
+  SEPA-legal and non-empty. The existing full-range sweep only tested `is_sepa_char`
+  *membership*; the documented claim was stronger than the test.
+- Schema validation for a proprietary structured reference, against
+  `pain.001.001.09` and the GBIC 5 subset — the one remittance shape whose
+  `Issr` is caller text.
+- Regression tests naming each defect above.
+
+### Added — camt `Chrgs`: the return fee on a bounced collection
+
+`Chrgs` was parsed nowhere, at either level. For SEPA the case that matters is a
+**returned direct debit**: the collection comes back and the bank passes on a
+return fee, which is real money the creditor is out and which is reported beside
+the entry rather than inside its amount. A ledger built on this crate could not
+see it.
+
+- `CashEntry::charges` and `EntryDetail::charges`, both `Option<Charges>`.
+- `Charges` carries `TtlChrgsAndTaxAmt` and `0..n` `ChargeRecord`s, with
+  `total_signed_ct()` summing from the records — the level that has the
+  credit/debit indicator, since the total is a magnitude with no sign.
+- ISO reshaped the block: up to `.001.02` the charge sits directly under `Chrgs`
+  as an `Amt`/`CdtDbtInd` pair, and from `.001.04` it moved into `Rcrd` blocks.
+  Both are read, and the flat form is reported as a single record so callers
+  have one shape.
+- `ChargeRecord::included_in_amount` is an `Option<bool>`, not a `bool`.
+  `ChrgInclInd` is optional and "the bank did not say" is a third answer:
+  assuming *included* silently drops a fee, assuming *separate* silently
+  double-counts one. `Charges::all_included_in_amount()` is `false` unless every
+  record says so explicitly, so a caller that adds charges only when it is false
+  cannot double-count on a bank that omits the flag.
+- A charge with no `CdtDbtInd` is read as a debit — that is what a fee is, and
+  it is the direction that cannot inflate a balance if the assumption is wrong.
+
+### Added — a rejection now explains itself at whichever level it happened
+
+`StsRsnInf` was parsed on a transaction and nowhere else. A bank that refuses a
+**whole submission** — a duplicate `MsgId`, an unreadable document, an unknown
+Creditor Identifier — sends `GrpSts = RJCT` with the reason at group level and
+*no* payment-information or transaction blocks at all, so the only thing an
+operator could act on was discarded. The same held for a rejected `PmtInf`,
+where no transaction was reached either.
+
+- `Pain002Document::group_reason_codes` and `group_additional_info`
+  (`OrgnlGrpInfAndSts/StsRsnInf`).
+- `PaymentInfoStatus::reason_codes` and `additional_info`
+  (`OrgnlPmtInfAndSts/StsRsnInf`).
+- `Pain002Document::reason_codes()` gathers every reason at any level, most
+  general first — a rejection explains itself at exactly one level and which one
+  depends on how far the bank got, so walking a single level answers the
+  question only sometimes.
+
+An unrecognised but well-formed code is carried through as `ReasonCode::Other`
+rather than dropped: the reason an operator needs must not depend on whether the
+enum happens to know the code. The new fixture is itself validated against
+`pain.002.001.10.xsd`.
+
+### Added — one table for every `Max*Text` bound
+
+`validate::max_text_len(parent, element)` is the single place the ISO 20022
+length limits are written down, keyed by the element **and its parent** — which
+is what disambiguates the names ISO 20022 reuses: `SvcLvl/Cd` is a `Max4Text`
+external code, `LclInstrm/Cd` a `Max35Text`; a bare `Id` is a container,
+`Othr/Id` an identifier. `address` now derives its bounds from it instead of
+holding its own constants, and consumers can pre-check their data with the same
+numbers the builders enforce.
+
+The table is enforced for **completeness**, not only for correctness: a test
+walks every text node of a maximal pain.001, pain.008 and pain.007 and requires
+each element to be either in the table or on an explicit list of values bounded
+by their own type (`IBAN`, `BICFI`, dates, amounts, enumerated codes). An element
+added to a writer with no bound fails the build. That is the other half of the
+`Issr` defect class — the charset invariant was made document-wide in this same
+release; this makes the length invariant document-wide too.
+
+New `validate::MAX_CODE_LEN` (4) and `validate::MAX_BUILDING_LEN` (16).
+
+### Added — CI gates for fuzzing and vendored data
+
+- **The three fuzz targets run in CI** — 60 seconds each on every push, 600 on a
+  weekly schedule, with crash artefacts uploaded on failure. They were only ever
+  run by hand before. `build_batch` asserts an invariant rather than merely the
+  absence of a panic: any batch it *accepts* must produce a document whose every
+  text node is inside the SEPA character set.
+- **`scripts/check-vendored-data.sh`** re-derives the SHA-256 of all ten pinned
+  XSDs against the record in `tests/xsd/README.md`, and fails when a vendored
+  schema has **no** recorded digest. Three of the ten had none. A schema quietly
+  swapped for a defective mirror makes correct output look wrong — and the
+  natural reaction is to "fix" the writer, at which point the crate emits
+  genuinely invalid files with a green suite. `just verify-data` runs it
+  locally and it is part of `just ci`; `just verify-tables` adds the
+  reference-data conformance tests.
+
+### Documentation
+
+- The Extended Remittance Information option (EPC092-19) is named in the scope
+  table. It raises `Strd` from one 140-character block to 999 × 280, but binds
+  only PSPs that adhered to it separately, so sending an ERI-shaped message to
+  one that did not is a rejection. The base scheme is what every SEPA PSP takes.
+- `CreditTransferEntry::creditor_bic` claimed the writer emits `NOTPROVIDED`
+  when it is `None`. It omits `CdtrAgt` entirely, which is what the EPC
+  guidelines require and what `pain.001.003.03` makes structural; the
+  `NOTPROVIDED` form belongs to the mandatory `DbtrAgt`. A test had asserted the
+  correct behaviour for three releases while the documentation said the opposite.
+- The README's "all 1,114,112 Unicode code points" is 1 112 064 scalar values —
+  the difference is the surrogate range, which is not a `char`.
+- `CreditTransferGroup::category_purpose` said setting it excluded a
+  per-transaction category purpose. There is no per-transaction category purpose
+  in this crate, so the conflict is not expressible.
+- "Zero I/O" in the crate description is now "No I/O", with the one clock read
+  named where it happens.
+
+### Internal
+
+- `Pain001Builder::validate` and `Pain008Builder::validate` split into
+  `validate` / `validate_group` / `validate_entry`, so the two read the same way.
+- `Party::write_xml_inline`, so camt.055's `Assgnr`/`Assgne`/`Cretr` reuse the
+  one `PartyIdentification` writer rather than re-deriving what SEPA admits.
+- The two document-wide invariant walks (charset, `Max*Text`) and both fuzz
+  targets now cover camt.055 and camt.029.
+- `scripts/check-vendored-data.sh` reads `camt.*` digests as well as `pain.*`.
 
 ## [0.6.0]
 

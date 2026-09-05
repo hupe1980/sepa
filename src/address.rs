@@ -66,7 +66,7 @@
 //! ```
 
 use crate::country::is_country_code;
-use crate::validate::{CharsetPolicy, ValidationError, check_text};
+use crate::validate::{CharsetPolicy, ValidationError, check_text, max_text_len};
 use crate::xml_util::write_escaped;
 
 // ── limits ────────────────────────────────────────────────────────────────────
@@ -76,10 +76,6 @@ use crate::xml_util::write_escaped;
 /// The XSD allows seven; the EPC address guidance allows two, and a hybrid
 /// address is defined in terms of that pair.
 pub const MAX_ADDRESS_LINES: usize = 2;
-
-const MAX_70: usize = 70;
-const MAX_35: usize = 35;
-const MAX_16: usize = 16;
 
 // ── error ─────────────────────────────────────────────────────────────────────
 
@@ -323,22 +319,36 @@ impl PostalAddress {
     /// [`CharsetPolicy::Strict`].
     pub fn validate(&self, charset: CharsetPolicy) -> Result<(), ValidationError> {
         // Lengths are checked after transliteration, since `Straße` grows a
-        // character on its way to `Strasse`.
-        let check = |field: &'static str, value: &str, max: usize| -> Result<(), _> {
+        // character on its way to `Strasse`, and the bound comes from
+        // `max_text_len` rather than from a constant repeated here — one table,
+        // so a limit cannot be right in the validator and wrong in the docs.
+        let check = |element: &'static str, value: &str| -> Result<(), ValidationError> {
+            let field: &'static str = match element {
+                "Dept" => "PstlAdr/Dept",
+                "SubDept" => "PstlAdr/SubDept",
+                "StrtNm" => "PstlAdr/StrtNm",
+                "BldgNb" => "PstlAdr/BldgNb",
+                "PstCd" => "PstlAdr/PstCd",
+                "TwnNm" => "PstlAdr/TwnNm",
+                "CtrySubDvsn" => "PstlAdr/CtrySubDvsn",
+                _ => "PstlAdr/AdrLine",
+            };
+            let max =
+                max_text_len(Some("PstlAdr"), element).unwrap_or(crate::validate::MAX_NAME_LEN);
             check_text(field, &charset.apply(field, value)?, max)
         };
 
-        check("PstlAdr/TwnNm", &self.town_name, MAX_35)?;
-        for (field, value, max) in [
-            ("PstlAdr/Dept", &self.department, MAX_70),
-            ("PstlAdr/SubDept", &self.sub_department, MAX_70),
-            ("PstlAdr/StrtNm", &self.street, MAX_70),
-            ("PstlAdr/BldgNb", &self.building_number, MAX_16),
-            ("PstlAdr/PstCd", &self.post_code, MAX_16),
-            ("PstlAdr/CtrySubDvsn", &self.country_subdivision, MAX_35),
+        check("TwnNm", &self.town_name)?;
+        for (element, value) in [
+            ("Dept", &self.department),
+            ("SubDept", &self.sub_department),
+            ("StrtNm", &self.street),
+            ("BldgNb", &self.building_number),
+            ("PstCd", &self.post_code),
+            ("CtrySubDvsn", &self.country_subdivision),
         ] {
             if let Some(value) = value {
-                check(field, value, max)?;
+                check(element, value)?;
             }
         }
 
@@ -350,7 +360,7 @@ impl PostalAddress {
             });
         }
         for line in &self.lines {
-            check("PstlAdr/AdrLine", line, MAX_70)?;
+            check("AdrLine", line)?;
         }
         Ok(())
     }

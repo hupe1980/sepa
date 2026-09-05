@@ -1,7 +1,7 @@
 +++
 title = "Bank statements"
-description = "Parse camt.052, camt.053 and camt.054 bank statements in Rust. Covers batch bookings, reconciling a collection run against your own file, returns, and typed booking dates."
-weight = 6
+description = "Parse camt.052, camt.053 and camt.054 statements in Rust: batch bookings, matching a collection run back to your file, returns and return fees."
+weight = 8
 +++
 
 The three camt messages describe the same thing — movements on an account — and
@@ -126,6 +126,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `is_return()` on an entry checks **every** detail, so a single returned
 collection inside an otherwise-fine batch is still reported.
+
+### The return fee
+
+A return costs the creditor money, and the fee is reported in `Chrgs` rather
+than inside the entry amount. It appears on the entry or on the transaction
+detail depending on the bank, so read both:
+
+```rust
+use sepa::parse_camt053;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S</Id>
+    <Ntry><Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+      <Chrgs><Rcrd><Amt Ccy="EUR">3.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+             <ChrgInclInd>false</ChrgInclInd></Rcrd></Chrgs>
+    </Ntry>
+  </Stmt></BkToCstmrStmt>
+</Document>"#;
+
+    let entry = &parse_camt053(xml)?.statements[0].entries[0];
+    if let Some(charges) = &entry.charges {
+        // Negative: a fee is money out.
+        assert_eq!(charges.total_signed_ct(), Some(-300));
+        // Stated as *not* already inside the entry amount, so a ledger posts it
+        // in addition to the 75.00.
+        assert!(!charges.all_included_in_amount());
+    }
+    Ok(())
+}
+```
+
+`ChrgInclInd` is optional, and "the bank did not say" is a third answer rather
+than a default. `included_in_amount` is therefore an `Option<bool>`, and
+`all_included_in_amount()` is `false` unless **every** record says so
+explicitly — so a caller that adds charges only when it is false cannot
+double-count against a bank that omits the flag. A charge with no `CdtDbtInd` is
+read as a debit: that is what a fee is, and it is the direction that cannot
+inflate a balance if the assumption is wrong.
+
+ISO reshaped this block across versions — up to `.001.02` the charge sits
+directly under `Chrgs`, and from `.001.04` it moved into `Rcrd` blocks. Both are
+read, and the flat form is reported as a single record so there is one shape to
+handle.
 
 ## Dates and raw values
 

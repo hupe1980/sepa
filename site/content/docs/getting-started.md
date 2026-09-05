@@ -1,6 +1,6 @@
 +++
 title = "Getting started"
-description = "Install the sepa crate, validate an IBAN, and build your first SEPA credit transfer and direct debit file in Rust. Covers feature flags and the shape of a pain message."
+description = "Install the sepa crate, validate an IBAN, and build your first SEPA credit transfer and direct debit file in Rust. Feature flags and message shape."
 weight = 1
 +++
 
@@ -83,11 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("DE89370400440532013000")?;
     let creditor = validate_iban("NL91ABNA0417164300")?;
 
-    let xml = Pain001Builder::new("Acme GmbH")
-        .msg_id("CT-2026-07-001")
+    let xml = Pain001Builder::new("Acme GmbH", "CT-2026-07-001")
         .add_group(
-            CreditTransferGroup::new("Acme GmbH", &debtor)
-                .execution_date(IsoDate::new(2026, 7, 20)?)
+            CreditTransferGroup::new("Acme GmbH", &debtor, IsoDate::new(2026, 7, 20)?)
                 .add_entry(
                     CreditTransferEntry::new("Supplier AG", creditor, 12_000, "INV-2026-001")
                         .with_description("Rechnung 2026-07"),
@@ -100,10 +98,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Two things to notice. `12_000` is **cents** — every amount in the crate is an
+Three things to notice. `12_000` is **cents** — every amount in the crate is an
 `i64` in the currency's minor unit, so no `f64` rounding can reach a payment.
-And `IsoDate::new` returns a `Result`: an impossible date is rejected where it
-is written rather than by the bank days later.
+`IsoDate::new` returns a `Result`: an impossible date is rejected where it is
+written rather than by the bank days later.
+
+And the message id and the execution date are **arguments, not defaults**.
+Earlier versions filled both in from the system clock, and both defaults were
+wrong in a way you only find out about in production:
+
+- `MsgId` is the key a bank de-duplicates submissions by. A generated one does
+  not survive a restart — which is the only property duplicate detection needs —
+  and two files built in the same second shared it. Take it from your own
+  persistent sequence.
+- `ReqdExctnDt` and `ReqdColltnDt` are the day money moves. The old direct debit
+  default was "today plus five", the SDD Core pre-notification floor; which day
+  that should actually be depends on the scheme, the sequence type, TARGET2 and
+  your bank's cut-off. `IsoDate::plus_days` is calendar arithmetic and says so —
+  the banking calendar is yours.
+
+The one value still taken from the clock is `GrpHdr/CreDtTm`. Pin it with
+`.created_at(…)` and the same input regenerates the same bytes, which is what an
+audit of a submitted file needs.
 
 ## Writing large files
 
@@ -125,6 +141,7 @@ fn write_batch(builder: &Pain008Builder) -> Result<(), Box<dyn std::error::Error
 
 ## Next
 
+- [IBAN, BIC & identifiers](/docs/identifiers/) — what the checksums do and do not catch
 - [Credit transfers](/docs/credit-transfers/) — SCT, instant, scheduled instant
 - [Direct debits](/docs/direct-debits/) — mandates, sequence types, CORE and B2B
 - [Validation rules](/docs/validation/) — what banks reject that the XSD allows

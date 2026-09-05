@@ -517,6 +517,31 @@ pub struct StatusCount {
     pub total_ct: Option<i64>,
 }
 
+/// `StsRsnInf` — the reason codes and free text explaining a status.
+///
+/// Applies at all three levels. `Rsn` is a choice between a typed `Cd` and a
+/// bank-proprietary `Prtry`, and each block is inspected separately so a
+/// proprietary code in a later block is not masked by a typed one in an earlier
+/// block. `AddtlInf` is unbounded and every occurrence matters — a legal notice
+/// spans lines, and a Verification of Payee close match returns the payee's real
+/// name here.
+fn parse_status_reasons(block: &Node) -> (Vec<ReasonCode>, Vec<String>) {
+    let mut codes = Vec::new();
+    let mut info: Vec<String> = Vec::new();
+    for rsn_block in block.children_named("StsRsnInf") {
+        if let Some(code) = rsn_block.child("Rsn").and_then(Node::code) {
+            codes.push(ReasonCode::from_code(code));
+        }
+        info.extend(
+            rsn_block
+                .children_named("AddtlInf")
+                .map(|n| n.text.clone())
+                .filter(|t| !t.is_empty()),
+        );
+    }
+    (codes, info)
+}
+
 fn parse_status_counts(block: &Node) -> Vec<StatusCount> {
     block
         .children_named("NbOfTxsPerSts")
@@ -600,6 +625,14 @@ pub struct PaymentInfoStatus {
     pub original_payment_info_id: Option<String>,
     /// Payment-information-level status, if present.
     pub status: Option<PaymentStatus>,
+    /// Why this whole group carries that status (`StsRsnInf/Rsn`).
+    ///
+    /// When a bank rejects an entire `PmtInf` — a duplicate `PmtInfId`, a
+    /// creditor identifier it does not recognise — the reason is here and not
+    /// on any transaction, because no transaction was reached.
+    pub reason_codes: Vec<ReasonCode>,
+    /// `StsRsnInf/AddtlInf` at group level, in document order.
+    pub additional_info: Vec<String>,
     /// `NbOfTxsPerSts` — how many transactions carry each status.
     pub status_counts: Vec<StatusCount>,
     /// Per-transaction statuses within this payment info block.
@@ -667,6 +700,16 @@ pub struct Pain002Document {
     pub original_msg_type: Option<OriginalMessageType>,
     /// Group-level status, if present in `OrgnlGrpInfAndSts/GrpSts`.
     pub group_status: Option<PaymentStatus>,
+    /// Why the whole file carries that status (`OrgnlGrpInfAndSts/StsRsnInf`).
+    ///
+    /// This is the only place a reason appears when a bank rejects a submission
+    /// outright — a malformed document, an unknown Creditor Identifier, a
+    /// duplicate `MsgId`. There are no payment-information or transaction
+    /// blocks in that case, so a reader that only looks at those sees a
+    /// rejection with no explanation.
+    pub group_reason_codes: Vec<ReasonCode>,
+    /// `OrgnlGrpInfAndSts/StsRsnInf/AddtlInf`, in document order.
+    pub group_additional_info: Vec<String>,
     /// `OrgnlGrpInfAndSts/NbOfTxsPerSts` — file-wide counts per status.
     pub group_status_counts: Vec<StatusCount>,
     /// Per-payment-info statuses (one per `<PmtInf>` in the original message).
@@ -674,6 +717,49 @@ pub struct Pain002Document {
 }
 
 impl Pain002Document {
+    /// Every reason code the report carries, at any level, most general first.
+    ///
+    /// A rejection explains itself at exactly one level, and which one depends
+    /// on how far the bank got: an unreadable document or a duplicate `MsgId`
+    /// is refused at group level with no payment-information blocks at all, a
+    /// rejected `PmtInf` explains itself there, and a single failed collection
+    /// explains itself on its transaction. Walking one level answers the
+    /// question only sometimes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::parse_pain002;
+    ///
+    /// // A whole file refused: there are no transaction blocks to inspect.
+    /// let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+    /// <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+    ///  <CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId></GrpHdr>
+    ///   <OrgnlGrpInfAndSts>
+    ///     <OrgnlMsgId>DD-1</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+    ///     <GrpSts>RJCT</GrpSts>
+    ///     <StsRsnInf><Rsn><Cd>DUPL</Cd></Rsn><AddtlInf>MsgId already received</AddtlInf></StsRsnInf>
+    ///   </OrgnlGrpInfAndSts>
+    ///  </CstmrPmtStsRpt></Document>"#;
+    ///
+    /// let doc = parse_pain002(xml)?;
+    /// assert!(!doc.is_fully_accepted());
+    /// assert_eq!(doc.reason_codes().len(), 1);
+    /// assert_eq!(doc.group_additional_info, ["MsgId already received"]);
+    /// # Ok::<(), sepa::Pain002ParseError>(())
+    /// ```
+    #[must_use]
+    pub fn reason_codes(&self) -> Vec<&ReasonCode> {
+        let mut out: Vec<&ReasonCode> = self.group_reason_codes.iter().collect();
+        for block in &self.payment_info_statuses {
+            out.extend(block.reason_codes.iter());
+            for tx in &block.transactions {
+                out.extend(tx.reason_codes.iter());
+            }
+        }
+        out
+    }
+
     /// `true` if the entire batch was accepted (any accepted group status + no rejections).
     ///
     /// Note: `ACTC` means "technically validated" (format OK) but the payment is
@@ -681,7 +767,15 @@ impl Pain002Document {
     /// on [`group_status`](Self::group_status) if you need to wait for a terminal state.
     #[must_use]
     pub fn is_fully_accepted(&self) -> bool {
-        let reported = self.group_status.is_some() || !self.payment_info_statuses.is_empty();
+        // "At least one status was reported" means an actual status somewhere,
+        // not merely a block that could have carried one. A `pain.002` whose
+        // `OrgnlPmtInfAndSts` states no `PmtInfSts` and no `TxSts` reports
+        // nothing, and reporting nothing is not an acceptance.
+        let reported = self.group_status.is_some()
+            || self
+                .payment_info_statuses
+                .iter()
+                .any(|p| p.status.is_some() || p.transactions.iter().any(|t| t.status.is_some()));
         reported
             && self
                 .group_status
@@ -800,6 +894,7 @@ pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
         .map(OriginalMessageType::from_msg_name_id);
 
     let group_status = orig_grp.text_of("GrpSts").map(PaymentStatus::from_code);
+    let (group_reason_codes, group_additional_info) = parse_status_reasons(orig_grp);
     let group_status_counts = parse_status_counts(orig_grp);
 
     let payment_info_statuses = root
@@ -815,6 +910,8 @@ pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
         original_msg_id,
         original_msg_type,
         group_status,
+        group_reason_codes,
+        group_additional_info,
         group_status_counts,
         payment_info_statuses,
     })
@@ -827,12 +924,15 @@ fn bic_of_agent(agent: &Node) -> Option<&str> {
 }
 
 fn parse_payment_info_status(block: &Node) -> PaymentInfoStatus {
+    let (reason_codes, additional_info) = parse_status_reasons(block);
     PaymentInfoStatus {
         // Mandatory in the schema, so `None` means the bank sent a malformed
         // block. Reported as absent rather than substituted: `"NOTPROVIDED"` is
         // a legal `PmtInfId`, and inventing it here could match a real group.
         original_payment_info_id: block.text_of("OrgnlPmtInfId").map(str::to_owned),
         status: block.text_of("PmtInfSts").map(PaymentStatus::from_code),
+        reason_codes,
+        additional_info,
         status_counts: parse_status_counts(block),
         transactions: block
             .children_named("TxInfAndSts")
@@ -850,25 +950,7 @@ fn parse_transaction_status(tx: &Node) -> TransactionStatus {
     let original_instruction_id = tx.text_of("OrgnlInstrId").map(str::to_owned);
     let status = tx.text_of("TxSts").map(PaymentStatus::from_code);
 
-    // One reason code per StsRsnInf block. `Rsn` is a choice between a typed
-    // `Cd` and a bank-proprietary `Prtry`; each block is inspected separately so
-    // a proprietary code in a later block is not masked by a typed code in an
-    // earlier one.
-    let mut reason_codes = Vec::new();
-    let mut additional_info: Vec<String> = Vec::new();
-    for rsn_block in tx.children_named("StsRsnInf") {
-        if let Some(code) = rsn_block.child("Rsn").and_then(Node::code) {
-            reason_codes.push(ReasonCode::from_code(code));
-        }
-        // `AddtlInf` is unbounded and every occurrence matters — a legal notice
-        // spans lines, and a VoP close match returns the payee's real name here.
-        additional_info.extend(
-            rsn_block
-                .children_named("AddtlInf")
-                .map(|n| n.text.clone())
-                .filter(|t| !t.is_empty()),
-        );
-    }
+    let (reason_codes, additional_info) = parse_status_reasons(tx);
 
     let orig_tx_ref = tx.child("OrgnlTxRef");
 
@@ -912,6 +994,90 @@ fn parse_transaction_status(tx: &Node) -> TransactionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejection_explains_itself_at_whichever_level_it_happened() {
+        // Regression: `StsRsnInf` was parsed on a transaction and nowhere else.
+        // A file refused outright has no transaction blocks at all, so its
+        // reason — the only thing an operator can act on — was discarded; and a
+        // rejected `PmtInf` explained itself to nobody either.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+ <CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId></GrpHdr>
+  <OrgnlGrpInfAndSts>
+    <OrgnlMsgId>DD-1</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+    <GrpSts>RJCT</GrpSts>
+    <StsRsnInf><Rsn><Cd>DUPL</Cd></Rsn>
+      <AddtlInf>MsgId already received</AddtlInf>
+      <AddtlInf>on 2026-07-19</AddtlInf></StsRsnInf>
+  </OrgnlGrpInfAndSts>
+ </CstmrPmtStsRpt></Document>"#;
+        let doc = parse_pain002(xml).unwrap();
+        assert_eq!(doc.group_status, Some(PaymentStatus::Rjct));
+        // `DUPL` is not one of the codes this crate enumerates, and is carried
+        // through rather than dropped — the reason an operator needs must not
+        // depend on whether the enum happens to know the code.
+        assert_eq!(
+            doc.group_reason_codes,
+            [ReasonCode::Other("DUPL".to_owned())]
+        );
+        assert_eq!(
+            doc.group_additional_info,
+            ["MsgId already received", "on 2026-07-19"]
+        );
+        assert_eq!(doc.reason_codes(), [&ReasonCode::Other("DUPL".to_owned())]);
+        assert!(!doc.is_fully_accepted());
+
+        // The same at payment-information level, where no transaction was
+        // reached either.
+        let group = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+ <CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId></GrpHdr>
+  <OrgnlGrpInfAndSts>
+    <OrgnlMsgId>DD-1</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+    <GrpSts>PART</GrpSts>
+  </OrgnlGrpInfAndSts>
+  <OrgnlPmtInfAndSts>
+    <OrgnlPmtInfId>PMT-1</OrgnlPmtInfId><PmtInfSts>RJCT</PmtInfSts>
+    <StsRsnInf><Rsn><Prtry>AC01-DE</Prtry></Rsn>
+      <AddtlInf>Creditor identifier unknown</AddtlInf></StsRsnInf>
+  </OrgnlPmtInfAndSts>
+ </CstmrPmtStsRpt></Document>"#;
+        let doc = parse_pain002(group).unwrap();
+        let block = &doc.payment_info_statuses[0];
+        assert_eq!(block.status, Some(PaymentStatus::Rjct));
+        assert_eq!(
+            block.reason_codes,
+            [ReasonCode::Other("AC01-DE".to_owned())]
+        );
+        assert_eq!(block.additional_info, ["Creditor identifier unknown"]);
+        assert_eq!(doc.reason_codes().len(), 1);
+    }
+
+    #[test]
+    fn a_report_that_states_no_status_is_not_an_acceptance() {
+        // Regression: `reported` counted an `OrgnlPmtInfAndSts` *block*, not an
+        // actual status, so a report carrying neither `PmtInfSts` nor `TxSts`
+        // came back fully accepted — the exact silence the check exists to
+        // catch.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+ <CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId></GrpHdr>
+  <OrgnlGrpInfAndSts><OrgnlMsgId>X</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId></OrgnlGrpInfAndSts>
+  <OrgnlPmtInfAndSts><OrgnlPmtInfId>P1</OrgnlPmtInfId></OrgnlPmtInfAndSts>
+ </CstmrPmtStsRpt></Document>"#;
+        let doc = parse_pain002(xml).unwrap();
+        assert_eq!(doc.group_status, None);
+        assert_eq!(doc.payment_info_statuses.len(), 1);
+        assert!(!doc.is_fully_accepted());
+
+        // One real status, and it is an acceptance again.
+        let accepted = xml.replace(
+            "<OrgnlPmtInfId>P1</OrgnlPmtInfId>",
+            "<OrgnlPmtInfId>P1</OrgnlPmtInfId><PmtInfSts>ACCP</PmtInfSts>",
+        );
+        assert!(parse_pain002(&accepted).unwrap().is_fully_accepted());
+    }
 
     const PAIN002_ACTC: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.003.03">

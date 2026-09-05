@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/sepa"
 title = "sepa — SEPA payments for Rust"
-description = "Build and parse SEPA payment files in Rust. IBAN and BIC validation, pain.001 credit transfers, pain.008 direct debits, pain.007 reversals, pain.002 status reports with Verification of Payee, and camt.05x bank statements. Zero I/O, no f64, XSD-validated."
+description = "Build and parse SEPA payment files in Rust: IBAN and BIC validation, pain.001, pain.008, pain.007, pain.002 and camt.05x. No f64, XSD-validated."
 
 default_language = "en"
 compile_sass = false
@@ -29,6 +29,3 @@ dark_theme = "github-dark-default"
 repo = "https://github.com/hupe1980/sepa"
 crate_url = "https://crates.io/crates/sepa"
 api_url = "https://docs.rs/sepa"
-# Shown in the hero and the install snippet.
-crate_version = "0.6"
-og_image = "og.png"

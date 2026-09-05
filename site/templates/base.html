@@ -3,38 +3,59 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#1c5d99">
+<link rel="preconnect" href="https://img.shields.io" crossorigin>
 
-{%- if page is defined -%}
+{%- set is_home = current_path == "/" -%}
+{#- The home page's own title already names the crate; appending the brand a
+    second time is what produced "sepa — … — sepa" in og:title. One title is
+    derived here and used by <title>, og:title and twitter:title alike, so the
+    three cannot disagree. -#}
+{%- if is_home -%}
+  {%- set page_title = config.title -%}
+  {%- set page_desc = section.description | default(value=config.description) -%}
+{%- elif page is defined -%}
   {%- set page_title = page.title ~ " — sepa" -%}
-  {%- set page_desc = page.description -%}
+  {%- set page_desc = page.description | default(value=config.description) -%}
 {%- elif section is defined and section.title -%}
   {%- set page_title = section.title ~ " — sepa" -%}
-  {%- set page_desc = section.description -%}
+  {%- set page_desc = section.description | default(value=config.description) -%}
 {%- else -%}
   {%- set page_title = config.title -%}
   {%- set page_desc = config.description -%}
 {%- endif -%}
-{%- set is_home = current_path == "/" -%}
 {%- set canonical = current_url -%}
 
-<title>{% if is_home %}{{ config.title }}{% else %}{{ page_title }}{% endif %}</title>
+<title>{{ page_title }}</title>
 <meta name="description" content="{{ page_desc }}">
+{%- if canonical %}
 <link rel="canonical" href="{{ canonical | safe }}">
+{%- endif %}
+
+{% block robots %}{% endblock %}
 
 <meta property="og:type" content="{% block og_type %}website{% endblock %}">
 <meta property="og:site_name" content="sepa">
+<meta property="og:locale" content="en">
 <meta property="og:title" content="{{ page_title }}">
 <meta property="og:description" content="{{ page_desc }}">
+{%- if canonical %}
 <meta property="og:url" content="{{ canonical | safe }}">
+{%- endif %}
 <meta property="og:image" content="{{ get_url(path='og.png') | safe }}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="sepa — SEPA payment utilities for Rust">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{ page_title }}">
 <meta name="twitter:description" content="{{ page_desc }}">
 <meta name="twitter:image" content="{{ get_url(path='og.png') | safe }}">
+<meta name="twitter:image:alt" content="sepa — SEPA payment utilities for Rust">
 
 <link rel="icon" href="{{ get_url(path='favicon.svg') | safe }}" type="image/svg+xml">
 <link rel="stylesheet" href="{{ get_url(path='style.css') | safe }}">
-<link rel="alternate" type="application/xml" href="{{ get_url(path='sitemap.xml') | safe }}">
 
 <script type="application/ld+json">
 {% if is_home %}
@@ -47,12 +68,20 @@
  "author":{"@type":"Person","name":"hupe1980"},
  "keywords":"SEPA, ISO 20022, IBAN, BIC, pain.001, pain.008, pain.007, pain.002, camt.053, Rust"}
 {% else %}
-{"@context":"https://schema.org","@type":"TechArticle",
- "headline":{{ page_title | json_encode | safe }},
- "description":{{ page_desc | json_encode | safe }},
- "url":{{ canonical | json_encode | safe }},"inLanguage":"en",
- "isPartOf":{"@type":"WebSite","name":"sepa","url":{{ config.base_url | json_encode | safe }}},
- "author":{"@type":"Person","name":"hupe1980"}}
+{"@context":"https://schema.org","@graph":[
+ {"@type":"TechArticle",
+  "headline":{{ page_title | json_encode | safe }},
+  "description":{{ page_desc | json_encode | safe }},
+  "url":{{ canonical | json_encode | safe }},"inLanguage":"en",
+  "proficiencyLevel":"Expert",
+  "isPartOf":{"@type":"WebSite","name":"sepa","url":{{ config.base_url | json_encode | safe }}},
+  "author":{"@type":"Person","name":"hupe1980"}},
+ {"@type":"BreadcrumbList","itemListElement":[
+  {"@type":"ListItem","position":1,"name":"sepa","item":{{ config.base_url | json_encode | safe }}},
+  {"@type":"ListItem","position":2,"name":"Documentation","item":{{ get_url(path='@/docs/_index.md') | json_encode | safe }}}
+  {%- if page is defined %},
+  {"@type":"ListItem","position":3,"name":{{ page.title | json_encode | safe }},"item":{{ canonical | json_encode | safe }}}
+  {%- endif %}]}]}
 {% endif %}
 </script>
 {% block extra_head %}{% endblock %}

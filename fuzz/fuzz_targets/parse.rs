@@ -36,6 +36,25 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
+    // camt.029 answers a recall, so every accessor a consumer reaches for
+    // before deciding whether money is coming back must survive junk too.
+    if let Ok(doc) = sepa::parse_camt029(xml) {
+        let _ = doc.is_accepted();
+        let _ = doc.has_rejections();
+        let _ = doc.is_final();
+        let _ = doc.rejection_reasons();
+        for tx in doc.transactions() {
+            let _ = (tx.is_accepted(), tx.is_rejected());
+            let _ = tx.original_execution_date();
+            let _ = tx.original_collection_date();
+        }
+        for group in &doc.groups {
+            let _ = group.all_transactions().count();
+            for p in &group.payment_infos {
+                let _ = p.has_rejections();
+            }
+        }
+    }
     let _ = sepa::parse_camt052(xml);
     let _ = sepa::parse_camt053(xml);
     let _ = sepa::parse_camt054(xml);

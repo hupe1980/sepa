@@ -65,12 +65,10 @@
 //!
 //! let collect = IsoDate::new(2026, 7, 20)?;
 //!
-//! let xml = Pain008Builder::new("Creditor GmbH")
-//!     .msg_id("BATCH-2026-07-001")
+//! let xml = Pain008Builder::new("Creditor GmbH", "BATCH-2026-07-001")
 //!     .add_group(
-//!         DirectDebitGroup::new("Creditor GmbH", &creditor, &ci)
+//!         DirectDebitGroup::new("Creditor GmbH", &creditor, &ci, collect)
 //!             .sequence_type(SequenceType::Rcur)
-//!             .collection_date(collect)
 //!             .creditor_bic("COBADEFFXXX".parse()?)
 //!             .add_entry(
 //!                 DirectDebitEntry::new(
@@ -82,9 +80,8 @@
 //!     )
 //!     // A B2B collection in the same file, as its own group.
 //!     .add_group(
-//!         DirectDebitGroup::new("Creditor GmbH", &creditor, &ci)
+//!         DirectDebitGroup::new("Creditor GmbH", &creditor, &ci, collect)
 //!             .scheme(DirectDebitScheme::B2b)
-//!             .collection_date(collect)
 //!             .add_entry(DirectDebitEntry::new(
 //!                 "MND-B2B-001", "2024-01-01".parse()?, "Corporate AG",
 //!                 debtor, 50_000, "INV-001",
@@ -101,6 +98,7 @@
 use std::str::FromStr;
 
 use crate::address::PostalAddress;
+use crate::bic::BicPattern;
 use crate::creditor_id::CreditorId;
 use crate::date::IsoDate;
 use crate::party::Party;
@@ -199,7 +197,26 @@ impl DirectDebitSchema {
         !matches!(self, Self::DkV2_7)
     }
 
-    /// The element name carrying an agent's BIC (`BIC` before the 2019 rename).
+    /// Which character pattern this schema constrains agent BICs to.
+    ///
+    /// A BIC that only the wider pattern admits — one with a digit in its
+    /// business party prefix, legal since ISO 9362:2022 — is rejected by
+    /// `build()` here rather than written into a schema that cannot hold it.
+    /// See [`BicPattern`].
+    #[must_use]
+    pub const fn bic_pattern(self) -> BicPattern {
+        match self {
+            Self::IsoV8 => BicPattern::Alphanumeric,
+            Self::IsoV2 | Self::DkV2_7 => BicPattern::LettersOnly,
+        }
+    }
+
+    /// The element name carrying an agent's BIC.
+    ///
+    /// ISO renamed `BIC` to `BICFI` in the 2019 maintenance release. That is a
+    /// *separate* fact from [`bic_pattern`](Self::bic_pattern) — `camt.055`
+    /// pairs the new name with the old pattern — so the two are read from the
+    /// schema independently rather than derived from one another.
     #[must_use]
     const fn bic_element(self) -> &'static str {
         match self {
@@ -602,7 +619,12 @@ pub struct DirectDebitEntry {
     pub debtor_name: String,
     /// Debtor's IBAN (validated).
     pub debtor_iban: Iban,
-    /// Debtor's BIC. Uses `NOTPROVIDED` in XML when `None` (EPC allowance).
+    /// Debtor's BIC (`DbtrAgt`).
+    ///
+    /// `DbtrAgt` is mandatory, so when this is `None` the EPC "IBAN only" form
+    /// is emitted: `<DbtrAgt><FinInstnId><Othr><Id>NOTPROVIDED</Id></Othr>…`.
+    /// That placeholder is never written into a `BIC`/`BICFI` element, where a
+    /// bank would read it as an institution.
     pub debtor_bic: Option<Bic>,
     /// Debtor's postal address (`Dbtr/PstlAdr`).
     pub debtor_address: Option<PostalAddress>,
@@ -779,9 +801,8 @@ impl DirectDebitEntry {
 /// let iban = validate_iban("DE89370400440532013000")?;
 /// let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 ///
-/// let first = DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
+/// let first = DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, IsoDate::new(2026, 7, 20)?)
 ///     .sequence_type(SequenceType::Frst)
-///     .collection_date(IsoDate::new(2026, 7, 20)?)
 ///     .add_entry(DirectDebitEntry::new(
 ///         "MND-1", "2026-06-01".parse()?, "Neu Kunde", iban.clone(), 5_000, "E2E-1",
 ///     ));
@@ -816,10 +837,18 @@ impl DirectDebitGroup {
     /// one. It is borrowed, like the IBAN beside it: a collection run building
     /// one group per sequence type reuses the same creditor identity for all of
     /// them.
+    ///
+    /// `collection_date` is required for the same reason `ReqdExctnDt` is on a
+    /// credit transfer: `ReqdColltnDt` is the day money leaves somebody else's
+    /// account. It used to default to five days out — the SDD Core
+    /// pre-notification floor — which is a banking-calendar answer this crate
+    /// cannot give: it depends on the scheme, the sequence type, the system
+    /// clock and TARGET2. Compute it against your own calendar and pass it in.
     pub fn new(
         creditor_name: impl Into<String>,
         creditor_iban: &Iban,
         creditor_id: &CreditorId,
+        collection_date: IsoDate,
     ) -> Self {
         Self {
             payment_info_id: None,
@@ -830,7 +859,7 @@ impl DirectDebitGroup {
             creditor_id: creditor_id.clone(),
             sequence_type: SequenceType::Rcur,
             scheme: DirectDebitScheme::Core,
-            collection_date: default_collection_date(),
+            collection_date,
             batch_booking: None,
             category_purpose: None,
             ultimate_creditor: None,
@@ -859,16 +888,6 @@ impl DirectDebitGroup {
     #[must_use]
     pub fn scheme(mut self, scheme: DirectDebitScheme) -> Self {
         self.scheme = scheme;
-        self
-    }
-
-    /// Set the requested collection date (`ReqdColltnDt`).
-    ///
-    /// Defaults to five days out, the SDD Core pre-notification floor for a
-    /// first or one-off collection.
-    #[must_use]
-    pub fn collection_date(mut self, date: IsoDate) -> Self {
-        self.collection_date = date;
         self
     }
 
@@ -970,11 +989,16 @@ pub struct Pain008Builder {
 }
 
 impl Pain008Builder {
-    /// A new message initiated by `initiating_party`.
-    pub fn new(initiating_party: impl Into<String>) -> Self {
+    /// A new message initiated by `initiating_party`, identified by `msg_id`.
+    ///
+    /// `MsgId` is how a bank de-duplicates submissions: two files sharing one
+    /// are a duplicate, and the second is rejected — or, worse, accepted and
+    /// silently discarded. It is therefore required, and must come from a
+    /// sequence that survives a restart.
+    pub fn new(initiating_party: impl Into<String>, msg_id: impl Into<String>) -> Self {
         Self {
             initiating_party: initiating_party.into(),
-            msg_id: default_msg_id("sepa"),
+            msg_id: msg_id.into(),
             created_at: None,
             schema: DirectDebitSchema::default(),
             charset: CharsetPolicy::default(),
@@ -982,22 +1006,10 @@ impl Pain008Builder {
         }
     }
 
-    /// Set the `MsgId` (`Max35Text`).
+    /// Pin the creation timestamp (`GrpHdr/CreDtTm`).
     ///
-    /// A `MsgId` is how a bank de-duplicates submissions: two files sharing one
-    /// are a duplicate, and the second is rejected — or, worse, accepted and
-    /// silently discarded. **Set it from your own persistent sequence.**
-    ///
-    /// The default is only a placeholder. It is unique within one process, so
-    /// building several messages in a loop cannot collide, but it does not
-    /// survive a restart and carries no meaning a bank or an auditor can use.
-    #[must_use]
-    pub fn msg_id(mut self, id: impl Into<String>) -> Self {
-        self.msg_id = id.into();
-        self
-    }
-
-    /// Pin the creation timestamp (`CreDtTm`), making output reproducible.
+    /// This is the crate's **only** implicit clock read: left unset, `build()`
+    /// stamps [`IsoDateTime::now`]. Set it to make output byte-reproducible.
     #[must_use]
     pub fn created_at(mut self, timestamp: IsoDateTime) -> Self {
         self.created_at = Some(timestamp);
@@ -1015,7 +1027,7 @@ impl Pain008Builder {
     ///
     /// // A bank still on the pre-2023 version, read from configuration.
     /// let schema: DirectDebitSchema = "pain.008.001.02".parse()?;
-    /// let builder = Pain008Builder::new("Stadtwerke GmbH").schema(schema);
+    /// let builder = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001").schema(schema);
     /// # let _ = builder;
     /// # Ok::<(), sepa::UnknownSchema>(())
     /// ```
@@ -1037,6 +1049,33 @@ impl Pain008Builder {
     pub fn add_group(mut self, group: DirectDebitGroup) -> Self {
         self.groups.push(group);
         self
+    }
+
+    /// The `GrpHdr/MsgId` this message will carry.
+    ///
+    /// What a bank de-duplicates by, and therefore what a
+    /// [`camt.055`](crate::camt055) recall has to name — see
+    /// [`OriginalMessage::from_credit_transfer`](crate::OriginalMessage) and
+    /// its direct-debit counterpart.
+    #[must_use]
+    pub fn message_id(&self) -> &str {
+        &self.msg_id
+    }
+
+    /// The schema version this message will be emitted against.
+    #[must_use]
+    pub const fn schema_version(&self) -> DirectDebitSchema {
+        self.schema
+    }
+
+    /// The pinned `GrpHdr/CreDtTm`, or `None` when `build()` will stamp one.
+    ///
+    /// `None` rather than "now": a timestamp read here would not be the one the
+    /// document ends up carrying, and a recall that quotes the wrong
+    /// `OrgnlCreDtTm` names a message that was never sent.
+    #[must_use]
+    pub const fn creation_timestamp(&self) -> Option<IsoDateTime> {
+        self.created_at
     }
 
     /// Number of collection groups.
@@ -1076,6 +1115,25 @@ impl Pain008Builder {
         format!("{}{suffix}", truncate_chars(&self.msg_id, keep))
     }
 
+    /// Refuse a BIC the selected schema's `BIC`/`BICFI` type cannot express.
+    ///
+    /// ISO 9362:2022 admits a digit in the business party prefix and the
+    /// pre-2019 `BICIdentifier` does not, so this is the one place a valid
+    /// value and a valid schema can still be incompatible.
+    fn check_bic_supported(&self, field: &'static str, bic: &Bic) -> Result<(), ValidationError> {
+        let pattern = self.schema.bic_pattern();
+        if bic.fits(pattern) {
+            Ok(())
+        } else {
+            Err(ValidationError::SchemaPattern {
+                field,
+                value: bic.as_str().to_owned(),
+                schema: self.schema.message_id(),
+                expected: pattern.as_xsd_pattern(),
+            })
+        }
+    }
+
     /// Refuse a postal address on a schema whose `PstlAdr` cannot hold one.
     fn check_address_supported(&self, feature: &'static str) -> Result<(), ValidationError> {
         if self.schema.supports_postal_address() {
@@ -1095,9 +1153,9 @@ impl Pain008Builder {
     /// A [`BuildError`] naming both the broken rule ([`ValidationError`]) and
     /// the group and transaction it belongs to.
     pub fn validate(&self) -> Result<(), BuildError> {
-        // `PmtInf` is 1..n at message level; `CdtTrfTxInf` / `DrctDbtTxInf` are
-        // 1..n inside each group, and the loop below reports which group is
-        // empty rather than blaming the message for it.
+        // `PmtInf` is 1..n at message level; `DrctDbtTxInf` is 1..n inside each
+        // group, and `validate_group` reports which group is empty rather than
+        // blaming the message for it.
         if self.groups.is_empty() {
             return Err(BuildError::message(ValidationError::EmptyBatch));
         }
@@ -1115,81 +1173,126 @@ impl Pain008Builder {
         let mut total: i64 = 0;
         let mut seen_ids = std::collections::BTreeSet::new();
         for (i, g) in self.groups.iter().enumerate() {
-            let at = Location::group(i);
-            if g.entries.is_empty() {
-                return Err(BuildError::group(i, ValidationError::EmptyBatch));
-            }
-            // `PmtInfId` is what a bank echoes back in pain.002 and in a camt
-            // `Btch` block, so two groups sharing one make the booking
-            // unattributable — and duplicate detection may drop the second.
-            let id = self.payment_info_id(i);
-            check_id("PmtInf/PmtInfId", &id).at(at)?;
-            if !seen_ids.insert(id.clone()) {
-                return Err(BuildError::group(
-                    i,
-                    ValidationError::Duplicate {
-                        field: "PmtInf/PmtInfId",
-                        value: id,
-                    },
-                ));
-            }
-            check_name(
-                "Cdtr/Nm",
-                &self.charset.apply("Cdtr/Nm", &g.creditor_name).at(at)?,
-            )
-            .at(at)?;
-            if let Some(a) = &g.creditor_address {
-                self.check_address_supported("Cdtr/PstlAdr").at(at)?;
-                a.validate(self.charset).at(at)?;
-            }
-            if let Some(p) = &g.category_purpose {
-                p.validate("PmtTpInf/CtgyPurp/Cd").at(at)?;
-            }
-            if let Some(p) = &g.ultimate_creditor {
-                p.validate("PmtInf/UltmtCdtr", self.charset).at(at)?;
-            }
+            self.validate_group(i, g, &mut seen_ids, &mut total)?;
+        }
+        Ok(())
+    }
 
-            for (j, e) in g.entries.iter().enumerate() {
-                let at = Location::transaction(i, j);
-                if g.ultimate_creditor.is_some() && e.ultimate_creditor.is_some() {
-                    return Err(BuildError {
-                        location: at,
-                        kind: ValidationError::ConflictingLevels { field: "UltmtCdtr" },
-                    });
-                }
-                check_id("DrctDbtTxInf/PmtId/EndToEndId", &e.end_to_end_id).at(at)?;
-                check_id("MndtRltdInf/MndtId", &e.mandate_ref).at(at)?;
-                check_amount("DrctDbtTxInf/InstdAmt", e.amount_ct).at(at)?;
-                check_name(
-                    "Dbtr/Nm",
-                    &self.charset.apply("Dbtr/Nm", &e.debtor_name).at(at)?,
-                )
+    /// Validate one `PmtInf` and add its amounts to the running control sum.
+    fn validate_group(
+        &self,
+        i: usize,
+        g: &DirectDebitGroup,
+        seen_ids: &mut std::collections::BTreeSet<String>,
+        total: &mut i64,
+    ) -> Result<(), BuildError> {
+        let at = Location::group(i);
+        if g.entries.is_empty() {
+            return Err(BuildError::group(i, ValidationError::EmptyBatch));
+        }
+        // `PmtInfId` is what a bank echoes back in pain.002 and in a camt
+        // `Btch` block, so two groups sharing one make the booking
+        // unattributable — and duplicate detection may drop the second.
+        let id = self.payment_info_id(i);
+        check_id("PmtInf/PmtInfId", &id).at(at)?;
+        if !seen_ids.insert(id.clone()) {
+            return Err(BuildError::group(
+                i,
+                ValidationError::Duplicate {
+                    field: "PmtInf/PmtInfId",
+                    value: id,
+                },
+            ));
+        }
+        check_name(
+            "Cdtr/Nm",
+            &self.charset.apply("Cdtr/Nm", &g.creditor_name).at(at)?,
+        )
+        .at(at)?;
+        if let Some(bic) = &g.creditor_bic {
+            self.check_bic_supported("CdtrAgt/FinInstnId", bic).at(at)?;
+        }
+        if let Some(a) = &g.creditor_address {
+            self.check_address_supported("Cdtr/PstlAdr").at(at)?;
+            a.validate(self.charset).at(at)?;
+        }
+        if let Some(p) = &g.category_purpose {
+            p.validate("PmtTpInf/CtgyPurp/Cd").at(at)?;
+        }
+        if let Some(p) = &g.ultimate_creditor {
+            p.validate("PmtInf/UltmtCdtr", self.charset).at(at)?;
+        }
+
+        for (j, e) in g.entries.iter().enumerate() {
+            self.validate_entry(Location::transaction(i, j), g, e)?;
+            *total = total.checked_add(e.amount_ct).ok_or(BuildError {
+                location: Location::transaction(i, j),
+                kind: ValidationError::ControlSumOverflow,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Validate one `DrctDbtTxInf` against its enclosing group.
+    fn validate_entry(
+        &self,
+        at: Location,
+        g: &DirectDebitGroup,
+        e: &DirectDebitEntry,
+    ) -> Result<(), BuildError> {
+        // The DK forbids the same ultimate party at both levels.
+        if g.ultimate_creditor.is_some() && e.ultimate_creditor.is_some() {
+            return Err(BuildError {
+                location: at,
+                kind: ValidationError::ConflictingLevels { field: "UltmtCdtr" },
+            });
+        }
+        check_id("DrctDbtTxInf/PmtId/EndToEndId", &e.end_to_end_id).at(at)?;
+        check_id("MndtRltdInf/MndtId", &e.mandate_ref).at(at)?;
+        // A mandate signed after the day it authorises collection on is a
+        // contradiction inside the message — no clock and no banking calendar
+        // are needed to see it, only the two dates already in the document. The
+        // debtor's bank refuses it as `MD01`, "no valid mandate", which is the
+        // one rejection that also costs a return fee.
+        if e.mandate_signed_at > g.collection_date {
+            return Err(BuildError {
+                location: at,
+                kind: ValidationError::DateOrder {
+                    later: "MndtRltdInf/DtOfSgntr",
+                    later_value: e.mandate_signed_at,
+                    earlier: "PmtInf/ReqdColltnDt",
+                    earlier_value: g.collection_date,
+                },
+            });
+        }
+        check_amount("DrctDbtTxInf/InstdAmt", e.amount_ct).at(at)?;
+        check_name(
+            "Dbtr/Nm",
+            &self.charset.apply("Dbtr/Nm", &e.debtor_name).at(at)?,
+        )
+        .at(at)?;
+        if let Some(bic) = &e.debtor_bic {
+            self.check_bic_supported("DbtrAgt/FinInstnId", bic).at(at)?;
+        }
+        if let Some(a) = &e.debtor_address {
+            self.check_address_supported("Dbtr/PstlAdr").at(at)?;
+            a.validate(self.charset).at(at)?;
+        }
+        if let Some(p) = &e.ultimate_creditor {
+            p.validate("DrctDbtTxInf/UltmtCdtr", self.charset).at(at)?;
+        }
+        if let Some(p) = &e.ultimate_debtor {
+            p.validate("DrctDbtTxInf/UltmtDbtr", self.charset).at(at)?;
+        }
+        if let Some(p) = &e.purpose {
+            p.validate("DrctDbtTxInf/Purp/Cd").at(at)?;
+        }
+        if let Some(a) = &e.amendment {
+            a.validate(self.charset).at(at)?;
+        }
+        if let Some(r) = &e.remittance {
+            r.validate(crate::pain001::remittance_field(r), self.charset)
                 .at(at)?;
-                if let Some(a) = &e.debtor_address {
-                    self.check_address_supported("Dbtr/PstlAdr").at(at)?;
-                    a.validate(self.charset).at(at)?;
-                }
-                if let Some(p) = &e.ultimate_creditor {
-                    p.validate("DrctDbtTxInf/UltmtCdtr", self.charset).at(at)?;
-                }
-                if let Some(p) = &e.ultimate_debtor {
-                    p.validate("DrctDbtTxInf/UltmtDbtr", self.charset).at(at)?;
-                }
-                if let Some(p) = &e.purpose {
-                    p.validate("DrctDbtTxInf/Purp/Cd").at(at)?;
-                }
-                if let Some(a) = &e.amendment {
-                    a.validate(self.charset).at(at)?;
-                }
-                if let Some(r) = &e.remittance {
-                    r.validate(crate::pain001::remittance_field(r), self.charset)
-                        .at(at)?;
-                }
-                total = total.checked_add(e.amount_ct).ok_or(BuildError {
-                    location: at,
-                    kind: ValidationError::ControlSumOverflow,
-                })?;
-            }
         }
         Ok(())
     }
@@ -1213,20 +1316,17 @@ impl Pain008Builder {
     /// let iban = validate_iban("DE89370400440532013000")?;
     /// let ci = validate_creditor_id("DE98ZZZ09999999999")?;
     ///
-    /// let xml = Pain008Builder::new("Stadtwerke GmbH")
-    ///     .msg_id("DD-2026-07")
+    /// let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07")
     ///     .add_group(
-    ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
+    ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, IsoDate::new(2026, 7, 20)?)
     ///             .sequence_type(SequenceType::Frst)
-    ///             .collection_date(IsoDate::new(2026, 7, 20)?)
     ///             .add_entry(DirectDebitEntry::new(
     ///                 "MND-1", "2026-06-01".parse()?, "Neu Kunde", iban.clone(), 5_000, "E2E-1",
     ///             )),
     ///     )
     ///     .add_group(
-    ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci)
+    ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, IsoDate::new(2026, 7, 18)?)
     ///             .sequence_type(SequenceType::Rcur)
-    ///             .collection_date(IsoDate::new(2026, 7, 18)?)
     ///             .add_entry(DirectDebitEntry::new(
     ///                 "MND-2", "2024-06-01".parse()?, "Alt Kunde", iban.clone(), 7_500, "E2E-2",
     ///             )),
@@ -1436,41 +1536,6 @@ impl Pain008Builder {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// A `MsgId` for a builder whose caller has not set one, as `<prefix>-<secs>-<n>`.
-///
-/// `MsgId` is the key a bank de-duplicates submissions by: two files sharing
-/// one are a duplicate, and the second is rejected — or worse, dropped in
-/// silence. A wall-clock second alone does not give that, because building two
-/// messages in the same second is the normal case in a batch job, so a
-/// process-wide counter is appended.
-///
-/// It is still only unique within one process. Anything that must survive a
-/// restart — which, for duplicate detection at a bank, is everything — belongs
-/// in `msg_id()` from the caller's own sequence.
-pub(crate) fn default_msg_id(prefix: &str) -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{secs}-{n}")
-}
-
-/// Five days out — the SDD Core pre-notification floor for `FRST`/`OOFF`.
-///
-/// This is only the placeholder for a group whose date was never set; a real
-/// collection run derives its date from its own banking calendar.
-pub(crate) fn default_collection_date() -> IsoDate {
-    let today = IsoDate::today();
-    today.plus_days(5).unwrap_or(today)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1501,11 +1566,13 @@ mod tests {
         )
     }
     fn group(name: &str) -> DirectDebitGroup {
-        DirectDebitGroup::new(name, &de_iban(), &ci()).collection_date(d("2026-07-20"))
+        group_on(name, d("2026-07-20"))
+    }
+    fn group_on(name: &str, date: IsoDate) -> DirectDebitGroup {
+        DirectDebitGroup::new(name, &de_iban(), &ci(), date)
     }
     fn one_group(name: &str) -> Pain008Builder {
-        Pain008Builder::new(name)
-            .msg_id("DD-001")
+        Pain008Builder::new(name, "DD-001")
             .add_group(group(name).add_entry(entry("MND-001", 7_500)))
     }
 
@@ -1528,18 +1595,15 @@ mod tests {
     fn first_and_recurring_collections_fit_in_one_file() {
         // The whole point of the group restructure: a real direct debit run has
         // both, and previously needed two files.
-        let xml = Pain008Builder::new("Stadtwerke GmbH")
-            .msg_id("DD-RUN")
+        let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-RUN")
             .add_group(
-                group("Stadtwerke GmbH")
+                group_on("Stadtwerke GmbH", d("2026-07-20"))
                     .sequence_type(SequenceType::Frst)
-                    .collection_date(d("2026-07-20"))
                     .add_entry(entry("MND-NEW", 5_000)),
             )
             .add_group(
-                group("Stadtwerke GmbH")
+                group_on("Stadtwerke GmbH", d("2026-07-18"))
                     .sequence_type(SequenceType::Rcur)
-                    .collection_date(d("2026-07-18"))
                     .add_entry(entry("MND-OLD", 7_500))
                     .add_entry(entry("MND-OLD-2", 2_500)),
             )
@@ -1557,8 +1621,7 @@ mod tests {
 
     #[test]
     fn core_and_b2b_can_coexist_in_one_file() {
-        let xml = Pain008Builder::new("Test")
-            .msg_id("DD-MIX")
+        let xml = Pain008Builder::new("Test", "DD-MIX")
             .add_group(
                 group("Test")
                     .scheme(DirectDebitScheme::Core)
@@ -1577,8 +1640,7 @@ mod tests {
 
     #[test]
     fn postal_addresses_sit_inside_the_party_after_the_name() {
-        let xml = Pain008Builder::new("Test")
-            .msg_id("DD-ADR")
+        let xml = Pain008Builder::new("Test", "DD-ADR")
             .add_group(
                 group("Stadtwerke GmbH")
                     .creditor_address(
@@ -1610,9 +1672,8 @@ mod tests {
 
     #[test]
     fn an_address_on_a_schema_without_one_is_rejected() {
-        let err = Pain008Builder::new("Test")
+        let err = Pain008Builder::new("Test", "DD-DK-ADR")
             .schema(DirectDebitSchema::DkV2_7)
-            .msg_id("DD-DK-ADR")
             .add_group(
                 group("Test").add_entry(
                     entry("M1", 100)
@@ -1639,10 +1700,76 @@ mod tests {
     }
 
     #[test]
+    fn a_mandate_signed_after_the_collection_it_authorises_is_rejected() {
+        // Both dates are in the document, so this needs no clock: a collection
+        // dated before the mandate behind it has no mandate on the day it is
+        // taken. The debtor's bank answers MD01 and charges a return fee.
+        let collect = d("2026-07-20");
+        let build = |signed| {
+            Pain008Builder::new("Acme", "DD-1")
+                .add_group(
+                    DirectDebitGroup::new("Acme", &de_iban(), &ci(), collect).add_entry(
+                        DirectDebitEntry::new("MND-1", signed, "Max", nl_iban(), 1_000, "E2E-1"),
+                    ),
+                )
+                .build()
+        };
+        assert!(build(d("2026-07-20")).is_ok(), "signed on the day is fine");
+        assert!(build(d("2019-01-01")).is_ok());
+
+        let err = build(d("2026-07-21")).unwrap_err();
+        assert_eq!(err.location, Location::transaction(0, 0));
+        assert!(matches!(
+            err.kind,
+            ValidationError::DateOrder {
+                later: "MndtRltdInf/DtOfSgntr",
+                earlier: "PmtInf/ReqdColltnDt",
+                ..
+            }
+        ));
+        assert_eq!(
+            err.to_string(),
+            "PmtInf[0]/Tx[0]: MndtRltdInf/DtOfSgntr 2026-07-21 must not be after \
+             PmtInf/ReqdColltnDt 2026-07-20",
+        );
+    }
+
+    #[test]
+    fn a_modern_bic_is_refused_by_the_pre_2019_schemas_and_named() {
+        // ISO 9362:2022 admits a digit in the business party prefix; the
+        // pre-2019 `BICIdentifier` does not. The value is valid, the schema is
+        // valid, and the pair is not — so the error names the BIC rather than
+        // letting xmllint find it at the bank.
+        let modern = crate::validate_bic("E097DEFF").unwrap();
+        let build = |schema| {
+            Pain008Builder::new("Acme", "DD-1")
+                .schema(schema)
+                .add_group(
+                    DirectDebitGroup::new("Acme", &de_iban(), &ci(), d("2026-07-20"))
+                        .creditor_bic(modern.clone())
+                        .add_entry(entry("MND-1", 1_000)),
+                )
+                .build()
+        };
+        assert!(build(DirectDebitSchema::IsoV8).is_ok(), "BICFI holds it");
+        for legacy in [DirectDebitSchema::IsoV2, DirectDebitSchema::DkV2_7] {
+            let err = build(legacy).unwrap_err();
+            assert!(
+                matches!(
+                    &err.kind,
+                    ValidationError::SchemaPattern { value, expected, .. }
+                        if value == "E097DEFF"
+                            && *expected == BicPattern::LettersOnly.as_xsd_pattern()
+                ),
+                "{legacy} must refuse it by name, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn legacy_dk_schema_uses_bic_element() {
-        let xml = Pain008Builder::new("Test")
+        let xml = Pain008Builder::new("Test", "DD-DK")
             .schema(DirectDebitSchema::DkV2_7)
-            .msg_id("DD-DK")
             .add_group(
                 group("Test")
                     .creditor_bic("COBADEFF".parse().unwrap())
@@ -1665,8 +1792,7 @@ mod tests {
 
     #[test]
     fn mandate_amendment_emits_smnda_in_its_current_position() {
-        let xml = Pain008Builder::new("Test")
-            .msg_id("DD-AMD")
+        let xml = Pain008Builder::new("Test", "DD-AMD")
             .add_group(group("Test").add_entry(
                 entry("M1", 1_000).with_amendment(MandateAmendment::debtor_account_changed()),
             ))
@@ -1684,8 +1810,7 @@ mod tests {
     fn an_amendment_with_no_detail_is_rejected() {
         // Sending an amendment identical to the original earns an MD02 reject.
         assert!(matches!(
-            Pain008Builder::new("Test")
-                .msg_id("DD-AMD")
+            Pain008Builder::new("Test", "DD-AMD")
                 .add_group(
                     group("Test")
                         .add_entry(entry("M1", 1_000).with_amendment(MandateAmendment::default()),)
@@ -1707,8 +1832,7 @@ mod tests {
             ..MandateAmendment::default()
         };
         assert_eq!(
-            Pain008Builder::new("Test")
-                .msg_id("DD-AMD")
+            Pain008Builder::new("Test", "DD-AMD")
                 .add_group(group("Test").add_entry(entry("M1", 100).with_amendment(amendment)))
                 .build()
                 .unwrap_err()
@@ -1726,8 +1850,7 @@ mod tests {
             MandateAmendment::debtor_iban_changed(nl_iban()),
         ] {
             assert!(
-                Pain008Builder::new("Test")
-                    .msg_id("DD-AMD")
+                Pain008Builder::new("Test", "DD-AMD")
                     .add_group(group("Test").add_entry(entry("M1", 100).with_amendment(a)))
                     .build()
                     .is_ok()
@@ -1737,7 +1860,7 @@ mod tests {
 
     #[test]
     fn ultimate_creditor_cannot_be_set_at_both_levels() {
-        let b = Pain008Builder::new("Test").msg_id("DD-ULT").add_group(
+        let b = Pain008Builder::new("Test", "DD-ULT").add_group(
             group("Test")
                 .ultimate_creditor(Party::new("Gruppe"))
                 .add_entry(entry("M1", 100).with_ultimate_creditor(Party::new("Transaktion"))),
@@ -1757,8 +1880,7 @@ mod tests {
         // An identifier is the key the bank echoes back; rewriting it silently
         // would break the caller's own reconciliation.
         assert!(matches!(
-            Pain008Builder::new("Test")
-                .msg_id("DD-1")
+            Pain008Builder::new("Test", "DD-1")
                 .add_group(group("Test").add_entry(DirectDebitEntry::new(
                     "MND-Ü",
                     d("2024-01-01"),
@@ -1784,12 +1906,11 @@ mod tests {
     #[test]
     fn empty_message_and_empty_group_are_both_rejected() {
         assert_eq!(
-            Pain008Builder::new("Test").msg_id("E").build(),
+            Pain008Builder::new("Test", "E").build(),
             Err(BuildError::message(ValidationError::EmptyBatch))
         );
         assert_eq!(
-            Pain008Builder::new("Test")
-                .msg_id("E")
+            Pain008Builder::new("Test", "E")
                 .add_group(group("Test"))
                 .build(),
             Err(BuildError::group(0, ValidationError::EmptyBatch))
@@ -1798,14 +1919,14 @@ mod tests {
 
     #[test]
     fn validation_rejects_bad_fields() {
-        let b = || Pain008Builder::new("Test").msg_id("OK");
+        let b = || Pain008Builder::new("Test", "OK");
         let err = b()
             .add_group(group("Test").add_entry(entry("M1", 0)))
             .build()
             .unwrap_err();
         assert!(matches!(err.kind, ValidationError::AmountOutOfRange { .. }));
         assert!(matches!(
-            b().msg_id("X".repeat(36))
+            Pain008Builder::new("Test", "X".repeat(36))
                 .add_group(group("Test").add_entry(entry("M1", 100)))
                 .build()
                 .unwrap_err()
@@ -1826,8 +1947,7 @@ mod tests {
     fn errors_name_the_group_and_transaction_that_failed() {
         // A collection run is thousands of rows long; "Dbtr/Nm is too long" is
         // only actionable once it says which row.
-        let err = Pain008Builder::new("Test")
-            .msg_id("DD-LOC")
+        let err = Pain008Builder::new("Test", "DD-LOC")
             .add_group(group("Test").add_entry(entry("M1", 100)))
             .add_group(
                 group("Test")
@@ -1842,7 +1962,7 @@ mod tests {
 
     #[test]
     fn totals_use_integer_arithmetic() {
-        let b = Pain008Builder::new("Test").msg_id("DD").add_group(
+        let b = Pain008Builder::new("Test", "DD").add_group(
             group("Test")
                 .add_entry(entry("M1", 10))
                 .add_entry(entry("M2", 20)),
@@ -1853,11 +1973,9 @@ mod tests {
 
     #[test]
     fn non_sepa_characters_are_transliterated() {
-        let xml = Pain008Builder::new("Müller & Söhne GmbH")
-            .msg_id("DD-UML")
+        let xml = Pain008Builder::new("Müller & Söhne GmbH", "DD-UML")
             .add_group(
-                DirectDebitGroup::new("Müller & Söhne GmbH", &de_iban(), &ci())
-                    .collection_date(d("2026-07-20"))
+                DirectDebitGroup::new("Müller & Söhne GmbH", &de_iban(), &ci(), d("2026-07-20"))
                     .add_entry(
                         DirectDebitEntry::new(
                             "MND-001",
@@ -1908,11 +2026,12 @@ mod tests {
     }
 
     #[test]
-    fn the_default_collection_date_is_five_days_out() {
-        assert_eq!(
-            default_collection_date(),
-            IsoDate::today().plus_days(5).unwrap()
-        );
+    fn the_collection_date_is_required_and_never_defaulted() {
+        // It used to default to `IsoDate::today().plus_days(5)` — the SDD Core
+        // pre-notification floor. That is a banking-calendar answer this crate
+        // cannot give, and it made a batch depend on the machine clock.
+        let group = group_on("Test", d("2026-07-20"));
+        assert_eq!(group.requested_collection_date(), d("2026-07-20"));
     }
 
     #[test]
@@ -1934,9 +2053,8 @@ mod tests {
 
     #[test]
     fn the_epc_legacy_schema_uses_the_pre_2019_bic_element() {
-        let xml = Pain008Builder::new("Test")
+        let xml = Pain008Builder::new("Test", "DD-V2")
             .schema(DirectDebitSchema::IsoV2)
-            .msg_id("DD-V2")
             .add_group(
                 group("Test")
                     .creditor_bic("COBADEFF".parse().unwrap())
@@ -1955,9 +2073,8 @@ mod tests {
         // OrgnlDbtrAcct, and enumerates SMNDA under OrgnlDbtrAgt instead — so
         // the current placement is schema-invalid there.
         let build = |schema| {
-            Pain008Builder::new("Test")
+            Pain008Builder::new("Test", "DD-AMD")
                 .schema(schema)
-                .msg_id("DD-AMD")
                 .add_group(group("Test").add_entry(
                     entry("M1", 1_000).with_amendment(MandateAmendment::debtor_account_changed()),
                 ))

@@ -1,6 +1,6 @@
 +++
 title = "Documentation"
-description = "Guides for building and parsing SEPA payment files in Rust with the sepa crate: credit transfers, direct debits, reversals, status reports, bank statements, addresses and validation."
+description = "Guides for SEPA payment files in Rust: IBAN and BIC validation, credit transfers, direct debits, recalls, reversals, status reports and bank statements."
 sort_by = "weight"
 template = "section.html"
 page_template = "page.html"

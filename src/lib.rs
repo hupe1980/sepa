@@ -3,13 +3,15 @@
 //! Provides:
 //! - **IBAN validation** ([`iban`]) — ISO 13616 mod-97 **and** the registered
 //!   national BBAN structure, 89-country registry, SEPA membership
-//! - **BIC validation** ([`bic`]) — ISO 9362, including the country code
+//! - **BIC validation** ([`bic`]) — ISO 9362:2022, including the country code
 //! - **Creditor Identifier validation** ([`creditor_id`]) — EPC AT-02
 //! - **Postal addresses** ([`address`]) — structured and hybrid `PstlAdr`
 //! - **pain.001 builder** ([`pain001`]) — SEPA Credit Transfer + SCT Instant
 //! - **pain.008 builder** ([`pain008`]) — SEPA Direct Debit (CORE + B2B)
 //! - **pain.007 builder** ([`pain007`]) — SEPA Direct Debit reversal
 //! - **pain.002 parser** ([`pain002`]) — Payment Status Report, incl. Verification of Payee
+//! - **camt.055 builder** ([`camt055`]) — Payment Cancellation Request (recall)
+//! - **camt.029 parser** ([`camt029`]) — Resolution of Investigation — the answer to a recall
 //! - **camt.052 parser** ([`camt052`]) — Bank-to-Customer Report (intraday)
 //! - **camt.053 parser** ([`camt053`]) — Bank-to-Customer Statement (end-of-day)
 //! - **camt.054 parser** ([`camt054`]) — Bank-to-Customer Notification, returns
@@ -39,6 +41,7 @@
 //! | pain.001 | `pain.001.001.09` (default), `pain.001.001.03`, `pain.001.003.03` |
 //! | pain.008 | `pain.008.001.08` (default), `pain.008.001.02`, `pain.008.003.02` |
 //! | pain.007 | `pain.007.001.09` — the only version SEPA defines |
+//! | camt.055 / camt.029 | `camt.055.001.05` / `camt.029.001.06` — the pair the DFÜ-Abkommen names |
 //!
 //! Select one with [`Pain001Builder::schema`] / [`Pain008Builder::schema`].
 //! Both enums implement `FromStr` over the message identifier and the namespace
@@ -83,6 +86,8 @@
 //! | ISO 20022 camt.052 | [`camt052`] | Bank-to-Customer Report (intraday) |
 //! | ISO 20022 camt.053 | [`camt053`] | Bank-to-Customer Statement |
 //! | ISO 20022 camt.054 | [`camt054`] | Payment notifications |
+//! | ISO 20022 camt.055 | [`camt055`] | Payment Cancellation Request (recall) |
+//! | ISO 20022 camt.029 | [`camt029`] | Resolution of Investigation |
 //! | EPC217-08 | [`charset`] | SEPA character set + conversion table |
 //! | EPC SEPA Rulebooks 2023/2025 | all | Governs all SEPA transactions |
 //!
@@ -99,11 +104,9 @@
 //! assert_eq!(iban.to_string(), "DE89 3704 0044 0532 0130 00");
 //!
 //! // pain.001 — Credit Transfer (Überweisung)
-//! let ct_xml = Pain001Builder::new("Debtor GmbH")
-//!     .msg_id("CT-2026-07-001")
+//! let ct_xml = Pain001Builder::new("Debtor GmbH", "CT-2026-07-001")
 //!     .add_group(
-//!         CreditTransferGroup::new("Debtor GmbH", &iban)
-//!             .execution_date(IsoDate::new(2026, 7, 20)?)
+//!         CreditTransferGroup::new("Debtor GmbH", &iban, IsoDate::new(2026, 7, 20)?)
 //!             .add_entry(CreditTransferEntry::new(
 //!                 "Supplier AG", iban.clone(), 12_000, "INV-2026-001",
 //!             )),
@@ -113,20 +116,17 @@
 //!
 //! // pain.008 — a direct debit run carrying FRST and RCUR in one file.
 //! let ci = validate_creditor_id("DE98ZZZ09999999999")?;
-//! let dd_xml = Pain008Builder::new("Creditor GmbH")
-//!     .msg_id("DD-2026-07-001")
+//! let dd_xml = Pain008Builder::new("Creditor GmbH", "DD-2026-07-001")
 //!     .add_group(
-//!         DirectDebitGroup::new("Creditor GmbH", &iban, &ci)
+//!         DirectDebitGroup::new("Creditor GmbH", &iban, &ci, IsoDate::new(2026, 7, 20)?)
 //!             .sequence_type(SequenceType::Frst)
-//!             .collection_date(IsoDate::new(2026, 7, 20)?)
 //!             .add_entry(DirectDebitEntry::new(
 //!                 "MND-1", "2026-06-01".parse()?, "Neu Kunde", iban.clone(), 5_000, "R-001",
 //!             )),
 //!     )
 //!     .add_group(
-//!         DirectDebitGroup::new("Creditor GmbH", &iban, &ci)
+//!         DirectDebitGroup::new("Creditor GmbH", &iban, &ci, IsoDate::new(2026, 7, 18)?)
 //!             .sequence_type(SequenceType::Rcur)
-//!             .collection_date(IsoDate::new(2026, 7, 18)?)
 //!             .add_entry(DirectDebitEntry::new(
 //!                 "MND-2", "2024-06-01".parse()?, "Alt Kunde", iban.clone(), 7_500, "R-002",
 //!             )),
@@ -166,6 +166,53 @@
 //! unstructured address form the EPC schemes reject from 15 November 2026 is
 //! not a value this crate can be asked to emit.
 //!
+//! ## Nothing that matters is defaulted from a clock
+//!
+//! `MsgId` and the payment date are constructor arguments, because neither has
+//! a safe default. `MsgId` is the key a bank de-duplicates submissions by, so
+//! it has to come from a sequence that survives a restart. `ReqdExctnDt` and
+//! `ReqdColltnDt` are the day money leaves an account, which depends on the
+//! scheme, the sequence type, TARGET2 and the bank's cut-off — a
+//! banking-calendar question this crate cannot answer.
+//!
+//! One implicit clock read remains: `GrpHdr/CreDtTm`. Pin it with
+//! `created_at()` and a submitted file regenerates byte-for-byte.
+//!
+//! ## Undoing a payment
+//!
+//! Three messages undo one, and they are not interchangeable — picking the
+//! wrong one wastes the window in which anything can still be done:
+//!
+//! | You want to | Message | Note |
+//! |---|---|---|
+//! | Stop a file you just sent | [`camt055`] | A **request**. The bank may refuse; the answer is [`camt029`] |
+//! | Give back a collection that settled | [`pain007`] | An instruction, and only for a direct debit |
+//! | Learn a payment came back | [`camt054`] | The bank telling you, after the fact |
+//!
+//! ```
+//! use sepa::{Camt055Builder, CancellationEntry, CancellationGroup, CancellationReason,
+//!            OriginalMessage, Pain008Builder, parse_camt029, validate_bic};
+//!
+//! # let submitted = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001");
+//! let recall = Camt055Builder::new(
+//!     "CXL-2026-07-001",
+//!     "Stadtwerke GmbH",
+//!     validate_bic("COBADEFFXXX")?,
+//!     OriginalMessage::from_direct_debit(&submitted),
+//! )
+//! .add_group(
+//!     CancellationGroup::new("PMT-2026-07-A")
+//!         .add_entry(CancellationEntry::new("E2E-1", CancellationReason::Dupl)),
+//! );
+//! # let _ = recall;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Nothing has been cancelled until the camt.029 says so, and `PDCR` — pending
+//! — is neither answer. [`Camt029Document::is_final`] is what separates the two.
+//!
+//! [`Camt029Document::is_final`]: camt029::Camt029Document::is_final
+//!
 //! ## Reading bank files
 //!
 //! Every parser returns a `Result` with a typed error naming what it could not
@@ -181,10 +228,22 @@
 //! `booking_date_raw` the text that arrived, so a non-conforming file is
 //! readable rather than rejected.
 //!
+//! Two things a ledger needs are reported beside the amount rather than inside
+//! it. [`CashEntry::charges`] carries the return fee on a bounced collection —
+//! check [`Charges::all_included_in_amount`] before posting it, since a charge
+//! already inside the entry amount must not be booked twice. And a `pain.002`
+//! rejection explains itself at exactly one of three levels depending on how
+//! far the bank got, so [`Pain002Document::reason_codes`] gathers all of them:
+//! a submission refused outright carries its reason at group level with no
+//! transaction blocks to inspect at all.
+//!
 //! [`EntryDetail::signed_ct`]: camt::EntryDetail::signed_ct
 //! [`CashEntry::details_reconcile`]: camt::CashEntry::details_reconcile
 //! [`CashEntry::booking_date`]: camt::CashEntry::booking_date
 //! [`CashEntry::batch`]: camt::CashEntry::batch
+//! [`CashEntry::charges`]: camt::CashEntry::charges
+//! [`Charges::all_included_in_amount`]: camt::Charges::all_included_in_amount
+//! [`Pain002Document::reason_codes`]: pain002::Pain002Document::reason_codes
 
 // The panic-oriented lints (`unwrap_used`, `indexing_slicing`, …) guard the
 // library's own code paths, where a panic on bank input is a real defect.
@@ -221,9 +280,11 @@ mod site_doctests {
     }
     guide!(Landing, "../site/content/_index.md");
     guide!(GettingStarted, "../site/content/docs/getting-started.md");
+    guide!(Identifiers, "../site/content/docs/identifiers.md");
     guide!(CreditTransfers, "../site/content/docs/credit-transfers.md");
     guide!(DirectDebits, "../site/content/docs/direct-debits.md");
     guide!(Reversals, "../site/content/docs/reversals.md");
+    guide!(Recalls, "../site/content/docs/recalls.md");
     guide!(StatusReports, "../site/content/docs/status-reports.md");
     guide!(BankStatements, "../site/content/docs/bank-statements.md");
     guide!(Addresses, "../site/content/docs/addresses.md");
@@ -234,9 +295,11 @@ mod site_doctests {
 pub mod address;
 pub mod bic;
 pub mod camt;
+pub mod camt029;
 pub mod camt052;
 pub mod camt053;
 pub mod camt054;
+pub mod camt055;
 pub mod charset;
 mod charset_table;
 pub mod country;
@@ -255,9 +318,15 @@ mod xml;
 mod xml_util;
 
 pub use address::{AddressError, AddressFormat, PostalAddress};
-pub use bic::{Bic, BicError, validate_bic};
+pub use bic::{Bic, BicError, BicPattern, validate_bic};
 pub use camt::{
-    AccountRef, BalanceType, BatchInfo, CashEntry, EntryDetail, EntryStatus, StatementBalance,
+    AccountRef, BalanceType, BatchInfo, CashEntry, ChargeRecord, Charges, EntryDetail, EntryStatus,
+    StatementBalance,
+};
+pub use camt029::{
+    Camt029Document, Camt029ParseError, CancellationCount, CancellationStatus,
+    GroupCancellationStatus, PaymentInfoCancellationStatus, RejectionReason, ResolutionOutcome,
+    TransactionCancellationStatus, parse_camt029,
 };
 pub use camt052::{Camt052Document, Camt052ParseError, Camt052Report, parse_camt052};
 pub use camt053::{Camt053Document, Camt053ParseError, Camt053Statement, parse_camt053};
@@ -265,15 +334,21 @@ pub use camt054::{
     Camt054Document, Camt054Notification, Camt054ParseError, CreditDebitIndicator,
     UnknownIndicator, parse_camt054,
 };
+pub use camt055::{
+    Camt055Builder, CancellationEntry, CancellationGroup, CancellationReason, CaseParty,
+    OriginalMessage,
+};
 pub use charset::{Transliteration, is_sepa_text, transliterate};
 pub use country::is_country_code;
 pub use creditor_id::{
     CreditorId, CreditorIdError, creditor_id_check_digits, validate_creditor_id,
 };
+#[cfg(any(feature = "time", feature = "chrono"))]
+pub use date::ConversionError;
 pub use date::{DateError, DateTimeError, IsoDate, IsoDateTime};
 pub use iban::{
-    BbanCharClass, Iban, IbanError, iban_bban_format, iban_country_length, is_sepa_country,
-    validate_iban,
+    BbanCharClass, Iban, IbanError, iban_bban_format, iban_check_digits, iban_country_length,
+    is_sepa_country, validate_iban,
 };
 pub use pain001::{
     CreditTransferEntry, CreditTransferGroup, CreditTransferSchema, ExecutionMoment,
@@ -376,6 +451,8 @@ pub enum AmountError {
 /// assert_eq!(ct_from_eur_str("155.42"), Ok(15542));
 /// assert_eq!(ct_from_eur_str("-5.00"),  Ok(-500));
 /// assert_eq!(ct_from_eur_str("100"),    Ok(10000));
+/// // The whole `i64` range round-trips through `ct_to_eur_str`, ends included.
+/// assert_eq!(ct_from_eur_str(&sepa::ct_to_eur_str(i64::MIN)), Ok(i64::MIN));
 /// assert_eq!(ct_from_eur_str(""),       Err(AmountError::Empty));
 /// assert!(matches!(ct_from_eur_str("1,50"), Err(AmountError::Malformed { .. })));
 /// assert!(matches!(ct_from_eur_str("--5"), Err(AmountError::Malformed { .. })));
@@ -426,15 +503,22 @@ pub fn ct_from_eur_str(s: &str) -> Result<i64, AmountError> {
             .map_err(|_| malformed())?,
     };
 
-    let ct = euros
-        .checked_mul(100)
-        .and_then(|e| e.checked_add(cents))
-        .ok_or_else(overflow)?;
-
+    // Accumulate directly in the sign the input asked for. Building the
+    // magnitude first and negating it afterwards costs the one value that has
+    // no positive counterpart: `i64::MIN` is -92233720368547758.08 EUR, which
+    // `ct_to_eur_str` happily prints and the parser then rejected as overflow.
+    // A formatter and a parser that disagree about their own range is a bug
+    // waiting for the row that hits it.
     if negative {
-        ct.checked_neg().ok_or_else(overflow)
+        euros
+            .checked_mul(-100)
+            .and_then(|e| e.checked_sub(cents))
+            .ok_or_else(overflow)
     } else {
-        Ok(ct)
+        euros
+            .checked_mul(100)
+            .and_then(|e| e.checked_add(cents))
+            .ok_or_else(overflow)
     }
 }
 
@@ -444,10 +528,39 @@ mod tests {
 
     #[test]
     fn ct_to_eur_roundtrip() {
-        for ct in [0i64, 1, 99, 100, 1234, 10_000, i64::MAX / 100] {
+        // Both ends included: `ct_to_eur_str` is total over `i64`, so
+        // `ct_from_eur_str` has to be total over its output. Regression:
+        // `i64::MIN` printed fine and came back as `Overflow`, because the
+        // magnitude was built positive and negated afterwards.
+        for ct in [
+            0i64,
+            1,
+            99,
+            100,
+            1234,
+            10_000,
+            -1,
+            -99,
+            -100,
+            i64::MAX,
+            i64::MIN,
+            i64::MIN + 1,
+        ] {
             let s = ct_to_eur_str(ct);
-            assert_eq!(ct_from_eur_str(&s), Ok(ct));
+            assert_eq!(ct_from_eur_str(&s), Ok(ct), "{ct} printed as {s:?}");
         }
+    }
+
+    #[test]
+    fn one_past_each_end_still_overflows() {
+        assert!(matches!(
+            ct_from_eur_str("92233720368547758.08"),
+            Err(AmountError::Overflow { .. })
+        ));
+        assert!(matches!(
+            ct_from_eur_str("-92233720368547758.09"),
+            Err(AmountError::Overflow { .. })
+        ));
     }
 
     #[test]

@@ -43,11 +43,9 @@
 //! let creditor = validate_iban("NL91ABNA0417164300")?;
 //! let execute  = IsoDate::new(2026, 7, 20)?;
 //!
-//! let xml = Pain001Builder::new("Acme GmbH")
-//!     .msg_id("CT-2026-07-001")
+//! let xml = Pain001Builder::new("Acme GmbH", "CT-2026-07-001")
 //!     .add_group(
-//!         CreditTransferGroup::new("Acme GmbH", &debtor)
-//!             .execution_date(execute)
+//!         CreditTransferGroup::new("Acme GmbH", &debtor, execute)
 //!             .add_entry(
 //!                 CreditTransferEntry::new("Max Mustermann", creditor.clone(), 12_000, "REFUND")
 //!                     .with_description("Erstattung 2025"),
@@ -60,12 +58,10 @@
 //! assert!(xml.contains("<ReqdExctnDt><Dt>2026-07-20</Dt></ReqdExctnDt>"));
 //!
 //! // SCT Instant is a property of the group.
-//! let inst = Pain001Builder::new("Acme GmbH")
-//!     .msg_id("CT-INST-001")
+//! let inst = Pain001Builder::new("Acme GmbH", "CT-INST-001")
 //!     .add_group(
-//!         CreditTransferGroup::new("Acme GmbH", &debtor)
+//!         CreditTransferGroup::new("Acme GmbH", &debtor, execute)
 //!             .local_instrument(LocalInstrument::Inst)
-//!             .execution_date(execute)
 //!             .add_entry(CreditTransferEntry::new("Max", creditor, 5_000, "INST-001")),
 //!     )
 //!     .build()?;
@@ -76,6 +72,7 @@
 use std::str::FromStr;
 
 use crate::address::PostalAddress;
+use crate::bic::BicPattern;
 use crate::date::IsoDate;
 use crate::party::Party;
 use crate::purpose::{CategoryPurpose, Purpose};
@@ -188,9 +185,26 @@ impl CreditTransferSchema {
         !matches!(self, Self::DkV2_7)
     }
 
+    /// Which character pattern this schema constrains agent BICs to.
+    ///
+    /// A BIC that only the wider pattern admits — one with a digit in its
+    /// business party prefix, legal since ISO 9362:2022 — is rejected by
+    /// `build()` here rather than written into a schema that cannot hold it.
+    /// See [`BicPattern`].
+    #[must_use]
+    pub const fn bic_pattern(self) -> BicPattern {
+        match self {
+            Self::IsoV9 => BicPattern::Alphanumeric,
+            Self::IsoV3 | Self::DkV2_7 => BicPattern::LettersOnly,
+        }
+    }
+
     /// The element name carrying an agent's BIC.
     ///
-    /// ISO renamed `BIC` to `BICFI` in the 2019 maintenance release.
+    /// ISO renamed `BIC` to `BICFI` in the 2019 maintenance release. That is a
+    /// *separate* fact from [`bic_pattern`](Self::bic_pattern) — `camt.055`
+    /// pairs the new name with the old pattern — so the two are read from the
+    /// schema independently rather than derived from one another.
     #[must_use]
     const fn bic_element(self) -> &'static str {
         match self {
@@ -300,13 +314,11 @@ pub enum LocalInstrument {
 /// let iban = validate_iban("DE89370400440532013000")?;
 ///
 /// // The ordinary case — a day.
-/// let plain = CreditTransferGroup::new("Acme", &iban)
-///     .execution_date(IsoDate::new(2026, 7, 20)?);
+/// let plain = CreditTransferGroup::new("Acme", &iban, IsoDate::new(2026, 7, 20)?);
 ///
 /// // A scheduled instant transfer — a day and a time.
-/// let timed = CreditTransferGroup::new("Acme", &iban)
-///     .local_instrument(LocalInstrument::Inst)
-///     .execution_at("2026-07-20T11:00:00Z".parse::<IsoDateTime>()?);
+/// let timed = CreditTransferGroup::new("Acme", &iban, "2026-07-20T11:00:00Z".parse::<IsoDateTime>()?)
+///     .local_instrument(LocalInstrument::Inst);
 /// # let _ = (plain, timed);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -372,7 +384,13 @@ pub struct CreditTransferEntry {
     pub creditor_name: String,
     /// Beneficiary IBAN (validated).
     pub creditor_iban: Iban,
-    /// Beneficiary BIC. Uses `NOTPROVIDED` in XML when `None`.
+    /// Beneficiary BIC (`CdtrAgt`).
+    ///
+    /// When `None` the whole `CdtrAgt` element is **omitted**, which is what
+    /// the EPC guidelines say to do for an unknown creditor agent —
+    /// `pain.001.003.03` makes it structural, since its `CdtrAgt` type has a
+    /// mandatory BIC and no `Othr` branch to put a placeholder in. The
+    /// `NOTPROVIDED` placeholder applies to `DbtrAgt`, which is mandatory.
     pub creditor_bic: Option<Bic>,
     /// Beneficiary postal address (`Cdtr/PstlAdr`).
     pub creditor_address: Option<PostalAddress>,
@@ -506,8 +524,7 @@ impl CreditTransferEntry {
 /// use sepa::{CreditTransferEntry, CreditTransferGroup, IsoDate, validate_iban};
 ///
 /// let iban = validate_iban("DE89370400440532013000")?;
-/// let group = CreditTransferGroup::new("Acme GmbH", &iban)
-///     .execution_date(IsoDate::new(2026, 7, 20)?)
+/// let group = CreditTransferGroup::new("Acme GmbH", &iban, IsoDate::new(2026, 7, 20)?)
 ///     .add_entry(CreditTransferEntry::new("Supplier AG", iban.clone(), 12_000, "E2E-1"));
 /// assert_eq!(group.entry_count(), 1);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -529,19 +546,28 @@ pub struct CreditTransferGroup {
 }
 
 impl CreditTransferGroup {
-    /// A new payment group drawn on `debtor_iban`.
-    pub fn new(debtor_name: impl Into<String>, debtor_iban: &Iban) -> Self {
+    /// A new payment group drawn on `debtor_iban`, executing at `execution`.
+    ///
+    /// `execution` takes an [`IsoDate`] for an ordinary transfer and an
+    /// [`IsoDateTime`] for the DK's *terminierte Echtzeitüberweisung* — see
+    /// [`ExecutionMoment`], which both convert into.
+    ///
+    /// It is a required argument rather than a defaulted field on purpose:
+    /// `ReqdExctnDt` is when money leaves an account, and a default for it is a
+    /// value nobody chose. Deriving one from the system clock also made a batch
+    /// depend on which machine built it and on the wall-clock second it ran.
+    pub fn new(
+        debtor_name: impl Into<String>,
+        debtor_iban: &Iban,
+        execution: impl Into<ExecutionMoment>,
+    ) -> Self {
         Self {
             payment_info_id: None,
             debtor_name: debtor_name.into(),
             debtor_iban: debtor_iban.clone(),
             debtor_bic: None,
             debtor_address: None,
-            // Today, meaning "as soon as the bank can". A credit transfer has
-            // no pre-notification period to respect — that is a direct debit
-            // rule, and borrowing it here put every unset transfer five days
-            // into the future for no reason anyone could state.
-            execution: ExecutionMoment::On(IsoDate::today()),
+            execution: execution.into(),
             local_instrument: LocalInstrument::None,
             batch_booking: None,
             category_purpose: None,
@@ -561,37 +587,7 @@ impl CreditTransferGroup {
         self
     }
 
-    /// Set the requested execution date (`ReqdExctnDt`).
-    ///
-    /// Defaults to today — "as soon as the bank can". The date is an
-    /// [`IsoDate`], so a malformed one cannot reach the batch; it is calendar
-    /// arithmetic, though, so a date landing on a weekend or a TARGET2 holiday
-    /// is the caller's to avoid.
-    #[must_use]
-    pub fn execution_date(mut self, date: IsoDate) -> Self {
-        self.execution = ExecutionMoment::On(date);
-        self
-    }
-
-    /// Set the requested execution **moment** — a day and a time.
-    ///
-    /// This is the DK's *terminierte Echtzeitüberweisung*: a scheduled instant
-    /// transfer due at a stated time. Three things have to line up, and
-    /// `build()` checks all three — see [`ExecutionMoment`]:
-    ///
-    /// 1. `pain.001.001.09`, the only schema whose `ReqdExctnDt` is a
-    ///    date/time choice;
-    /// 2. [`local_instrument(LocalInstrument::Inst)`](Self::local_instrument)
-    ///    on this group;
-    /// 3. a UTC offset on `moment` — `"…T11:00:00Z"`, or
-    ///    [`IsoDateTime::in_utc`].
-    #[must_use]
-    pub fn execution_at(mut self, moment: IsoDateTime) -> Self {
-        self.execution = ExecutionMoment::At(moment);
-        self
-    }
-
-    /// When this group is to execute, in whichever form it was set.
+    /// When this group is to execute, in whichever form it was given.
     #[must_use]
     pub const fn execution(&self) -> ExecutionMoment {
         self.execution
@@ -647,9 +643,11 @@ impl CreditTransferGroup {
 
     /// Set the category purpose (`PmtTpInf/CtgyPurp`) for this group.
     ///
-    /// Unlike a purpose code, this may trigger special handling by the banks.
-    /// It belongs at one level only, so setting it here excludes setting it per
-    /// transaction.
+    /// Unlike a [`Purpose`], which is information for the counterparty, a
+    /// category purpose may trigger special handling by the banks. ISO permits
+    /// it at group *or* transaction level and the EPC allows only one of the
+    /// two; this crate emits it at group level only, so the conflict is not
+    /// expressible.
     #[must_use]
     pub fn category_purpose(mut self, purpose: CategoryPurpose) -> Self {
         self.category_purpose = Some(purpose);
@@ -712,11 +710,18 @@ pub struct Pain001Builder {
 }
 
 impl Pain001Builder {
-    /// A new message initiated by `initiating_party`.
-    pub fn new(initiating_party: impl Into<String>) -> Self {
+    /// A new message initiated by `initiating_party`, identified by `msg_id`.
+    ///
+    /// `MsgId` is how a bank de-duplicates submissions: two files sharing one
+    /// are a duplicate, and the second is rejected — or, worse, accepted and
+    /// silently discarded. It is therefore required, and must come from a
+    /// sequence that survives a restart. Earlier versions generated a
+    /// clock-derived placeholder; a value that looks like an identifier and is
+    /// not one is worse than no value at all.
+    pub fn new(initiating_party: impl Into<String>, msg_id: impl Into<String>) -> Self {
         Self {
             initiating_party: initiating_party.into(),
-            msg_id: crate::pain008::default_msg_id("sct"),
+            msg_id: msg_id.into(),
             created_at: None,
             schema: CreditTransferSchema::default(),
             charset: CharsetPolicy::default(),
@@ -724,26 +729,12 @@ impl Pain001Builder {
         }
     }
 
-    /// Set the `MsgId` (`Max35Text`).
+    /// Pin the creation timestamp (`GrpHdr/CreDtTm`).
     ///
-    /// A `MsgId` is how a bank de-duplicates submissions: two files sharing one
-    /// are a duplicate, and the second is rejected — or, worse, accepted and
-    /// silently discarded. **Set it from your own persistent sequence.**
-    ///
-    /// The default is only a placeholder. It is unique within one process, so
-    /// building several messages in a loop cannot collide, but it does not
-    /// survive a restart and carries no meaning a bank or an auditor can use.
-    #[must_use]
-    pub fn msg_id(mut self, id: impl Into<String>) -> Self {
-        self.msg_id = id.into();
-        self
-    }
-
-    /// Pin the creation timestamp (`CreDtTm`), ISO 8601.
-    ///
-    /// Defaults to the current time. Set it explicitly to make output
-    /// byte-reproducible — for golden-file tests, or to regenerate a submitted
-    /// file identically for an audit.
+    /// This is the crate's **only** implicit clock read: left unset, `build()`
+    /// stamps [`IsoDateTime::now`]. Set it to make output byte-reproducible —
+    /// for golden-file tests, or to regenerate a submitted file identically for
+    /// an audit.
     #[must_use]
     pub fn created_at(mut self, timestamp: IsoDateTime) -> Self {
         self.created_at = Some(timestamp);
@@ -770,6 +761,33 @@ impl Pain001Builder {
     pub fn add_group(mut self, group: CreditTransferGroup) -> Self {
         self.groups.push(group);
         self
+    }
+
+    /// The `GrpHdr/MsgId` this message will carry.
+    ///
+    /// What a bank de-duplicates by, and therefore what a
+    /// [`camt.055`](crate::camt055) recall has to name — see
+    /// [`OriginalMessage::from_credit_transfer`](crate::OriginalMessage) and
+    /// its direct-debit counterpart.
+    #[must_use]
+    pub fn message_id(&self) -> &str {
+        &self.msg_id
+    }
+
+    /// The schema version this message will be emitted against.
+    #[must_use]
+    pub const fn schema_version(&self) -> CreditTransferSchema {
+        self.schema
+    }
+
+    /// The pinned `GrpHdr/CreDtTm`, or `None` when `build()` will stamp one.
+    ///
+    /// `None` rather than "now": a timestamp read here would not be the one the
+    /// document ends up carrying, and a recall that quotes the wrong
+    /// `OrgnlCreDtTm` names a message that was never sent.
+    #[must_use]
+    pub const fn creation_timestamp(&self) -> Option<IsoDateTime> {
+        self.created_at
     }
 
     /// Number of payment groups.
@@ -812,6 +830,26 @@ impl Pain001Builder {
         let suffix = format!("-{}", index + 1);
         let keep = MAX_ID_LEN.saturating_sub(suffix.chars().count());
         format!("{}{suffix}", truncate_chars(&self.msg_id, keep))
+    }
+
+    /// Refuse a BIC the selected schema's `BIC`/`BICFI` type cannot express.
+    ///
+    /// ISO 9362:2022 admits a digit in the business party prefix and the
+    /// pre-2019 `BICIdentifier` does not, so this is the one place a valid
+    /// value and a valid schema can still be incompatible. Failing here names
+    /// the BIC; emitting it would fail at the bank with an XSD error.
+    fn check_bic_supported(&self, field: &'static str, bic: &Bic) -> Result<(), ValidationError> {
+        let pattern = self.schema.bic_pattern();
+        if bic.fits(pattern) {
+            Ok(())
+        } else {
+            Err(ValidationError::SchemaPattern {
+                field,
+                value: bic.as_str().to_owned(),
+                schema: self.schema.message_id(),
+                expected: pattern.as_xsd_pattern(),
+            })
+        }
     }
 
     /// Refuse a postal address on a schema whose `PstlAdr` cannot hold one.
@@ -911,79 +949,94 @@ impl Pain001Builder {
         seen_ids: &mut std::collections::BTreeSet<String>,
         total: &mut i64,
     ) -> Result<(), BuildError> {
-        {
-            let at = Location::group(i);
-            if g.entries.is_empty() {
-                return Err(BuildError::group(i, ValidationError::EmptyBatch));
-            }
-            // `PmtInfId` is what a bank echoes back in pain.002 and in a camt
-            // `Btch` block, so two groups sharing one make the booking
-            // unattributable — and duplicate detection may drop the second.
-            let id = self.payment_info_id(i);
-            check_id("PmtInf/PmtInfId", &id).at(at)?;
-            if !seen_ids.insert(id.clone()) {
-                return Err(BuildError::group(
-                    i,
-                    ValidationError::Duplicate {
-                        field: "PmtInf/PmtInfId",
-                        value: id,
-                    },
-                ));
-            }
-            check_name(
-                "Dbtr/Nm",
-                &self.charset.apply("Dbtr/Nm", &g.debtor_name).at(at)?,
-            )
-            .at(at)?;
-            Self::check_instrument_and_timing(g, self.schema).at(at)?;
-            if let Some(a) = &g.debtor_address {
-                self.check_address_supported("Dbtr/PstlAdr").at(at)?;
-                a.validate(self.charset).at(at)?;
-            }
-            if let Some(p) = &g.category_purpose {
-                p.validate("PmtTpInf/CtgyPurp/Cd").at(at)?;
-            }
-            if let Some(p) = &g.ultimate_debtor {
-                p.validate("PmtInf/UltmtDbtr", self.charset).at(at)?;
-            }
+        let at = Location::group(i);
+        if g.entries.is_empty() {
+            return Err(BuildError::group(i, ValidationError::EmptyBatch));
+        }
+        // `PmtInfId` is what a bank echoes back in pain.002 and in a camt
+        // `Btch` block, so two groups sharing one make the booking
+        // unattributable — and duplicate detection may drop the second.
+        let id = self.payment_info_id(i);
+        check_id("PmtInf/PmtInfId", &id).at(at)?;
+        if !seen_ids.insert(id.clone()) {
+            return Err(BuildError::group(
+                i,
+                ValidationError::Duplicate {
+                    field: "PmtInf/PmtInfId",
+                    value: id,
+                },
+            ));
+        }
+        check_name(
+            "Dbtr/Nm",
+            &self.charset.apply("Dbtr/Nm", &g.debtor_name).at(at)?,
+        )
+        .at(at)?;
+        Self::check_instrument_and_timing(g, self.schema).at(at)?;
+        if let Some(bic) = &g.debtor_bic {
+            self.check_bic_supported("DbtrAgt/FinInstnId", bic).at(at)?;
+        }
+        if let Some(a) = &g.debtor_address {
+            self.check_address_supported("Dbtr/PstlAdr").at(at)?;
+            a.validate(self.charset).at(at)?;
+        }
+        if let Some(p) = &g.category_purpose {
+            p.validate("PmtTpInf/CtgyPurp/Cd").at(at)?;
+        }
+        if let Some(p) = &g.ultimate_debtor {
+            p.validate("PmtInf/UltmtDbtr", self.charset).at(at)?;
+        }
 
-            for (j, e) in g.entries.iter().enumerate() {
-                let at = Location::transaction(i, j);
-                // The DK forbids the same ultimate party at both levels.
-                if g.ultimate_debtor.is_some() && e.ultimate_debtor.is_some() {
-                    return Err(BuildError {
-                        location: at,
-                        kind: ValidationError::ConflictingLevels { field: "UltmtDbtr" },
-                    });
-                }
-                check_id("CdtTrfTxInf/PmtId/EndToEndId", &e.end_to_end_id).at(at)?;
-                check_amount("CdtTrfTxInf/Amt/InstdAmt", e.amount_ct).at(at)?;
-                check_name(
-                    "Cdtr/Nm",
-                    &self.charset.apply("Cdtr/Nm", &e.creditor_name).at(at)?,
-                )
-                .at(at)?;
-                if let Some(a) = &e.creditor_address {
-                    self.check_address_supported("Cdtr/PstlAdr").at(at)?;
-                    a.validate(self.charset).at(at)?;
-                }
-                if let Some(p) = &e.ultimate_debtor {
-                    p.validate("CdtTrfTxInf/UltmtDbtr", self.charset).at(at)?;
-                }
-                if let Some(p) = &e.ultimate_creditor {
-                    p.validate("CdtTrfTxInf/UltmtCdtr", self.charset).at(at)?;
-                }
-                if let Some(p) = &e.purpose {
-                    p.validate("CdtTrfTxInf/Purp/Cd").at(at)?;
-                }
-                if let Some(r) = &e.remittance {
-                    r.validate(remittance_field(r), self.charset).at(at)?;
-                }
-                *total = total.checked_add(e.amount_ct).ok_or(BuildError {
-                    location: at,
-                    kind: ValidationError::ControlSumOverflow,
-                })?;
-            }
+        for (j, e) in g.entries.iter().enumerate() {
+            let at = Location::transaction(i, j);
+            self.validate_entry(at, g, e)?;
+            *total = total.checked_add(e.amount_ct).ok_or(BuildError {
+                location: at,
+                kind: ValidationError::ControlSumOverflow,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Validate one `CdtTrfTxInf` against its enclosing group.
+    fn validate_entry(
+        &self,
+        at: Location,
+        g: &CreditTransferGroup,
+        e: &CreditTransferEntry,
+    ) -> Result<(), BuildError> {
+        // The DK forbids the same ultimate party at both levels.
+        if g.ultimate_debtor.is_some() && e.ultimate_debtor.is_some() {
+            return Err(BuildError {
+                location: at,
+                kind: ValidationError::ConflictingLevels { field: "UltmtDbtr" },
+            });
+        }
+        check_id("CdtTrfTxInf/PmtId/EndToEndId", &e.end_to_end_id).at(at)?;
+        check_amount("CdtTrfTxInf/Amt/InstdAmt", e.amount_ct).at(at)?;
+        check_name(
+            "Cdtr/Nm",
+            &self.charset.apply("Cdtr/Nm", &e.creditor_name).at(at)?,
+        )
+        .at(at)?;
+        if let Some(bic) = &e.creditor_bic {
+            self.check_bic_supported("CdtrAgt/FinInstnId", bic).at(at)?;
+        }
+        if let Some(a) = &e.creditor_address {
+            self.check_address_supported("Cdtr/PstlAdr").at(at)?;
+            a.validate(self.charset).at(at)?;
+        }
+        if let Some(p) = &e.ultimate_debtor {
+            p.validate("CdtTrfTxInf/UltmtDbtr", self.charset).at(at)?;
+        }
+        if let Some(p) = &e.ultimate_creditor {
+            p.validate("CdtTrfTxInf/UltmtCdtr", self.charset).at(at)?;
+        }
+        if let Some(p) = &e.purpose {
+            p.validate("CdtTrfTxInf/Purp/Cd").at(at)?;
+        }
+        if let Some(r) = &e.remittance {
+            r.validate(remittance_field(r), self.charset).at(at)?;
         }
         Ok(())
     }
@@ -997,14 +1050,12 @@ impl Pain001Builder {
     /// # Examples
     ///
     /// ```
-    /// use sepa::{CreditTransferEntry, CreditTransferGroup, Pain001Builder, validate_iban};
+    /// use sepa::{CreditTransferEntry, CreditTransferGroup, IsoDate, Pain001Builder, validate_iban};
     ///
     /// let iban = validate_iban("DE89370400440532013000")?;
-    /// let xml = Pain001Builder::new("Acme GmbH")
-    ///     .msg_id("CT-001")
+    /// let xml = Pain001Builder::new("Acme GmbH", "CT-001")
     ///     .add_group(
-    ///         CreditTransferGroup::new("Acme GmbH", &iban)
-    ///             .execution_date("2026-07-20".parse()?)
+    ///         CreditTransferGroup::new("Acme GmbH", &iban, IsoDate::new(2026, 7, 20)?)
     ///             .add_entry(CreditTransferEntry::new("Payee", iban.clone(), 100, "E2E-1")),
     ///     )
     ///     .build()?;
@@ -1234,10 +1285,8 @@ mod tests {
     }
     /// A one-group message with everything `build` requires.
     fn one_group(name: &str) -> Pain001Builder {
-        Pain001Builder::new(name).msg_id("CT-001").add_group(
-            CreditTransferGroup::new(name, &de_iban())
-                .execution_date(d("2026-07-20"))
-                .add_entry(entry(12_000)),
+        Pain001Builder::new(name, "CT-001").add_group(
+            CreditTransferGroup::new(name, &de_iban(), d("2026-07-20")).add_entry(entry(12_000)),
         )
     }
 
@@ -1255,16 +1304,13 @@ mod tests {
 
     #[test]
     fn several_groups_carry_their_own_dates_and_totals() {
-        let xml = Pain001Builder::new("Acme GmbH")
-            .msg_id("CT-MULTI")
+        let xml = Pain001Builder::new("Acme GmbH", "CT-MULTI")
             .add_group(
-                CreditTransferGroup::new("Acme GmbH", &de_iban())
-                    .execution_date(d("2026-07-20"))
+                CreditTransferGroup::new("Acme GmbH", &de_iban(), d("2026-07-20"))
                     .add_entry(entry(10_000)),
             )
             .add_group(
-                CreditTransferGroup::new("Acme GmbH", &nl_iban())
-                    .execution_date(d("2026-07-25"))
+                CreditTransferGroup::new("Acme GmbH", &nl_iban(), d("2026-07-25"))
                     .add_entry(entry(5_000))
                     .add_entry(entry(2_500)),
             )
@@ -1287,12 +1333,10 @@ mod tests {
     #[test]
     fn payment_info_ids_are_unique_and_within_max35text() {
         let msg_id = "M".repeat(35);
-        let b = Pain001Builder::new("Acme").msg_id(&msg_id);
+        let b = Pain001Builder::new("Acme", &msg_id);
         let b = (0..3).fold(b, |b, _| {
             b.add_group(
-                CreditTransferGroup::new("Acme", &de_iban())
-                    .execution_date(d("2026-07-20"))
-                    .add_entry(entry(100)),
+                CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20")).add_entry(entry(100)),
             )
         });
         let xml = b.build().unwrap();
@@ -1316,13 +1360,11 @@ mod tests {
         // Two groups sharing one make a booking unattributable, and duplicate
         // detection may drop the second outright.
         let g = |id: &str| {
-            CreditTransferGroup::new("Acme", &de_iban())
+            CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                 .payment_info_id(id)
-                .execution_date(d("2026-07-20"))
                 .add_entry(entry(100))
         };
-        let err = Pain001Builder::new("Acme")
-            .msg_id("CT-DUP")
+        let err = Pain001Builder::new("Acme", "CT-DUP")
             .add_group(g("PMT-1"))
             .add_group(g("PMT-1"))
             .build()
@@ -1337,8 +1379,7 @@ mod tests {
         );
         // Distinct identifiers, and the generated defaults, are fine.
         assert!(
-            Pain001Builder::new("Acme")
-                .msg_id("CT-OK")
+            Pain001Builder::new("Acme", "CT-OK")
                 .add_group(g("PMT-1"))
                 .add_group(g("PMT-2"))
                 .build()
@@ -1347,20 +1388,25 @@ mod tests {
     }
 
     #[test]
-    fn the_generated_message_id_is_unique_per_message() {
-        // Regression: the default was `sct-<epoch seconds>`, so two messages
-        // built in the same second shared a MsgId — which is precisely the key
-        // a bank de-duplicates submissions by.
-        let ids: std::collections::BTreeSet<String> = (0..64)
-            .map(|_| Pain001Builder::new("Acme").msg_id.clone())
-            .collect();
-        assert_eq!(ids.len(), 64, "generated MsgIds collided");
-        for id in &ids {
-            assert!(
-                crate::validate::check_id("GrpHdr/MsgId", id).is_ok(),
-                "{id}"
-            );
-        }
+    fn the_message_id_is_the_callers_and_is_validated() {
+        // There is deliberately no generated default. The old one was
+        // `sct-<epoch seconds>`, so two messages built in the same second — the
+        // normal case in a batch job — shared the key a bank de-duplicates
+        // submissions by. A caller-supplied id is still checked like any other.
+        assert!(matches!(
+            Pain001Builder::new("Acme", "X".repeat(36))
+                .add_group(
+                    CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
+                        .add_entry(entry(100))
+                )
+                .build()
+                .unwrap_err()
+                .kind,
+            ValidationError::TooLong {
+                field: "GrpHdr/MsgId",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1371,12 +1417,10 @@ mod tests {
 
     #[test]
     fn legacy_dk_schema_emits_a_bare_date_and_bic() {
-        let xml = Pain001Builder::new("Test")
+        let xml = Pain001Builder::new("Test", "CT-DK")
             .schema(CreditTransferSchema::DkV2_7)
-            .msg_id("CT-DK")
             .add_group(
-                CreditTransferGroup::new("Test", &de_iban())
-                    .execution_date(d("2026-07-20"))
+                CreditTransferGroup::new("Test", &de_iban(), d("2026-07-20"))
                     .debtor_bic("COBADEFF".parse().unwrap())
                     .add_entry(entry(5_000).with_bic("ABNANL2A".parse().unwrap())),
             )
@@ -1398,12 +1442,10 @@ mod tests {
 
     #[test]
     fn sct_instant_marks_the_group() {
-        let xml = Pain001Builder::new("Acme")
-            .msg_id("CT-INST")
+        let xml = Pain001Builder::new("Acme", "CT-INST")
             .add_group(
-                CreditTransferGroup::new("Acme", &de_iban())
+                CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                     .local_instrument(LocalInstrument::Inst)
-                    .execution_date(d("2026-07-20"))
                     .add_entry(entry(5_000)),
             )
             .build()
@@ -1416,11 +1458,9 @@ mod tests {
     fn postal_addresses_sit_inside_the_party_after_the_name() {
         // PartyIdentification is a sequence: Nm, then PstlAdr. Emitting them the
         // other way round is schema-invalid even though both elements are legal.
-        let xml = Pain001Builder::new("Acme GmbH")
-            .msg_id("CT-ADR")
+        let xml = Pain001Builder::new("Acme GmbH", "CT-ADR")
             .add_group(
-                CreditTransferGroup::new("Acme GmbH", &de_iban())
-                    .execution_date(d("2026-07-20"))
+                CreditTransferGroup::new("Acme GmbH", &de_iban(), d("2026-07-20"))
                     .debtor_address(
                         crate::PostalAddress::new("Berlin", "DE")
                             .unwrap()
@@ -1450,12 +1490,10 @@ mod tests {
     fn an_address_on_a_schema_without_one_is_rejected() {
         // pain.001.003.03's PostalAddressSEPA holds only Ctry and two AdrLines,
         // so a town and a street have nowhere to go.
-        let err = Pain001Builder::new("Acme")
+        let err = Pain001Builder::new("Acme", "CT-DK-ADR")
             .schema(CreditTransferSchema::DkV2_7)
-            .msg_id("CT-DK-ADR")
             .add_group(
-                CreditTransferGroup::new("Acme", &de_iban())
-                    .execution_date(d("2026-07-20"))
+                CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                     .debtor_address(crate::PostalAddress::new("Berlin", "DE").unwrap())
                     .add_entry(entry(100)),
             )
@@ -1473,11 +1511,9 @@ mod tests {
 
     #[test]
     fn address_violations_name_the_element_and_the_transaction() {
-        let err = Pain001Builder::new("Acme")
-            .msg_id("CT-ADR-BAD")
+        let err = Pain001Builder::new("Acme", "CT-ADR-BAD")
             .add_group(
-                CreditTransferGroup::new("Acme", &de_iban())
-                    .execution_date(d("2026-07-20"))
+                CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                     .add_entry(entry(100))
                     .add_entry(
                         entry(100).with_creditor_address(
@@ -1502,11 +1538,9 @@ mod tests {
 
     #[test]
     fn batch_booking_and_category_purpose_are_group_level() {
-        let xml = Pain001Builder::new("Acme")
-            .msg_id("CT-OPT")
+        let xml = Pain001Builder::new("Acme", "CT-OPT")
             .add_group(
-                CreditTransferGroup::new("Acme", &de_iban())
-                    .execution_date(d("2026-07-20"))
+                CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                     .batch_booking(true)
                     .category_purpose(CategoryPurpose::Sala)
                     .add_entry(entry(100)),
@@ -1525,9 +1559,8 @@ mod tests {
 
     #[test]
     fn ultimate_debtor_cannot_be_set_at_both_levels() {
-        let b = Pain001Builder::new("Acme").msg_id("CT-ULT").add_group(
-            CreditTransferGroup::new("Acme", &de_iban())
-                .execution_date(d("2026-07-20"))
+        let b = Pain001Builder::new("Acme", "CT-ULT").add_group(
+            CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                 .ultimate_debtor(Party::new("Gruppe"))
                 .add_entry(entry(100).with_ultimate_debtor(Party::new("Transaktion"))),
         );
@@ -1544,13 +1577,16 @@ mod tests {
     #[test]
     fn empty_message_and_empty_group_are_both_rejected() {
         assert_eq!(
-            Pain001Builder::new("Acme").msg_id("E").build(),
+            Pain001Builder::new("Acme", "E").build(),
             Err(BuildError::message(ValidationError::EmptyBatch))
         );
         assert_eq!(
-            Pain001Builder::new("Acme")
-                .msg_id("E")
-                .add_group(CreditTransferGroup::new("Acme", &de_iban()))
+            Pain001Builder::new("Acme", "E")
+                .add_group(CreditTransferGroup::new(
+                    "Acme",
+                    &de_iban(),
+                    d("2026-07-20")
+                ))
                 .build(),
             Err(BuildError::group(0, ValidationError::EmptyBatch))
         );
@@ -1558,8 +1594,8 @@ mod tests {
 
     #[test]
     fn validation_rejects_bad_fields() {
-        let g = || CreditTransferGroup::new("Acme", &de_iban()).execution_date(d("2026-07-20"));
-        let b = || Pain001Builder::new("Acme").msg_id("OK");
+        let g = || CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"));
+        let b = || Pain001Builder::new("Acme", "OK");
         let kind = |r: Result<String, BuildError>| r.unwrap_err().kind;
 
         assert!(matches!(
@@ -1572,7 +1608,7 @@ mod tests {
         ));
         assert!(matches!(
             kind(
-                b().msg_id("X".repeat(36))
+                Pain001Builder::new("Acme", "X".repeat(36))
                     .add_group(g().add_entry(entry(100)))
                     .build()
             ),
@@ -1582,9 +1618,8 @@ mod tests {
 
     #[test]
     fn errors_name_the_group_and_transaction_that_failed() {
-        let g = || CreditTransferGroup::new("Acme", &de_iban()).execution_date(d("2026-07-20"));
-        let err = Pain001Builder::new("Acme")
-            .msg_id("CT-LOC")
+        let g = || CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"));
+        let err = Pain001Builder::new("Acme", "CT-LOC")
             .add_group(g().add_entry(entry(100)))
             .add_group(g().add_entry(entry(100)).add_entry(entry(0)))
             .build()
@@ -1611,12 +1646,10 @@ mod tests {
 
     #[test]
     fn the_epc_legacy_schema_emits_a_bare_date_and_the_pre_2019_bic_element() {
-        let xml = Pain001Builder::new("Acme")
+        let xml = Pain001Builder::new("Acme", "CT-V3")
             .schema(CreditTransferSchema::IsoV3)
-            .msg_id("CT-V3")
             .add_group(
-                CreditTransferGroup::new("Acme", &de_iban())
-                    .execution_date(d("2026-07-20"))
+                CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                     .debtor_bic("COBADEFF".parse().unwrap())
                     .add_entry(entry(5_000).with_bic("ABNANL2A".parse().unwrap())),
             )
@@ -1632,13 +1665,11 @@ mod tests {
     fn sct_instant_on_a_schema_without_lclinstrm_is_rejected() {
         // Regression: the DK schema has no LclInstrm element, so this used to
         // emit a file that failed its own XSD. It is now a typed error.
-        let err = Pain001Builder::new("Acme")
+        let err = Pain001Builder::new("Acme", "CT-DK-INST")
             .schema(CreditTransferSchema::DkV2_7)
-            .msg_id("CT-DK-INST")
             .add_group(
-                CreditTransferGroup::new("Acme", &de_iban())
+                CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                     .local_instrument(LocalInstrument::Inst)
-                    .execution_date(d("2026-07-20"))
                     .add_entry(entry(5_000)),
             )
             .build()
@@ -1654,13 +1685,11 @@ mod tests {
 
         // The EPC schemas both carry it.
         for schema in [CreditTransferSchema::IsoV9, CreditTransferSchema::IsoV3] {
-            let xml = Pain001Builder::new("Acme")
+            let xml = Pain001Builder::new("Acme", "CT-INST")
                 .schema(schema)
-                .msg_id("CT-INST")
                 .add_group(
-                    CreditTransferGroup::new("Acme", &de_iban())
+                    CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                         .local_instrument(LocalInstrument::Inst)
-                        .execution_date(d("2026-07-20"))
                         .add_entry(entry(5_000)),
                 )
                 .build()
@@ -1674,9 +1703,8 @@ mod tests {
 
     #[test]
     fn totals_use_integer_arithmetic() {
-        let b = Pain001Builder::new("Acme").msg_id("CT").add_group(
-            CreditTransferGroup::new("Acme", &de_iban())
-                .execution_date(d("2026-07-20"))
+        let b = Pain001Builder::new("Acme", "CT").add_group(
+            CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
                 .add_entry(entry(10))
                 .add_entry(entry(20)),
         );
@@ -1698,11 +1726,9 @@ mod tests {
 
     #[test]
     fn non_sepa_characters_are_transliterated() {
-        let xml = Pain001Builder::new("Müller & Söhne GmbH")
-            .msg_id("CT-UML")
+        let xml = Pain001Builder::new("Müller & Söhne GmbH", "CT-UML")
             .add_group(
-                CreditTransferGroup::new("Müller & Söhne GmbH", &de_iban())
-                    .execution_date(d("2026-07-20"))
+                CreditTransferGroup::new("Müller & Söhne GmbH", &de_iban(), d("2026-07-20"))
                     .add_entry(
                         CreditTransferEntry::new("Ökonomie AG", nl_iban(), 100, "E2E-1")
                             .with_description("Zahlung für Groß-Auftrag"),
@@ -1742,7 +1768,11 @@ mod tests {
 
         // A rejected message writes nothing at all.
         let mut empty: Vec<u8> = Vec::new();
-        assert!(Pain001Builder::new("Acme").write_to(&mut empty).is_err());
+        assert!(
+            Pain001Builder::new("Acme", "CT-EMPTY")
+                .write_to(&mut empty)
+                .is_err()
+        );
         assert!(empty.is_empty());
     }
 }

@@ -128,14 +128,34 @@ pub struct Camt054Notification {
     /// currency and servicing institution. See [`AccountRef`](crate::camt::AccountRef).
     pub account: crate::camt::AccountRef,
     /// Notification period start, ISO 8601.
-    pub from_date: Option<String>,
+    pub from_date_raw: Option<String>,
     /// Notification period end, ISO 8601.
-    pub to_date: Option<String>,
+    pub to_date_raw: Option<String>,
     /// The notified entries.
     pub entries: Vec<crate::camt::CashEntry>,
 }
 
 impl Camt054Notification {
+    /// The period start, typed.
+    ///
+    /// `FrToDt` is a date/time choice, so it arrives as `"2026-07-14"` from one
+    /// bank and `"2026-07-14T00:00:00"` from the next. The text that arrived is
+    /// kept in [`from_date_raw`](Self::from_date_raw) either way — the same
+    /// verbatim-and-typed rule [`CashEntry::booking_date`] follows, applied
+    /// here so the whole read path answers dates the same way.
+    ///
+    /// [`CashEntry::booking_date`]: crate::CashEntry::booking_date
+    #[must_use]
+    pub fn from_date(&self) -> Option<crate::IsoDate> {
+        crate::IsoDate::parse_date_part(self.from_date_raw.as_deref()?).ok()
+    }
+
+    /// The period end, typed. See [`from_date`](Self::from_date).
+    #[must_use]
+    pub fn to_date(&self) -> Option<crate::IsoDate> {
+        crate::IsoDate::parse_date_part(self.to_date_raw.as_deref()?).ok()
+    }
+
     /// Net movement in ct across all entries.
     #[must_use]
     pub fn net_movement_ct(&self) -> i64 {
@@ -162,11 +182,22 @@ pub struct Camt054Document {
     /// Document message ID.
     pub msg_id: String,
     /// Document creation timestamp.
-    pub created_at: String,
+    pub created_at_raw: String,
     /// Detected XML namespace URI.
     pub namespace: Option<String>,
     /// One or more notifications.
     pub notifications: Vec<Camt054Notification>,
+}
+
+impl Camt054Document {
+    /// When the bank generated this document, typed.
+    ///
+    /// `None` when it reported none, or one this crate cannot read;
+    /// [`created_at_raw`](Self::created_at_raw) still holds whatever arrived.
+    #[must_use]
+    pub fn created_at(&self) -> Option<crate::IsoDateTime> {
+        crate::IsoDateTime::parse(&self.created_at_raw).ok()
+    }
 }
 
 /// Error returned when camt.054 XML cannot be parsed.
@@ -231,8 +262,8 @@ pub fn parse_camt054(xml: &str) -> Result<Camt054Document, Camt054ParseError> {
         Camt054Notification {
             notification_id: n.text_of("Id").unwrap_or_default().to_owned(),
             account: camt::account_of(n),
-            from_date,
-            to_date,
+            from_date_raw: from_date,
+            to_date_raw: to_date,
             entries: camt::entries_of(n),
         }
     }
@@ -253,7 +284,7 @@ pub fn parse_camt054(xml: &str) -> Result<Camt054Document, Camt054ParseError> {
 
     Ok(Camt054Document {
         msg_id: text("MsgId"),
-        created_at: text("CreDtTm"),
+        created_at_raw: text("CreDtTm"),
         namespace: doc.namespace,
         notifications: root
             .children_named("Ntfctn")

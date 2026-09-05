@@ -67,6 +67,12 @@
 //! | `&` | *N/A* | `+` | `+` |
 //! | `_` `~` | *absent* | `-` | `-` |
 //! | `€` | `E` | `E` | `E` |
+//! | `ẞ` | *absent* | — | `S` (`SS` in the German style) |
+//!
+//! `ẞ` — U+1E9E, the capital sharp S — was encoded in Unicode 5.1, after the
+//! table was drawn up, so the spreadsheet carries only the lower-case `ß`.
+//! Falling through to the `.` rule would drop a letter out of a name, so it
+//! takes the upper case of what its lower-case counterpart maps to.
 //!
 //! `"`, `<` and `>` are marked *N/A* with no prose rule, since XML escaping
 //! handles them at the syntax level. They are still not SEPA-legal, so they map
@@ -227,7 +233,10 @@ fn map_char(c: char, style: Transliteration) -> &'static str {
             'Ä' => return "Ae",
             'Ö' => return "Oe",
             'Ü' => return "Ue",
-            'ß' | 'ẞ' => return "ss",
+            'ß' => return "ss",
+            // U+1E9E LATIN CAPITAL LETTER SHARP S. Its case-folded expansion is
+            // "SS", not "ss" — a name written GROẞE must not come out GROssE.
+            'ẞ' => return "SS",
             _ => {}
         }
     }
@@ -240,6 +249,12 @@ fn map_char(c: char, style: Transliteration) -> &'static str {
     match c {
         '&' => return "+",
         '_' | '~' => return "-",
+        // U+1E9E LATIN CAPITAL LETTER SHARP S is absent from the table: it was
+        // encoded in Unicode 5.1 (2008), after EPC217-08 was drawn up, so the
+        // spreadsheet carries only the lower-case U+00DF. Mapping it to the
+        // upper-case of that row's target is the reading the table implies;
+        // the alternative is the '.' fallback, which loses a letter of a name.
+        'ẞ' => return "S",
         // No EPC rule: these are not SEPA-legal, and mapping them to the
         // nearest legal punctuation preserves more than a bare '.' would.
         '"' => return "'",
@@ -307,6 +322,17 @@ mod tests {
     }
 
     #[test]
+    fn the_capital_sharp_s_expands_in_upper_case() {
+        // Regression: U+1E9E shared an arm with 'ß' and produced "ss", so an
+        // upper-cased name came back mixed-case — "STRAssE" on the statement.
+        assert_eq!(transliterate("STRAẞE", Transliteration::German), "STRASSE");
+        assert_eq!(transliterate("straße", Transliteration::German), "strasse");
+        // The EPC table is one-to-one for both cases and keeps them apart too.
+        assert_eq!(transliterate("STRAẞE", Transliteration::Epc), "STRASE");
+        assert_eq!(transliterate("straße", Transliteration::Epc), "strase");
+    }
+
+    #[test]
     fn epc_maps_ligatures_one_to_one() {
         // EPC217-08 is strictly one character to one character for Latin — the
         // ligatures do NOT expand. A generic transliterator produces "AE"/"OE",
@@ -329,8 +355,9 @@ mod tests {
 
     #[test]
     fn greek_and_cyrillic_use_the_published_romanisation() {
-        // 26 letters have a real multi-character romanisation in EPC217-08
-        // (ISO 843 / ISO 9). Collapsing them to '.' loses the name entirely.
+        // Twenty letters have a real multi-character romanisation in EPC217-08
+        // (ISO 843 / ISO 9). Collapsing them to '.' loses the name entirely,
+        // and the count is pinned by `exactly_twenty_entries_lengthen_the_text`.
         for (input, expected) in [
             ('Θ', "TH"),
             ('Χ', "CH"),
@@ -480,6 +507,36 @@ mod tests {
     fn control_and_exotic_whitespace_becomes_a_space() {
         assert_eq!(transliterate("a\tb\nc", Transliteration::Epc), "a b c");
         assert_eq!(transliterate("a\u{00A0}b", Transliteration::Epc), "a b");
+    }
+
+    #[test]
+    fn every_unicode_code_point_transliterates_into_the_sepa_set() {
+        // The claim the documentation makes, as the test it names: all
+        // 1_114_112 code points, through both styles, asserting the output is
+        // SEPA-legal. A fixed hostile string exercises the table; only the
+        // sweep covers the fallback path for everything absent from it.
+        let mut checked = 0u32;
+        for cp in 0u32..=0x10_FFFF {
+            let Some(ch) = char::from_u32(cp) else {
+                continue; // surrogate range: not a `char`
+            };
+            checked += 1;
+            let mut buf = [0u8; 4];
+            let input = ch.encode_utf8(&mut buf);
+            for style in [Transliteration::German, Transliteration::Epc] {
+                let out = transliterate(input, style);
+                assert!(
+                    is_sepa_text(&out),
+                    "U+{cp:04X} under {style:?} produced {out:?}, which is not SEPA-legal"
+                );
+                assert!(
+                    !out.is_empty(),
+                    "U+{cp:04X} under {style:?} produced nothing; unmapped characters become '.'"
+                );
+            }
+        }
+        // 0x110000 code points minus the 2048 surrogates.
+        assert_eq!(checked, 1_112_064);
     }
 
     #[test]

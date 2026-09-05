@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+  schedule:
+    # Weekly, for the long fuzz run and the vendored-data drift check.
+    - cron: "17 4 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -114,6 +117,73 @@ jobs:
       - name: Install xmllint
         run: sudo apt-get update && sudo apt-get install -y libxml2-utils
       - run: cargo test --all-targets ${{ matrix.features }}
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: [clippy]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse, identifiers, build_batch]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
+          workspaces: ". -> target\nfuzz -> fuzz/target"
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # A short run on every push, a long one on the weekly schedule. The
+      # targets assert invariants, not just absence of panics, so this is a
+      # correctness gate rather than a crash hunt: `build_batch` checks that
+      # every accepted document's text is inside the SEPA character set.
+      - name: Fuzz
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            SECS=600
+          else
+            SECS=60
+          fi
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time=$SECS
+      - name: Upload crash artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  vendored-data:
+    name: Vendored reference data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The XSD digests recorded in tests/xsd/README.md, re-checked. A schema
+      # swapped for a defective mirror is the failure mode this catches — it
+      # makes correct output fail validation, which invites "fixing" the writer.
+      # See the "Not every mirror is correct" note in tests/xsd/README.md.
+      - name: Verify pinned XSD digests
+        run: ./scripts/check-vendored-data.sh
+      # The registry table against SWIFT's own published examples, and the
+      # cross-table invariants. These run in the normal suite too; naming them
+      # here makes a data regression legible as one.
+      - name: Reference-data conformance tests
+        run: |
+          cargo test --all-features --lib -- \
+            iban::tests::every_published_registry_example_validates \
+            iban::tests::every_registry_example_is_reproduced_from_its_own_bban \
+            iban::tests::registry_has_full_swift_entry_count \
+            iban::tests::registry_structures_are_well_formed \
+            country::tests::every_iban_registry_country_is_a_country_code \
+            country::tests::every_sepa_country_is_a_country_code \
+            charset::tests::no_table_entry_maps_a_character_that_is_already_legal \
+            charset::tests::every_replacement_is_itself_legal_and_non_empty \
+            charset::tests::exactly_twenty_entries_lengthen_the_text \
+            --exact
 
   deny:
     name: cargo-deny (licenses + advisories)

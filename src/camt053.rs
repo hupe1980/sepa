@@ -76,9 +76,9 @@ pub struct Camt053Statement {
     /// servicing institution. See [`AccountRef`].
     pub account: AccountRef,
     /// Statement period start, ISO 8601.
-    pub from_date: Option<String>,
+    pub from_date_raw: Option<String>,
     /// Statement period end, ISO 8601.
-    pub to_date: Option<String>,
+    pub to_date_raw: Option<String>,
     /// All balances in this statement.
     pub balances: Vec<StatementBalance>,
     /// All entries (booked and pending transactions).
@@ -86,6 +86,26 @@ pub struct Camt053Statement {
 }
 
 impl Camt053Statement {
+    /// The period start, typed.
+    ///
+    /// `FrToDt` is a date/time choice, so it arrives as `"2026-07-14"` from one
+    /// bank and `"2026-07-14T00:00:00"` from the next. The text that arrived is
+    /// kept in [`from_date_raw`](Self::from_date_raw) either way — the same
+    /// verbatim-and-typed rule [`CashEntry::booking_date`] follows, applied
+    /// here so the whole read path answers dates the same way.
+    ///
+    /// [`CashEntry::booking_date`]: crate::CashEntry::booking_date
+    #[must_use]
+    pub fn from_date(&self) -> Option<crate::IsoDate> {
+        crate::IsoDate::parse_date_part(self.from_date_raw.as_deref()?).ok()
+    }
+
+    /// The period end, typed. See [`from_date`](Self::from_date).
+    #[must_use]
+    pub fn to_date(&self) -> Option<crate::IsoDate> {
+        crate::IsoDate::parse_date_part(self.to_date_raw.as_deref()?).ok()
+    }
+
     /// Opening booked balance (`OPBD`), if present.
     #[must_use]
     pub fn opening_balance(&self) -> Option<&StatementBalance> {
@@ -102,10 +122,18 @@ impl Camt053Statement {
             .find(|b| b.balance_type == BalanceType::ClosingBooked)
     }
 
-    /// Net movement in ct for this statement (sum of signed entry amounts).
+    /// Net movement in ct for this statement (sum of signed entry amounts),
+    /// saturating rather than panicking on an implausible total.
+    ///
+    /// `Iterator::sum` was the previous implementation and panics on overflow in
+    /// a debug build — reachable from a bank file, which is the one place this
+    /// crate does not take input on trust. camt.052 and camt.054 already
+    /// saturated; the three agree now.
     #[must_use]
     pub fn net_movement_ct(&self) -> i64 {
-        self.entries.iter().map(CashEntry::signed_ct).sum()
+        self.entries
+            .iter()
+            .fold(0i64, |acc, e| acc.saturating_add(e.signed_ct()))
     }
 }
 
@@ -121,11 +149,22 @@ pub struct Camt053Document {
     /// Document message ID.
     pub msg_id: String,
     /// Document creation timestamp.
-    pub created_at: String,
+    pub created_at_raw: String,
     /// Detected XML namespace URI.
     pub namespace: Option<String>,
     /// One or more statements (one per account, typically one per document).
     pub statements: Vec<Camt053Statement>,
+}
+
+impl Camt053Document {
+    /// When the bank generated this document, typed.
+    ///
+    /// `None` when it reported none, or one this crate cannot read;
+    /// [`created_at_raw`](Self::created_at_raw) still holds whatever arrived.
+    #[must_use]
+    pub fn created_at(&self) -> Option<crate::IsoDateTime> {
+        crate::IsoDateTime::parse(&self.created_at_raw).ok()
+    }
 }
 
 // ── Error ─────────────────────────────────────────────────────────────────────
@@ -176,7 +215,7 @@ pub fn parse_camt053(xml: &str) -> Result<Camt053Document, Camt053ParseError> {
 
     Ok(Camt053Document {
         msg_id: text("MsgId"),
-        created_at: text("CreDtTm"),
+        created_at_raw: text("CreDtTm"),
         namespace: doc.namespace,
         statements: root.children_named("Stmt").map(parse_statement).collect(),
     })
@@ -190,8 +229,8 @@ fn parse_statement(s: &Node) -> Camt053Statement {
         stmt_id: s.text_of("Id").unwrap_or_default().to_owned(),
         sequence_number: s.text_of("ElctrncSeqNb").and_then(|v| v.parse().ok()),
         account: camt::account_of(s),
-        from_date,
-        to_date,
+        from_date_raw: from_date,
+        to_date_raw: to_date,
         balances: camt::balances_of(s),
         entries: camt::entries_of(s),
     }
@@ -444,9 +483,10 @@ mod tests {
 </Document>"#;
         let doc = parse_camt053(xml).unwrap();
         assert_eq!(
-            doc.statements[0].from_date, None,
-            "from_date must be None when FrToDt is absent"
+            doc.statements[0].from_date_raw, None,
+            "from_date_raw must be None when FrToDt is absent"
         );
-        assert_eq!(doc.statements[0].to_date, None);
+        assert_eq!(doc.statements[0].to_date_raw, None);
+        assert_eq!(doc.statements[0].from_date(), None);
     }
 }

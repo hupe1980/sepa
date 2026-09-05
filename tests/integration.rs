@@ -50,12 +50,10 @@ fn creditor_id() -> sepa::CreditorId {
 }
 
 fn sct(schema: CreditTransferSchema) -> String {
-    Pain001Builder::new("Acme GmbH")
+    Pain001Builder::new("Acme GmbH", "CT-2026-07-001-MAXLEN-PADDING-XXXXX")
         .schema(schema)
-        .msg_id("CT-2026-07-001-MAXLEN-PADDING-XXXXX")
         .add_group(
-            CreditTransferGroup::new("Acme GmbH", &debtor())
-                .execution_date(date("2026-07-20"))
+            CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
                 .debtor_bic("COBADEFF".parse().unwrap())
                 .add_entry(
                     CreditTransferEntry::new("Supplier AG", creditor(), 12_000, "INV-2026-001")
@@ -74,27 +72,175 @@ fn sct(schema: CreditTransferSchema) -> String {
 }
 
 fn sdd(schema: DirectDebitSchema) -> String {
-    Pain008Builder::new("Stadtwerke GmbH")
+    Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
         .schema(schema)
-        .msg_id("DD-2026-07-001")
         .add_group(
-            DirectDebitGroup::new("Stadtwerke GmbH", &debtor(), &creditor_id())
-                .collection_date(date("2026-07-20"))
-                .creditor_bic("COBADEFF".parse().unwrap())
-                .add_entry(
-                    DirectDebitEntry::new(
-                        "MND-00042",
-                        date("2024-06-01"),
-                        "Max Mustermann",
-                        creditor(),
-                        7_500,
-                        "R2026-07-001",
-                    )
-                    .with_description("Abschlag Juli 2026"),
-                ),
+            DirectDebitGroup::new(
+                "Stadtwerke GmbH",
+                &debtor(),
+                &creditor_id(),
+                date("2026-07-20"),
+            )
+            .creditor_bic("COBADEFF".parse().unwrap())
+            .add_entry(
+                DirectDebitEntry::new(
+                    "MND-00042",
+                    date("2024-06-01"),
+                    "Max Mustermann",
+                    creditor(),
+                    7_500,
+                    "R2026-07-001",
+                )
+                .with_description("Abschlag Juli 2026"),
+            ),
         )
         .build()
         .expect("batch is valid")
+}
+
+/// Every camt.055 shape the builder can produce, for the schema gate.
+///
+/// Shared with nothing else on purpose: these are the documents the XSD sees,
+/// and a scope that is not in this list is a scope no schema has checked.
+fn camt055_fixtures() -> Vec<String> {
+    use sepa::{
+        Camt055Builder, CancellationEntry, CancellationGroup, CancellationReason, OriginalMessage,
+        validate_bic,
+    };
+
+    let submitted = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
+        .created_at("2026-07-15T09:00:00".parse().unwrap())
+        .add_group(
+            DirectDebitGroup::new(
+                "Stadtwerke GmbH",
+                &creditor(),
+                &creditor_id(),
+                date("2026-07-20"),
+            )
+            .payment_info_id("PMT-A")
+            .add_entry(DirectDebitEntry::new(
+                "MND-1",
+                date("2024-06-01"),
+                "Max Mustermann",
+                debtor(),
+                7_500,
+                "E2E-1",
+            )),
+        );
+    let base = || {
+        Camt055Builder::new(
+            "CXL-2026-07-001",
+            "Stadtwerke GmbH",
+            validate_bic("COBADEFFXXX").unwrap(),
+            OriginalMessage::from_direct_debit(&submitted),
+        )
+        .created_at("2026-07-15T11:30:00".parse().unwrap())
+    };
+
+    vec![
+        // Named transactions, with every optional element populated.
+        base()
+            .case_id("CASE-2026-07-001")
+            .add_group(
+                CancellationGroup::new("PMT-A")
+                    .payment_cancellation_id("PC-1")
+                    .add_entry(
+                        CancellationEntry::new("E2E-1", CancellationReason::Dupl)
+                            .cancellation_id("CX-1")
+                            .original_instruction_id("INSTR-1")
+                            .original_amount(7_500)
+                            .additional_info("Doppelte Einreichung"),
+                    ),
+            )
+            .build()
+            .unwrap(),
+        // A whole `PmtInf`.
+        base()
+            .add_group(
+                CancellationGroup::new("PMT-A")
+                    .cancel_whole_group(CancellationReason::Upay)
+                    .additional_info("Lauf zurueckgezogen"),
+            )
+            .build()
+            .unwrap(),
+        // The whole file.
+        base()
+            .cancel_whole_message(CancellationReason::Tech)
+            .additional_info("Fehlerhafter Lauf")
+            .build()
+            .unwrap(),
+        // A proprietary reason, which must land in `Prtry` and not in `Cd`.
+        base()
+            .add_group(
+                CancellationGroup::new("PMT-A").add_entry(CancellationEntry::new(
+                    "E2E-1",
+                    "XY99".parse::<sepa::CancellationReason>().unwrap(),
+                )),
+            )
+            .build()
+            .unwrap(),
+    ]
+}
+
+/// The camt.029 fixtures the parser unit tests read, for the schema gate.
+fn camt029_fixtures() -> Vec<String> {
+    let accepted = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
+  <RsltnOfInvstgtn>
+    <Assgnmt><Id>RES-1</Id>
+      <Assgnr><Agt><FinInstnId><BICFI>COBADEFFXXX</BICFI></FinInstnId></Agt></Assgnr>
+      <Assgne><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Assgne>
+      <CreDtTm>2026-07-15T14:02:00</CreDtTm></Assgnmt>
+    <RslvdCase><Id>CXL-1</Id><Cretr><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Cretr></RslvdCase>
+    <Sts><Conf>CNCL</Conf></Sts>
+    <CxlDtls>
+      <OrgnlGrpInfAndSts>
+        <OrgnlMsgId>DD-2026-07-001</OrgnlMsgId>
+        <OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+        <OrgnlCreDtTm>2026-07-15T09:00:00</OrgnlCreDtTm>
+        <OrgnlNbOfTxs>3</OrgnlNbOfTxs>
+        <OrgnlCtrlSum>225.00</OrgnlCtrlSum>
+      </OrgnlGrpInfAndSts>
+      <OrgnlPmtInfAndSts>
+        <OrgnlPmtInfCxlId>PC-1</OrgnlPmtInfCxlId>
+        <OrgnlPmtInfId>PMT-A</OrgnlPmtInfId>
+        <NbOfTxsPerCxlSts><DtldNbOfTxs>1</DtldNbOfTxs><DtldSts>ACCR</DtldSts>
+          <DtldCtrlSum>75.00</DtldCtrlSum></NbOfTxsPerCxlSts>
+        <TxInfAndSts>
+          <CxlStsId>CS-1</CxlStsId>
+          <OrgnlEndToEndId>E2E-1</OrgnlEndToEndId>
+          <TxCxlSts>ACCR</TxCxlSts>
+          <OrgnlInstdAmt Ccy="EUR">75.00</OrgnlInstdAmt>
+          <OrgnlReqdColltnDt>2026-07-20</OrgnlReqdColltnDt>
+        </TxInfAndSts>
+      </OrgnlPmtInfAndSts>
+    </CxlDtls>
+  </RsltnOfInvstgtn>
+</Document>"#;
+
+    let refused = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
+  <RsltnOfInvstgtn>
+    <Assgnmt><Id>RES-2</Id>
+      <Assgnr><Agt><FinInstnId><BICFI>COBADEFFXXX</BICFI></FinInstnId></Agt></Assgnr>
+      <Assgne><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Assgne>
+      <CreDtTm>2026-07-15T14:02:00</CreDtTm></Assgnmt>
+    <RslvdCase><Id>CXL-2</Id><Cretr><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Cretr></RslvdCase>
+    <Sts><Conf>RJCR</Conf></Sts>
+    <CxlDtls>
+      <OrgnlGrpInfAndSts>
+        <OrgnlMsgId>DD-2026-07-001</OrgnlMsgId>
+        <OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+        <GrpCxlSts>RJCR</GrpCxlSts>
+        <CxlStsRsnInf><Rsn><Cd>ARDT</Cd></Rsn>
+          <AddtlInf>Bereits ausgefuehrt und zurueckgegeben</AddtlInf>
+          <AddtlInf>Bitte pain.007 verwenden</AddtlInf></CxlStsRsnInf>
+      </OrgnlGrpInfAndSts>
+    </CxlDtls>
+  </RsltnOfInvstgtn>
+</Document>"#;
+
+    vec![accepted.to_owned(), refused.to_owned()]
 }
 
 // ── XSD validation ────────────────────────────────────────────────────────────
@@ -176,18 +322,20 @@ mod xsd {
         // and a batch with no BIC at all is the common case for a German
         // creditor — so it needs covering per version, not just by default.
         for schema in CreditTransferSchema::ALL {
-            let xml = super::Pain001Builder::new("Acme GmbH")
+            let xml = super::Pain001Builder::new("Acme GmbH", "CT-NOBIC")
                 .schema(*schema)
-                .msg_id("CT-NOBIC")
                 .add_group(
-                    super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
-                        .execution_date(date("2026-07-20"))
-                        .add_entry(super::CreditTransferEntry::new(
-                            "Payee",
-                            super::creditor(),
-                            100,
-                            "E2E-1",
-                        )),
+                    super::CreditTransferGroup::new(
+                        "Acme GmbH",
+                        &super::debtor(),
+                        date("2026-07-20"),
+                    )
+                    .add_entry(super::CreditTransferEntry::new(
+                        "Payee",
+                        super::creditor(),
+                        100,
+                        "E2E-1",
+                    )),
                 )
                 .build()
                 .unwrap();
@@ -196,16 +344,15 @@ mod xsd {
         }
 
         for schema in DirectDebitSchema::ALL {
-            let xml = super::Pain008Builder::new("Stadtwerke GmbH")
+            let xml = super::Pain008Builder::new("Stadtwerke GmbH", "DD-NOBIC")
                 .schema(*schema)
-                .msg_id("DD-NOBIC")
                 .add_group(
                     super::DirectDebitGroup::new(
                         "Stadtwerke GmbH",
                         &super::debtor(),
                         &super::creditor_id(),
+                        date("2026-07-20"),
                     )
-                    .collection_date(date("2026-07-20"))
                     .add_entry(super::DirectDebitEntry::new(
                         "MND-1",
                         date("2024-06-01"),
@@ -231,16 +378,15 @@ mod xsd {
         // OrgnlDbtrAcct and enumerates SMNDA under OrgnlDbtrAgt instead, so the
         // post-2016 placement was schema-invalid there.
         for schema in DirectDebitSchema::ALL {
-            let xml = super::Pain008Builder::new("Stadtwerke GmbH")
+            let xml = super::Pain008Builder::new("Stadtwerke GmbH", "DD-SMNDA")
                 .schema(*schema)
-                .msg_id("DD-SMNDA")
                 .add_group(
                     super::DirectDebitGroup::new(
                         "Stadtwerke GmbH",
                         &super::debtor(),
                         &super::creditor_id(),
+                        date("2026-07-20"),
                     )
-                    .collection_date(date("2026-07-20"))
                     .add_entry(
                         super::DirectDebitEntry::new(
                             "MND-1",
@@ -265,19 +411,21 @@ mod xsd {
         // Regression: the DK schema has no LclInstrm element, and the builder
         // used to emit one anyway — producing a file that failed its own XSD.
         for schema in CreditTransferSchema::ALL {
-            let built = super::Pain001Builder::new("Acme GmbH")
+            let built = super::Pain001Builder::new("Acme GmbH", "CT-INST")
                 .schema(*schema)
-                .msg_id("CT-INST")
                 .add_group(
-                    super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
-                        .local_instrument(sepa::pain001::LocalInstrument::Inst)
-                        .execution_date(date("2026-07-20"))
-                        .add_entry(super::CreditTransferEntry::new(
-                            "Payee",
-                            super::creditor(),
-                            5_000,
-                            "INST-1",
-                        )),
+                    super::CreditTransferGroup::new(
+                        "Acme GmbH",
+                        &super::debtor(),
+                        date("2026-07-20"),
+                    )
+                    .local_instrument(sepa::pain001::LocalInstrument::Inst)
+                    .add_entry(super::CreditTransferEntry::new(
+                        "Payee",
+                        super::creditor(),
+                        5_000,
+                        "INST-1",
+                    )),
                 )
                 .build();
 
@@ -315,26 +463,28 @@ mod xsd {
         };
 
         for schema in CreditTransferSchema::ALL {
-            let built = super::Pain001Builder::new("Acme GmbH")
+            let built = super::Pain001Builder::new("Acme GmbH", "CT-ADR")
                 .schema(*schema)
-                .msg_id("CT-ADR")
                 .add_group(
-                    super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
-                        .execution_date(date("2026-07-20"))
-                        .debtor_address(address())
-                        .add_entry(
-                            super::CreditTransferEntry::new(
-                                "Supplier AG",
-                                super::creditor(),
-                                12_000,
-                                "E2E-1",
-                            )
-                            .with_creditor_address(
-                                sepa::PostalAddress::new("Amsterdam", "NL")
-                                    .unwrap()
-                                    .line("Herengracht 1"),
-                            ),
+                    super::CreditTransferGroup::new(
+                        "Acme GmbH",
+                        &super::debtor(),
+                        date("2026-07-20"),
+                    )
+                    .debtor_address(address())
+                    .add_entry(
+                        super::CreditTransferEntry::new(
+                            "Supplier AG",
+                            super::creditor(),
+                            12_000,
+                            "E2E-1",
+                        )
+                        .with_creditor_address(
+                            sepa::PostalAddress::new("Amsterdam", "NL")
+                                .unwrap()
+                                .line("Herengracht 1"),
                         ),
+                    ),
                 )
                 .build();
 
@@ -363,16 +513,15 @@ mod xsd {
         }
 
         for schema in DirectDebitSchema::ALL {
-            let built = super::Pain008Builder::new("Stadtwerke GmbH")
+            let built = super::Pain008Builder::new("Stadtwerke GmbH", "DD-ADR")
                 .schema(*schema)
-                .msg_id("DD-ADR")
                 .add_group(
                     super::DirectDebitGroup::new(
                         "Stadtwerke GmbH",
                         &super::debtor(),
                         &super::creditor_id(),
+                        date("2026-07-20"),
                     )
-                    .collection_date(date("2026-07-20"))
                     .creditor_address(address())
                     .add_entry(
                         super::DirectDebitEntry::new(
@@ -415,19 +564,21 @@ mod xsd {
         // transfer due at a stated time, which needs ReqdExctnDt/DtTm. Only
         // pain.001.001.09 types ReqdExctnDt as a date/time choice.
         for schema in CreditTransferSchema::ALL {
-            let built = super::Pain001Builder::new("Acme GmbH")
+            let built = super::Pain001Builder::new("Acme GmbH", "CT-TIMED")
                 .schema(*schema)
-                .msg_id("CT-TIMED")
                 .add_group(
-                    super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
-                        .local_instrument(sepa::LocalInstrument::Inst)
-                        .execution_at("2026-07-20T11:00:00Z".parse().unwrap())
-                        .add_entry(super::CreditTransferEntry::new(
-                            "Payee",
-                            super::creditor(),
-                            5_000,
-                            "E2E-1",
-                        )),
+                    super::CreditTransferGroup::new(
+                        "Acme GmbH",
+                        &super::debtor(),
+                        "2026-07-20T11:00:00Z".parse::<sepa::IsoDateTime>().unwrap(),
+                    )
+                    .local_instrument(sepa::LocalInstrument::Inst)
+                    .add_entry(super::CreditTransferEntry::new(
+                        "Payee",
+                        super::creditor(),
+                        5_000,
+                        "E2E-1",
+                    )),
                 )
                 .build();
 
@@ -460,15 +611,18 @@ mod xsd {
         // so neither is caught by xmllint — a file breaking them validates
         // cleanly and is rejected on ingestion.
         let build = |instant: bool, moment: &str| {
-            let mut group = super::CreditTransferGroup::new("Acme GmbH", &super::debtor());
+            let moment: sepa::IsoDateTime = moment.parse().unwrap();
+            let mut group = super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), moment);
             if instant {
                 group = group.local_instrument(sepa::LocalInstrument::Inst);
             }
-            super::Pain001Builder::new("Acme GmbH")
-                .msg_id("CT-TIMED")
-                .add_group(group.execution_at(moment.parse().unwrap()).add_entry(
-                    super::CreditTransferEntry::new("Payee", super::creditor(), 5_000, "E2E-1"),
-                ))
+            super::Pain001Builder::new("Acme GmbH", "CT-TIMED")
+                .add_group(group.add_entry(super::CreditTransferEntry::new(
+                    "Payee",
+                    super::creditor(),
+                    5_000,
+                    "E2E-1",
+                )))
                 .build()
         };
 
@@ -494,17 +648,19 @@ mod xsd {
         }
         // A plain date is unaffected — it is the ordinary SCT case.
         assert!(
-            super::Pain001Builder::new("Acme GmbH")
-                .msg_id("CT-PLAIN")
+            super::Pain001Builder::new("Acme GmbH", "CT-PLAIN")
                 .add_group(
-                    super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
-                        .execution_date(super::date("2026-07-20"))
-                        .add_entry(super::CreditTransferEntry::new(
-                            "Payee",
-                            super::creditor(),
-                            5_000,
-                            "E2E-1",
-                        )),
+                    super::CreditTransferGroup::new(
+                        "Acme GmbH",
+                        &super::debtor(),
+                        super::date("2026-07-20")
+                    )
+                    .add_entry(super::CreditTransferEntry::new(
+                        "Payee",
+                        super::creditor(),
+                        5_000,
+                        "E2E-1",
+                    )),
                 )
                 .build()
                 .is_ok()
@@ -517,10 +673,10 @@ mod xsd {
         // subset, which is a restriction of the ISO schema.
         let creditor = super::debtor();
         let ci = super::creditor_id();
-        let group = super::DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci)
-            .sequence_type(sepa::SequenceType::Frst)
-            .collection_date(date("2026-07-20"))
-            .creditor_bic("COBADEFFXXX".parse().unwrap());
+        let group =
+            super::DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, date("2026-07-20"))
+                .sequence_type(sepa::SequenceType::Frst)
+                .creditor_bic("COBADEFFXXX".parse().unwrap());
         let entry = super::DirectDebitEntry::new(
             "MND-42",
             date("2024-06-01"),
@@ -531,8 +687,7 @@ mod xsd {
         );
 
         // Full reference form.
-        let xml = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-            .msg_id("RVSL-001")
+        let xml = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-001")
             .creditor_agent("COBADEFFXXX".parse().unwrap())
             .add_group(sepa::ReversalGroup::new("DD-2026-07-001").add_entry(
                 sepa::ReversalEntry::reverse(&group, &entry, sepa::ReversalReason::Ms02),
@@ -542,8 +697,7 @@ mod xsd {
         assert_validates(&xml, "pain.007.001.09.xsd");
 
         // The minimum the DK subset accepts: OrgnlTxRef with just the mandate.
-        let bare = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-            .msg_id("RVSL-002")
+        let bare = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-002")
             .add_group(sepa::ReversalGroup::new("DD-2026-07-001").add_entry(
                 sepa::ReversalEntry::new(
                     "E2E-1",
@@ -558,8 +712,7 @@ mod xsd {
         assert_validates(&bare, "pain.007.001.09.xsd");
 
         // A partial reversal is still a valid document.
-        let partial = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-1")
-            .msg_id("RVSL-003")
+        let partial = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-1", "RVSL-003")
             .add_group(
                 sepa::ReversalGroup::new("DD-1").add_entry(
                     sepa::ReversalEntry::reverse(&group, &entry, sepa::ReversalReason::Ms02)
@@ -570,6 +723,35 @@ mod xsd {
             .unwrap();
         assert!(partial.contains("<RvsdInstdAmt Ccy=\"EUR\">25.00</RvsdInstdAmt>"));
         assert_validates(&partial, "pain.007.001.09.xsd");
+    }
+
+    #[test]
+    fn a_group_level_rejection_fixture_is_schema_valid_input() {
+        // A fixture that is not itself a real document proves nothing about a
+        // parser. This is the shape a bank sends when it refuses a submission
+        // outright: a group status, a reason, and no payment-information blocks
+        // at all — the case whose reason the parser used to discard.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>STS-1</MsgId><CreDtTm>2026-07-20T09:00:00</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>DD-2026-07-001</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+      <GrpSts>RJCT</GrpSts>
+      <StsRsnInf>
+        <Rsn><Cd>DUPL</Cd></Rsn>
+        <AddtlInf>MsgId already received</AddtlInf>
+      </StsRsnInf>
+    </OrgnlGrpInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#;
+        assert_validates(xml, "pain.002.001.10.xsd");
+
+        let doc = sepa::parse_pain002(xml).unwrap();
+        assert!(!doc.is_fully_accepted());
+        assert_eq!(doc.reason_codes().len(), 1);
+        assert_eq!(doc.group_additional_info, ["MsgId already received"]);
     }
 
     #[test]
@@ -636,29 +818,31 @@ mod xsd {
 
         // Structured addresses and a timed instant execution are the two newest
         // shapes, and the DK subset is where they are pinned down.
-        let addressed = super::Pain001Builder::new("Acme GmbH")
-            .msg_id("CT-DK-ADR")
+        let addressed = super::Pain001Builder::new("Acme GmbH", "CT-DK-ADR")
             .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
-                    .local_instrument(sepa::LocalInstrument::Inst)
-                    .execution_at("2026-07-20T11:00:00Z".parse().unwrap())
-                    .debtor_bic("COBADEFFXXX".parse().unwrap())
-                    .add_entry(
-                        super::CreditTransferEntry::new(
-                            "Supplier AG",
-                            super::creditor(),
-                            12_000,
-                            "E2E-1",
-                        )
-                        .with_bic("ABNANL2A".parse().unwrap())
-                        .with_creditor_address(
-                            sepa::PostalAddress::new("Bonn", "DE")
-                                .unwrap()
-                                .street("Musterlandstrasse")
-                                .building_number("47")
-                                .post_code("53113"),
-                        ),
+                super::CreditTransferGroup::new(
+                    "Acme GmbH",
+                    &super::debtor(),
+                    "2026-07-20T11:00:00Z".parse::<sepa::IsoDateTime>().unwrap(),
+                )
+                .local_instrument(sepa::LocalInstrument::Inst)
+                .debtor_bic("COBADEFFXXX".parse().unwrap())
+                .add_entry(
+                    super::CreditTransferEntry::new(
+                        "Supplier AG",
+                        super::creditor(),
+                        12_000,
+                        "E2E-1",
+                    )
+                    .with_bic("ABNANL2A".parse().unwrap())
+                    .with_creditor_address(
+                        sepa::PostalAddress::new("Bonn", "DE")
+                            .unwrap()
+                            .street("Musterlandstrasse")
+                            .building_number("47")
+                            .post_code("53113"),
                     ),
+                ),
             )
             .build()
             .unwrap();
@@ -672,11 +856,9 @@ mod xsd {
         let rf = sepa::RfReference::generate("539007547034").unwrap();
         assert_eq!(rf.as_str(), "RF18539007547034");
 
-        let xml = super::Pain001Builder::new("Acme GmbH")
-            .msg_id("CT-RF-001")
+        let xml = super::Pain001Builder::new("Acme GmbH", "CT-RF-001")
             .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
-                    .execution_date(date("2026-07-20"))
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
                     .add_entry(
                         super::CreditTransferEntry::new(
                             "Supplier AG",
@@ -712,17 +894,41 @@ mod xsd {
     }
 
     #[test]
+    fn a_proprietary_structured_reference_validates() {
+        // The national-scheme branch: `Cd = SCOR` with a scheme-supplied `Issr`
+        // instead of ISO's. It is the one remittance shape whose `Issr` is
+        // caller text, so it is the one that has to be schema-checked as well
+        // as charset-checked.
+        let xml = super::Pain001Builder::new("Acme GmbH", "CT-PROP")
+            .add_group(
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
+                    .add_entry(
+                        super::CreditTransferEntry::new("Payee", super::creditor(), 5_000, "E2E-1")
+                            .with_remittance(sepa::RemittanceInfo::Proprietary {
+                                reference: "090933755493".to_owned(),
+                                issuer: Some("BBA".to_owned()),
+                            }),
+                    ),
+            )
+            .build()
+            .unwrap();
+        assert!(xml.contains("<Issr>BBA</Issr>"), "{xml}");
+        assert!(!xml.contains("<Issr>ISO</Issr>"), "ISO is reserved for RF");
+        assert_validates(&xml, &schema_file("pain.001.001.09"));
+        assert_validates(&xml, "pain.001.001.09_GBIC_5.xsd");
+    }
+
+    #[test]
     fn structured_remittance_validates_for_direct_debit() {
         let rf = sepa::RfReference::generate("INV20260042").unwrap();
-        let xml = super::Pain008Builder::new("Stadtwerke GmbH")
-            .msg_id("DD-RF-001")
+        let xml = super::Pain008Builder::new("Stadtwerke GmbH", "DD-RF-001")
             .add_group(
                 super::DirectDebitGroup::new(
                     "Stadtwerke GmbH",
                     &super::debtor(),
                     &super::creditor_id(),
+                    date("2026-07-20"),
                 )
-                .collection_date(date("2026-07-20"))
                 .add_entry(
                     super::DirectDebitEntry::new(
                         "MND-1",
@@ -745,11 +951,9 @@ mod xsd {
     fn ultimate_parties_and_purpose_validate_in_sequence() {
         // Element order is fixed by xs:sequence, so a misplaced UltmtDbtr or
         // Purp fails the XSD even though the elements themselves are legal.
-        let xml = super::Pain001Builder::new("Acme GmbH")
-            .msg_id("CT-ULT-001")
+        let xml = super::Pain001Builder::new("Acme GmbH", "CT-ULT-001")
             .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
-                    .execution_date(date("2026-07-20"))
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
                     .add_entry(
                         super::CreditTransferEntry::new(
                             "Supplier AG",
@@ -778,15 +982,14 @@ mod xsd {
 
     #[test]
     fn direct_debit_ultimate_parties_and_amendment_validate() {
-        let xml = super::Pain008Builder::new("Stadtwerke GmbH")
-            .msg_id("DD-AMD-001")
+        let xml = super::Pain008Builder::new("Stadtwerke GmbH", "DD-AMD-001")
             .add_group(
                 super::DirectDebitGroup::new(
                     "Stadtwerke GmbH",
                     &super::debtor(),
                     &super::creditor_id(),
+                    date("2026-07-20"),
                 )
-                .collection_date(date("2026-07-20"))
                 .add_entry(
                     super::DirectDebitEntry::new(
                         "MND-1",
@@ -819,16 +1022,15 @@ mod xsd {
     fn creditor_id_amendment_validates_in_every_schema_version() {
         let build = |schema| {
             let old = sepa::validate_creditor_id("DE98ZZZ09999999999").unwrap();
-            super::Pain008Builder::new("Stadtwerke GmbH")
+            super::Pain008Builder::new("Stadtwerke GmbH", "DD-CI-CHG")
                 .schema(schema)
-                .msg_id("DD-CI-CHG")
                 .add_group(
                     super::DirectDebitGroup::new(
                         "Stadtwerke GmbH",
                         &super::debtor(),
                         &super::creditor_id(),
+                        date("2026-07-20"),
                     )
-                    .collection_date(date("2026-07-20"))
                     .add_entry(
                         super::DirectDebitEntry::new(
                             "MND-1",
@@ -862,12 +1064,10 @@ mod xsd {
     fn sct_instant_validates_under_the_default_schema() {
         // Regression: SCT Inst uses pain.001.001.09, whose ReqdExctnDt is a
         // DateAndDateTime2Choice. A bare date there failed schema validation.
-        let xml = super::Pain001Builder::new("Acme GmbH")
-            .msg_id("CT-INST-001")
+        let xml = super::Pain001Builder::new("Acme GmbH", "CT-INST-001")
             .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor())
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
                     .local_instrument(sepa::pain001::LocalInstrument::Inst)
-                    .execution_date(date("2026-07-20"))
                     .add_entry(super::CreditTransferEntry::new(
                         "Payee",
                         super::creditor(),
@@ -881,6 +1081,29 @@ mod xsd {
         assert!(xml.contains("<LclInstrm><Cd>INST</Cd></LclInstrm>"));
         assert!(xml.contains("<ReqdExctnDt><Dt>2026-07-20</Dt></ReqdExctnDt>"));
         assert_validates(&xml, "pain.001.001.09.xsd");
+    }
+
+    #[test]
+    fn every_camt055_cancellation_scope_validates() {
+        // The three scopes are structurally different documents, and the one
+        // that is easiest to get wrong — a group block with no
+        // `OrgnlGrpInfAndCxl` beside it — is the one that has to carry
+        // `OrgnlGrpInf` to name the file at all.
+        for xml in super::camt055_fixtures() {
+            assert_validates(&xml, "camt.055.001.05.xsd");
+        }
+    }
+
+    #[test]
+    fn the_camt_parser_fixtures_are_schema_valid_input() {
+        // Nothing here generates camt.05x or camt.029, so these schemas gate
+        // the *fixtures*: a hand-built document no schema has seen proves only
+        // that the parser agrees with whoever wrote it. Same argument as the
+        // pain.002 fixtures, which is where it was made first.
+        assert_validates(super::CAMT053_BATCH, "camt.053.001.08.xsd");
+        for xml in super::camt029_fixtures() {
+            assert_validates(&xml, "camt.029.001.06.xsd");
+        }
     }
 
     #[test]
@@ -903,28 +1126,29 @@ fn agents_never_use_notprovided_as_a_bic() {
     // `NOTPROVIDED` satisfies the BIC regex, so the XSD accepts
     // <BICFI>NOTPROVIDED</BICFI> — banks do not. The EPC "IBAN only" form is
     // <Othr><Id>NOTPROVIDED</Id></Othr>.
-    let sct_xml = Pain001Builder::new("Acme GmbH")
-        .msg_id("CT-NP")
+    let sct_xml = Pain001Builder::new("Acme GmbH", "CT-NP")
         .add_group(
-            CreditTransferGroup::new("Acme GmbH", &debtor())
-                .execution_date(date("2026-07-20"))
+            CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
                 .add_entry(CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1")),
         )
         .build()
         .unwrap();
-    let sdd_xml = Pain008Builder::new("Stadtwerke GmbH")
-        .msg_id("DD-NP")
+    let sdd_xml = Pain008Builder::new("Stadtwerke GmbH", "DD-NP")
         .add_group(
-            DirectDebitGroup::new("Stadtwerke GmbH", &debtor(), &creditor_id())
-                .collection_date(date("2026-07-20"))
-                .add_entry(DirectDebitEntry::new(
-                    "MND-1",
-                    date("2024-06-01"),
-                    "Max",
-                    creditor(),
-                    100,
-                    "E2E-1",
-                )),
+            DirectDebitGroup::new(
+                "Stadtwerke GmbH",
+                &debtor(),
+                &creditor_id(),
+                date("2026-07-20"),
+            )
+            .add_entry(DirectDebitEntry::new(
+                "MND-1",
+                date("2024-06-01"),
+                "Max",
+                creditor(),
+                100,
+                "E2E-1",
+            )),
         )
         .build()
         .unwrap();
@@ -945,29 +1169,30 @@ fn payment_info_id_stays_within_max35text() {
     // produced a 37-character PmtInfId that breached Max35Text.
     let msg_id = "M".repeat(35);
 
-    let sct_xml = Pain001Builder::new("Acme GmbH")
-        .msg_id(&msg_id)
+    let sct_xml = Pain001Builder::new("Acme GmbH", &msg_id)
         .add_group(
-            CreditTransferGroup::new("Acme GmbH", &debtor())
-                .execution_date(date("2026-07-20"))
+            CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
                 .add_entry(CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1")),
         )
         .build()
         .unwrap();
 
-    let sdd_xml = Pain008Builder::new("Stadtwerke GmbH")
-        .msg_id(&msg_id)
+    let sdd_xml = Pain008Builder::new("Stadtwerke GmbH", &msg_id)
         .add_group(
-            DirectDebitGroup::new("Stadtwerke GmbH", &debtor(), &creditor_id())
-                .collection_date(date("2026-07-20"))
-                .add_entry(DirectDebitEntry::new(
-                    "MND-1",
-                    date("2024-06-01"),
-                    "Max",
-                    creditor(),
-                    100,
-                    "E2E-1",
-                )),
+            DirectDebitGroup::new(
+                "Stadtwerke GmbH",
+                &debtor(),
+                &creditor_id(),
+                date("2026-07-20"),
+            )
+            .add_entry(DirectDebitEntry::new(
+                "MND-1",
+                date("2024-06-01"),
+                "Max",
+                creditor(),
+                100,
+                "E2E-1",
+            )),
         )
         .build()
         .unwrap();
@@ -988,12 +1213,10 @@ fn payment_info_id_stays_within_max35text() {
 
     // An explicit override is validated the same way.
     assert!(matches!(
-        Pain001Builder::new("Acme GmbH")
-            .msg_id("SHORT")
+        Pain001Builder::new("Acme GmbH", "SHORT")
             .add_group(
-                CreditTransferGroup::new("Acme GmbH", &debtor())
+                CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
                     .payment_info_id("P".repeat(36))
-                    .execution_date(date("2026-07-20"))
                     .add_entry(CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1")),
             )
             .build()
@@ -1015,41 +1238,193 @@ fn control_sum_and_counts_agree_at_both_levels() {
     assert_eq!(xml.matches("<CtrlSum>154.50</CtrlSum>").count(), 2);
 }
 
-#[test]
-fn every_emitted_text_value_is_in_the_sepa_character_set() {
-    let xml = Pain008Builder::new("Müller & Söhne GmbH")
-        .msg_id("DD-CHARSET")
+/// A pain.008 exercising every text-carrying element the writer can emit.
+///
+/// Shared by the character-set walk and the `Max*Text` walk, so "every element"
+/// means the same thing to both and only has to be extended in one place.
+fn maximal_direct_debit() -> String {
+    let ugly = "Jörg Groß & Söhne — Ψυχή";
+    Pain008Builder::new(ugly, "DD-MAX")
         .add_group(
-            DirectDebitGroup::new("Müller & Söhne GmbH", &debtor(), &creditor_id())
-                .collection_date(date("2026-07-20"))
+            DirectDebitGroup::new(ugly, &debtor(), &creditor_id(), date("2026-07-20"))
+                .creditor_bic("COBADEFFXXX".parse().unwrap())
+                .batch_booking(true)
+                .category_purpose(sepa::CategoryPurpose::Supp)
+                .creditor_address(
+                    sepa::PostalAddress::new("Köln", "DE")
+                        .unwrap()
+                        .department("Buchhaltung")
+                        .sub_department("Kreditoren")
+                        .street("Große Straße")
+                        .building_number("77a")
+                        .post_code("50667")
+                        .country_subdivision("NRW")
+                        .line("2. Obergeschoß"),
+                )
+                .ultimate_creditor(
+                    sepa::Party::new("Fürst & Co").with_organisation_id("CUST-1", Some("Kürzel")),
+                )
                 .add_entry(
                     DirectDebitEntry::new(
                         "MND-1",
                         date("2024-06-01"),
-                        "Jörg Groß",
+                        ugly,
                         creditor(),
                         100,
                         "E2E-1",
                     )
-                    .with_description("Abschlag für Straße 1 — 100% fällig"),
+                    .with_bic("ABNANL2A".parse().unwrap())
+                    .with_description("Abschlag für Straße 1 — 100% fällig")
+                    .with_purpose(sepa::Purpose::Other("PHON".to_owned()))
+                    .with_ultimate_debtor(
+                        sepa::Party::new("Jörg Groß").with_private_id("M-9", Some("Mitglied")),
+                    )
+                    .with_debtor_address(
+                        sepa::PostalAddress::new("Zürich", "CH")
+                            .unwrap()
+                            .line("Bürogebäude"),
+                    )
+                    .with_amendment(
+                        sepa::pain008::MandateAmendment::mandate_id_changed("OLD-1")
+                            .with_original_creditor_name("Vörher GmbH"),
+                    ),
+                )
+                .add_entry(
+                    DirectDebitEntry::new(
+                        "MND-2",
+                        date("2024-06-01"),
+                        ugly,
+                        creditor(),
+                        200,
+                        "E2E-2",
+                    )
+                    .with_remittance(sepa::RemittanceInfo::Proprietary {
+                        reference: "REF-42".to_owned(),
+                        issuer: Some("Bräuner".to_owned()),
+                    }),
                 ),
         )
         .build()
-        .unwrap();
+        .unwrap()
+}
 
-    for tag in ["<Nm>", "<Ustrd>", "<MndtId>", "<EndToEndId>", "<MsgId>"] {
-        for chunk in xml.split(tag).skip(1) {
-            let value = chunk.split('<').next().unwrap();
-            // Values are XML-escaped in the document; unescape before checking.
-            let raw = value
-                .replace("&amp;", "&")
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&quot;", "\"")
-                .replace("&apos;", "'");
+/// A pain.001 exercising every text-carrying element the writer can emit.
+fn maximal_credit_transfer() -> String {
+    let ugly = "Jörg Groß & Söhne — Ψυχή";
+    Pain001Builder::new(ugly, "CT-MAX")
+        .add_group(
+            CreditTransferGroup::new(ugly, &debtor(), date("2026-07-20"))
+                .debtor_bic("COBADEFFXXX".parse().unwrap())
+                .batch_booking(false)
+                .category_purpose(sepa::CategoryPurpose::Sala)
+                .debtor_address(
+                    sepa::PostalAddress::new("Köln", "DE")
+                        .unwrap()
+                        .street("Größe"),
+                )
+                .ultimate_debtor(sepa::Party::new("Mütterlich GmbH"))
+                .add_entry(
+                    CreditTransferEntry::new(ugly, creditor(), 100, "E2E-1")
+                        .with_bic("ABNANL2A".parse().unwrap())
+                        .with_creditor_address(
+                            sepa::PostalAddress::new("Zürich", "CH")
+                                .unwrap()
+                                .line("Bürogebäude"),
+                        )
+                        .with_ultimate_creditor(sepa::Party::new("Endbegünstigter"))
+                        .with_purpose(sepa::Purpose::Other("RENT".to_owned()))
+                        .with_reference(sepa::RfReference::generate("2026-0042").unwrap()),
+                ),
+        )
+        .build()
+        .unwrap()
+}
+
+/// A pain.007 exercising every text-carrying element the writer can emit.
+/// A camt.055 carrying every text-bearing element the writer can emit.
+///
+/// The two document-wide walks below share these fixtures, so a writer that
+/// gains an element gains coverage in both at once — which is the whole reason
+/// they are shared rather than written twice.
+fn maximal_cancellation() -> String {
+    use sepa::{
+        Camt055Builder, CancellationEntry, CancellationGroup, CancellationReason, OriginalMessage,
+        Party, validate_bic,
+    };
+
+    let ugly = "Jörg Groß & Söhne";
+    Camt055Builder::new(
+        "CXL-MAX",
+        Party::new(ugly).with_organisation_id("CUST-4711", Some("Größe")),
+        validate_bic("COBADEFFXXX").unwrap(),
+        OriginalMessage::new("DD-MAX", "pain.008.001.08")
+            .created_at("2026-07-15T09:00:00".parse().unwrap())
+            .totals(2, 15_000),
+    )
+    .created_at("2026-07-15T11:30:00".parse().unwrap())
+    .case_id("CASE-MAX")
+    .add_group(
+        CancellationGroup::new("PMT-MAX")
+            .payment_cancellation_id("PC-MAX")
+            .add_entry(
+                CancellationEntry::new("E2E-1", CancellationReason::Dupl)
+                    .cancellation_id("CX-1")
+                    .original_instruction_id("INSTR-1")
+                    .original_amount(7_500)
+                    .additional_info("Doppelte Einreichung für Jörg Groß"),
+            )
+            .add_entry(
+                CancellationEntry::new("E2E-2", "XY99".parse().unwrap())
+                    .original_amount(7_500)
+                    .additional_info("Größe & Söhne"),
+            ),
+    )
+    .build()
+    .unwrap()
+}
+
+fn maximal_reversal() -> String {
+    let ugly = "Jörg Groß & Söhne";
+    let group = DirectDebitGroup::new(ugly, &debtor(), &creditor_id(), date("2026-07-20"))
+        .creditor_bic("COBADEFFXXX".parse().unwrap());
+    let entry = DirectDebitEntry::new(
+        "MND-42",
+        date("2024-06-01"),
+        ugly,
+        creditor(),
+        7_500,
+        "E2E-1",
+    )
+    .with_bic("ABNANL2A".parse().unwrap());
+    sepa::Pain007Builder::new(ugly, "DD-MAX", "RVSL-MAX")
+        .add_group(
+            sepa::ReversalGroup::new("DD-MAX").add_entry(sepa::ReversalEntry::reverse(
+                &group,
+                &entry,
+                sepa::ReversalReason::Ms02,
+            )),
+        )
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn every_emitted_text_value_is_in_the_sepa_character_set() {
+    // Every text node, not a hand-listed set of tags. The list was the bug:
+    // `RmtInf/Strd/CdtrRefInf/Tp/Issr` was neither validated nor transliterated
+    // for three releases, and a per-tag assertion could not see it because
+    // nobody thought to add the tag. Walking the document means the next
+    // element added to a writer is covered the day it is added.
+    for xml in [
+        &maximal_direct_debit(),
+        &maximal_credit_transfer(),
+        &maximal_reversal(),
+        &maximal_cancellation(),
+    ] {
+        for (_, element, text) in text_nodes_with_path(xml) {
             assert!(
-                sepa::is_sepa_text(&raw),
-                "{tag} value {raw:?} is not in the SEPA character set"
+                sepa::is_sepa_text(&text),
+                "{element} emitted {text:?}, which is not in the SEPA character set"
             );
         }
     }
@@ -1057,9 +1432,8 @@ fn every_emitted_text_value_is_in_the_sepa_character_set() {
 
 #[test]
 fn invalid_batches_are_rejected_before_any_xml_is_produced() {
-    let group =
-        || CreditTransferGroup::new("Acme GmbH", &debtor()).execution_date(date("2026-07-20"));
-    let base = || Pain001Builder::new("Acme GmbH").msg_id("CT-1");
+    let group = || CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"));
+    let base = || Pain001Builder::new("Acme GmbH", "CT-1");
     let entry = |ct| CreditTransferEntry::new("Payee", creditor(), ct, "E2E-1");
 
     assert_eq!(
@@ -1147,11 +1521,13 @@ fn pain002_round_trip_reads_back_our_own_identifiers() {
     );
 }
 
-#[test]
-fn camt053_batch_booking_exposes_every_transaction() {
-    // A batch-booked direct debit collection: one aggregate entry, three
-    // underlying transactions. Reconciliation needs all three.
-    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+/// The camt fixtures the parser tests read, so the schema gate and the parser
+/// see the same bytes.
+///
+/// A hand-built fixture no schema has seen proves only that the parser agrees
+/// with whoever wrote it — which is the argument that put the pain.002 example
+/// through `pain.002.001.10.xsd`, and it applies identically here.
+const CAMT053_BATCH: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
   <BkToCstmrStmt>
     <GrpHdr><MsgId>STMT-1</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr>
@@ -1169,21 +1545,21 @@ fn camt053_batch_booking_exposes_every_transaction() {
         <CdtDbtInd>CRDT</CdtDbtInd>
         <Sts><Cd>BOOK</Cd></Sts>
         <BookgDt><Dt>2026-07-21</Dt></BookgDt>
-        <BkTxCd><Domn><Cd>PMNT</Cd></Domn></BkTxCd>
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
         <NtryDtls>
           <TxDtls>
-            <Amt Ccy="EUR">100.00</Amt>
             <Refs><EndToEndId>E2E-1</EndToEndId><MndtId>MND-1</MndtId></Refs>
+            <Amt Ccy="EUR">100.00</Amt>
             <RltdPties><Dbtr><Pty><Nm>Kunde Eins</Nm></Pty></Dbtr></RltdPties>
           </TxDtls>
           <TxDtls>
-            <Amt Ccy="EUR">75.00</Amt>
             <Refs><EndToEndId>E2E-2</EndToEndId><MndtId>MND-2</MndtId></Refs>
+            <Amt Ccy="EUR">75.00</Amt>
             <RltdPties><Dbtr><Pty><Nm>Kunde Zwei</Nm></Pty></Dbtr></RltdPties>
           </TxDtls>
           <TxDtls>
-            <Amt Ccy="EUR">50.00</Amt>
             <Refs><EndToEndId>E2E-3</EndToEndId><MndtId>MND-3</MndtId></Refs>
+            <Amt Ccy="EUR">50.00</Amt>
             <RtrInf><Rsn><Cd>MD01</Cd></Rsn></RtrInf>
           </TxDtls>
         </NtryDtls>
@@ -1191,6 +1567,12 @@ fn camt053_batch_booking_exposes_every_transaction() {
     </Stmt>
   </BkToCstmrStmt>
 </Document>"#;
+
+#[test]
+fn camt053_batch_booking_exposes_every_transaction() {
+    // A batch-booked direct debit collection: one aggregate entry, three
+    // underlying transactions. Reconciliation needs all three.
+    let xml = CAMT053_BATCH;
 
     let doc = parse_camt053(xml).unwrap();
     let stmt = &doc.statements[0];
@@ -1328,20 +1710,23 @@ fn a_second_root_element_cannot_displace_the_first() {
 #[test]
 fn streaming_output_matches_the_in_memory_build() {
     let build = || {
-        Pain008Builder::new("Stadtwerke GmbH")
-            .msg_id("DD-STREAM")
+        Pain008Builder::new("Stadtwerke GmbH", "DD-STREAM")
             .created_at("2026-07-19T12:00:00".parse().unwrap())
             .add_group(
-                DirectDebitGroup::new("Stadtwerke GmbH", &debtor(), &creditor_id())
-                    .collection_date(date("2026-07-20"))
-                    .add_entry(DirectDebitEntry::new(
-                        "MND-1",
-                        date("2024-06-01"),
-                        "Max Mustermann",
-                        creditor(),
-                        7_500,
-                        "E2E-1",
-                    )),
+                DirectDebitGroup::new(
+                    "Stadtwerke GmbH",
+                    &debtor(),
+                    &creditor_id(),
+                    date("2026-07-20"),
+                )
+                .add_entry(DirectDebitEntry::new(
+                    "MND-1",
+                    date("2024-06-01"),
+                    "Max Mustermann",
+                    creditor(),
+                    7_500,
+                    "E2E-1",
+                )),
             )
     };
 
@@ -1352,7 +1737,7 @@ fn streaming_output_matches_the_in_memory_build() {
 
     // The streaming path validates too, and writes nothing when it refuses.
     let mut empty: Vec<u8> = Vec::new();
-    let err = Pain008Builder::new("Stadtwerke GmbH")
+    let err = Pain008Builder::new("Stadtwerke GmbH", "DD-EMPTY")
         .write_to(&mut empty)
         .unwrap_err();
     assert!(matches!(err, sepa::WriteError::Validation(_)));
@@ -1366,10 +1751,8 @@ fn large_batch_totals_stay_exact() {
     let entries =
         (0..10_000).map(|i| CreditTransferEntry::new("Payee", creditor(), 1, format!("E2E-{i}")));
 
-    let builder = Pain001Builder::new("Acme GmbH").msg_id("BULK").add_group(
-        CreditTransferGroup::new("Acme GmbH", &debtor())
-            .execution_date(date("2026-07-20"))
-            .add_entries(entries),
+    let builder = Pain001Builder::new("Acme GmbH", "BULK").add_group(
+        CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20")).add_entries(entries),
     );
 
     assert_eq!(builder.entry_count(), 10_000);
@@ -1378,4 +1761,127 @@ fn large_batch_totals_stay_exact() {
     let xml = builder.build().unwrap();
     assert!(xml.contains("<NbOfTxs>10000</NbOfTxs>"));
     assert!(xml.contains("<CtrlSum>100.00</CtrlSum>"));
+}
+
+/// Every `(parent, element, text)` triple in a document this crate produced.
+///
+/// A deliberately small scanner rather than a parser: the only markup in these
+/// documents is the markup the writers emit, and the point is to see the tree
+/// the way a *bank's* parser would rather than the way the builder meant it.
+fn text_nodes_with_path(xml: &str) -> Vec<(Option<String>, String, String)> {
+    let mut stack: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(open) = rest.find('<') {
+        // Text preceding this tag belongs to the element currently open.
+        let text = rest[..open].trim();
+        if !text.is_empty()
+            && let Some(element) = stack.last()
+        {
+            let parent = stack
+                .len()
+                .checked_sub(2)
+                .and_then(|i| stack.get(i))
+                .cloned();
+            out.push((
+                parent,
+                element.clone(),
+                text.replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'"),
+            ));
+        }
+        let Some(close) = rest[open..].find('>') else {
+            break;
+        };
+        let tag = &rest[open + 1..open + close];
+        rest = &rest[open + close + 1..];
+        if tag.starts_with('?') || tag.starts_with('!') {
+            continue;
+        }
+        if let Some(name) = tag.strip_prefix('/') {
+            assert_eq!(
+                stack.pop().as_deref(),
+                Some(name),
+                "unbalanced element </{name}>"
+            );
+        } else {
+            let name = tag.split([' ', '\t']).next().unwrap_or(tag);
+            assert!(!tag.ends_with('/'), "the writers emit no self-closing tags");
+            stack.push(name.to_owned());
+        }
+    }
+    assert!(stack.is_empty(), "unclosed elements: {stack:?}");
+    out
+}
+
+/// Elements whose text the `Max*Text` table deliberately does not bound.
+///
+/// Either a value bounded by its own type (`IBAN`, `BICFI`), a date, an amount,
+/// a boolean, a count, or a fixed enumerated code. An element that is in
+/// neither this list nor `max_text_len` is a writer emitting text nobody
+/// bounded — which is the defect class `Tp/Issr` belonged to.
+const UNBOUNDED_BY_TYPE: &[&str] = &[
+    "AmdmntInd",     // boolean
+    "BIC",           // ISO 9362, validated by `Bic`
+    "BICFI",         // ISO 9362, validated by `Bic`
+    "BtchBookg",     // boolean
+    "ChrgBr",        // enumerated: SLEV
+    "CreDtTm",       // ISO 8601, validated by `IsoDateTime`
+    "CtrlSum",       // decimal
+    "Ctry",          // ISO 3166-1 alpha-2, validated by `country`
+    "Dt",            // ISO 8601, validated by `IsoDate`
+    "DtOfSgntr",     // ISO 8601, validated by `IsoDate`
+    "DtTm",          // ISO 8601, validated by `IsoDateTime`
+    "IBAN",          // ISO 13616, validated by `Iban`
+    "InstdAmt",      // decimal
+    "NbOfTxs",       // count
+    "OrgnlInstdAmt", // decimal
+    "PmtMtd",        // enumerated: TRF / DD
+    "ReqdColltnDt",  // ISO 8601, validated by `IsoDate`
+    "RvsdInstdAmt",  // decimal
+    "SeqTp",         // enumerated: FRST / RCUR / FNAL / OOFF
+    // camt.055
+    "CtrlSum",           // decimal — also listed above for the pain messages
+    "GrpCxl",            // boolean
+    "OrgnlCreDtTm",      // ISO 8601, validated by `IsoDateTime`
+    "OrgnlInstdAmt",     // decimal
+    "OrgnlReqdColltnDt", // ISO 8601, validated by `IsoDate`
+    "OrgnlReqdExctnDt",  // ISO 8601, validated by `IsoDate`
+    "PmtInfCxl",         // boolean
+];
+
+#[test]
+fn every_emitted_text_value_is_within_its_max_text_bound() {
+    // The companion to the character-set walk, and the same argument: a length
+    // limit written at each call site is a limit that can be forgotten at the
+    // next call site. `validate::max_text_len` is the one table, and this test
+    // requires it to explain every element the writers actually emit — so a new
+    // element cannot ship without a bound or an explicit exemption.
+    for xml in [
+        &maximal_direct_debit(),
+        &maximal_credit_transfer(),
+        &maximal_reversal(),
+        &maximal_cancellation(),
+    ] {
+        for (parent, element, text) in text_nodes_with_path(xml) {
+            let bound = sepa::validate::max_text_len(parent.as_deref(), &element);
+            match bound {
+                Some(max) => assert!(
+                    text.chars().count() <= max,
+                    "{}/{element} is {} characters, over its Max{max}Text bound: {text:?}",
+                    parent.as_deref().unwrap_or("?"),
+                    text.chars().count(),
+                ),
+                None => assert!(
+                    UNBOUNDED_BY_TYPE.contains(&element.as_str()),
+                    "{}/{element} carries text that no Max*Text bound covers — add it to \
+                     `validate::max_text_len` or to UNBOUNDED_BY_TYPE with a reason",
+                    parent.as_deref().unwrap_or("?"),
+                ),
+            }
+        }
+    }
 }
