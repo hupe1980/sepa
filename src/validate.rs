@@ -22,8 +22,8 @@
 //! - **Dates** are [`IsoDate`] values, so a malformed `ReqdColltnDt` cannot
 //!   reach a builder in the first place.
 //! - **Unstructured addresses** are not representable: [`PostalAddress`]
-//!   requires a town and a country, which is the form the EPC schemes will
-//!   still accept after 15 November 2026.
+//!   requires a town and a country, which is the form the EPC schemes accept
+//!   and go on accepting.
 //!
 //! [`IsoDate`]: crate::IsoDate
 //! [`PostalAddress`]: crate::PostalAddress
@@ -67,6 +67,14 @@ pub const MAX_ADDITIONAL_INFO_LEN: usize = 105;
 pub const MIN_AMOUNT_CT: i64 = 1;
 /// Largest permitted amount: 999,999,999.99 EUR.
 pub const MAX_AMOUNT_CT: i64 = 99_999_999_999;
+/// Largest control sum a `CtrlSum` can carry: 9,999,999,999,999,999.99 EUR.
+///
+/// `CtrlSum` is a `DecimalNumber`, which the ISO schemas restrict to
+/// `totalDigits = 18` — eighteen nines once written with two fraction digits.
+/// That is **not** `i64::MAX`, which in cents is 92,233,720,368,547,758.07 and
+/// carries nineteen digits. Entries that are each inside [`MAX_AMOUNT_CT`] can
+/// sum into the gap between the two, so the bound has to be the schema's.
+pub const MAX_CTRL_SUM_CT: i64 = 999_999_999_999_999_999;
 
 /// The `Max*Text` bound for an emitted element, as the EPC restricts it.
 ///
@@ -130,6 +138,12 @@ pub fn max_text_len(parent: Option<&str>, element: &str) -> Option<usize> {
         "Nm" => Some(MAX_NAME_LEN),
         // Unstructured remittance information.
         "Ustrd" => Some(MAX_REMITTANCE_LEN),
+        // OCT Inst carries AT-T020 — the currency requested for the non-euro
+        // leg — in `InstrForCdtrAgt/InstrInf`, a `Max140Text`. The value this
+        // crate puts there is a three-letter code, but the table has to
+        // explain every element the writers emit, not only the long ones
+        // (D37).
+        "InstrInf" => Some(MAX_REMITTANCE_LEN),
         // Every `Max35Text` identifier the builders emit.
         "MsgId" | "PmtInfId" | "EndToEndId" | "MndtId" | "OrgnlMndtId" | "OrgnlMsgId"
         | "OrgnlMsgNmId" | "OrgnlPmtInfId" | "OrgnlEndToEndId" | "RvslPmtInfId" | "CxlId"
@@ -222,8 +236,28 @@ pub enum ValidationError {
         amount_ct: i64,
     },
 
-    /// The sum of a batch's amounts overflowed `i64`.
-    #[error("batch control sum overflows i64")]
+    /// A `ChrgBr` value the scheme does not allow.
+    ///
+    /// The four SEPA schemes mandate `SLEV` and OCT Inst forbids it, allowing
+    /// only `CRED`, `DEBT` and `SHAR`. Both directions pass every XSD and are
+    /// rejected on ingestion.
+    #[error("charge bearer {bearer} is not allowed under service level {scheme}")]
+    ChargeBearerNotAllowed {
+        /// The rejected `ChargeBearerType1Code`.
+        bearer: &'static str,
+        /// The `SvcLvl/Cd` of the scheme that refused it.
+        scheme: &'static str,
+    },
+
+    /// The batch's amounts sum past what `CtrlSum` can carry.
+    ///
+    /// The bound is the schema's, not the host language's: `CtrlSum` is a
+    /// `DecimalNumber` with `totalDigits = 18`, so the limit is
+    /// [`MAX_CTRL_SUM_CT`] — see its docs for why `i64::MAX` is the wrong one.
+    #[error(
+        "batch control sum exceeds the CtrlSum bound of {} EUR (DecimalNumber, totalDigits=18)",
+        crate::ct_to_eur_str(MAX_CTRL_SUM_CT)
+    )]
     ControlSumOverflow,
 
     /// The same element was set at both payment-information and transaction
@@ -660,6 +694,31 @@ pub fn check_amount(field: &'static str, amount_ct: i64) -> Result<(), Validatio
         return Err(ValidationError::AmountOutOfRange { field, amount_ct });
     }
     Ok(())
+}
+
+/// Add one entry's amount to a running `CtrlSum`, bounded by the schema.
+///
+/// The single place that arithmetic happens, so the three writers cannot
+/// disagree about it. A bare `checked_add` would bound the sum at `i64::MAX`,
+/// three orders of magnitude looser than [`MAX_CTRL_SUM_CT`].
+///
+/// # Errors
+///
+/// [`ValidationError::ControlSumOverflow`] when the running total would pass
+/// [`MAX_CTRL_SUM_CT`].
+///
+/// # Examples
+///
+/// ```
+/// use sepa::validate::{MAX_CTRL_SUM_CT, accumulate_control_sum};
+/// assert_eq!(accumulate_control_sum(100, 50), Ok(150));
+/// assert!(accumulate_control_sum(MAX_CTRL_SUM_CT, 1).is_err());
+/// ```
+pub fn accumulate_control_sum(total: i64, amount_ct: i64) -> Result<i64, ValidationError> {
+    total
+        .checked_add(amount_ct)
+        .filter(|sum| *sum <= MAX_CTRL_SUM_CT)
+        .ok_or(ValidationError::ControlSumOverflow)
 }
 
 /// The longest prefix of `s` that is at most `max` **characters**.

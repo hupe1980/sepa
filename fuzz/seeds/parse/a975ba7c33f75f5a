@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.06">
+  <BkToCstmrStmt>
+    <GrpHdr>
+      <MsgId>STMT-2026-07-14-001</MsgId>
+      <CreDtTm>2026-07-14T23:59:00</CreDtTm>
+    </GrpHdr>
+    <Stmt>
+      <Id>2026-07-14</Id>
+      <ElctrncSeqNb>42</ElctrncSeqNb>
+      <CreDtTm>2026-07-14T23:59:00</CreDtTm>
+      <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+      <Bal>
+        <Tp><CdOrPrtry><Cd>OPBD</Cd></CdOrPrtry></Tp>
+        <Amt Ccy="EUR">1000.00</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <Dt><Dt>2026-07-13</Dt></Dt>
+      </Bal>
+      <Bal>
+        <Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp>
+        <Amt Ccy="EUR">1155.42</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <Dt><Dt>2026-07-14</Dt></Dt>
+      </Bal>
+      <Ntry>
+        <Amt Ccy="EUR">155.42</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <Sts>BOOK</Sts>
+        <BookgDt><Dt>2026-07-14</Dt></BookgDt>
+        <ValDt><Dt>2026-07-14</Dt></ValDt>
+        <AcctSvcrRef>SVCRREF-001</AcctSvcrRef>
+        
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+        <NtryDtls>
+          <TxDtls>
+            <Refs>
+              <EndToEndId>E2E-INV-2026</EndToEndId>
+            </Refs>
+            <Amt Ccy="EUR">155.42</Amt>
+            <CdtDbtInd>CRDT</CdtDbtInd>
+            <RltdPties>
+              <Dbtr><Nm>Max Mustermann GmbH</Nm></Dbtr>
+              <DbtrAcct><Id><IBAN>NL91ABNA0417164300</IBAN></Id></DbtrAcct>
+            </RltdPties>
+            <RmtInf><Ustrd>Invoice 2026-07-001</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>

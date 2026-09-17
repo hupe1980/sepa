@@ -1,0 +1,11 @@
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
+          <RsltnOfInvstgtn>
+            <Assgnmt><Id>R</Id><Assgnr><Pty><Nm>Bank</Nm></Pty></Assgnr><Assgne><Pty><Nm>Acme GmbH</Nm></Pty></Assgne><CreDtTm>2026-07-15T14:00:00</CreDtTm></Assgnmt>
+            <Sts><Conf>PECR</Conf></Sts>
+            <CxlDtls>
+              <TxInfAndSts><OrgnlEndToEndId>E2E-1</OrgnlEndToEndId>
+                <TxCxlSts>ACCR</TxCxlSts></TxInfAndSts>
+              <TxInfAndSts><OrgnlEndToEndId>E2E-2</OrgnlEndToEndId><TxCxlSts>RJCR</TxCxlSts>
+                <CxlStsRsnInf><Rsn><Cd>CUST</Cd></Rsn></CxlStsRsnInf></TxInfAndSts>
+            </CxlDtls>
+          </RsltnOfInvstgtn></Document>

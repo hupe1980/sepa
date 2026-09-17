@@ -64,9 +64,11 @@
 //! participant is not one, because the version is fixed by the scheme rulebook.
 //! Sending `pain.001.001.13` to a SEPA bank gets it rejected. The versions
 //! above are the ones the EPC rulebooks have mandated since 19 November 2023,
-//! and nothing on the published roadmap moves SEPA past them — the
-//! 15 November 2026 deadline is about structured *addresses*, not about a newer
-//! message version.
+//! The EPC's address migration is often mistaken for a message-version change
+//! and is not one: it is about structured *addresses*, and the versions above
+//! stay. A migration to a newer ISO 20022 version **is** now proposed, for
+//! November 2029; it is a recommendation under consultation, not a rule, and it
+//! does not change what to send today.
 //!
 //! ## Regulatory references
 //!
@@ -76,7 +78,7 @@
 //! | EPC409-09 v8.0 | [`iban`] | SEPA scheme country list |
 //! | ISO 9362 | [`bic`] | BIC/SWIFT validation |
 //! | ISO 3166-1 alpha-2 | [`country`] | Country codes for BICs and addresses |
-//! | EPC153-22 v2.1 | [`address`] | Structured addresses, 15 Nov 2026 cut-over |
+//! | EPC153-22 v2.1 | [`address`] | Structured and hybrid addresses |
 //! | EPC262-08 | [`creditor_id`] | Creditor Identifier check digits |
 //! | ISO 20022 pain.001 | [`pain001`] | SEPA Credit Transfer (SCT + SCT Inst) |
 //! | ISO 20022 pain.008 | [`pain008`] | SEPA Direct Debit (CORE + B2B) |
@@ -163,8 +165,8 @@
 //! there — they are unrepresentable rather than caught late. [`IsoDate`]
 //! validates at construction, so an impossible `ReqdColltnDt` never reaches a
 //! batch; and [`PostalAddress`] requires a town and a country, so the
-//! unstructured address form the EPC schemes reject from 15 November 2026 is
-//! not a value this crate can be asked to emit.
+//! free-text-only address form the EPC schemes are retiring is not a value this
+//! crate can be asked to emit.
 //!
 //! ## Nothing that matters is defaulted from a clock
 //!
@@ -304,6 +306,7 @@ pub mod charset;
 mod charset_table;
 pub mod country;
 pub mod creditor_id;
+pub mod currency;
 pub mod date;
 pub mod iban;
 pub mod pain001;
@@ -343,6 +346,7 @@ pub use country::is_country_code;
 pub use creditor_id::{
     CreditorId, CreditorIdError, creditor_id_check_digits, validate_creditor_id,
 };
+pub use currency::{Currency, CurrencyError};
 #[cfg(any(feature = "time", feature = "chrono"))]
 pub use date::ConversionError;
 pub use date::{DateError, DateTimeError, IsoDate, IsoDateTime};
@@ -351,8 +355,8 @@ pub use iban::{
     is_sepa_country, validate_iban,
 };
 pub use pain001::{
-    CreditTransferEntry, CreditTransferGroup, CreditTransferSchema, ExecutionMoment,
-    LocalInstrument, Pain001Builder,
+    ChargeBearer, CreditTransferEntry, CreditTransferGroup, CreditTransferKind,
+    CreditTransferSchema, ExecutionMoment, Pain001Builder,
 };
 pub use pain002::{
     OriginalMessageType, Pain002Document, Pain002ParseError, PaymentInfoStatus, PaymentStatus,
@@ -422,21 +426,43 @@ pub enum AmountError {
         /// The rejected text.
         value: String,
     },
+
+    /// The value carries significant digits below one cent.
+    ///
+    /// `ActiveOrHistoricCurrencyAndAmount` permits five fraction digits, so a
+    /// bank can legally send `1.23456` in a camt statement even though the EPC
+    /// restricts SEPA itself to two. This type counts whole cents and has
+    /// nowhere to put the remainder, and **silently truncating it loses money**
+    /// — a tenth of a cent on each of a million collections is a real number.
+    ///
+    /// Trailing zeros are not significant: `"1.500"` is 150 ct, not an error.
+    #[error("{value:?} has {digits} significant fraction digits; ct holds 2")]
+    SubCentPrecision {
+        /// The rejected text.
+        value: String,
+        /// How many significant fraction digits it carries.
+        digits: usize,
+    },
 }
 
 /// Parse a `"1234.56"` EUR string into integer cents — pure integer arithmetic, no f64.
 ///
 /// Accepts:
-/// - Positive values: `"155.42"` → `15542`
+/// - Positive values: `"155.42"` → `15542`, and `"+155.42"` — a leading `+` is
+///   legal `xs:decimal` and banks send it
 /// - Negative values: `"-75.00"` → `-7500`
 /// - Integer string: `"100"` → `10000`
 /// - One decimal place: `"0.5"` → `50`
+/// - Insignificant trailing zeros: `"1.500"` → `150`, `"1.23000"` → `123`
 ///
-/// Extra decimal places beyond 2 are truncated (not rounded).
+/// The grammar is exactly `[+-]?[0-9]*(\.[0-9]*)?` with at least one digit,
+/// matching `xs:decimal`. A repeated sign and trailing junk are rejected rather
+/// than silently reinterpreted — `i64::from_str` would accept both.
 ///
-/// The grammar is exactly `-?[0-9]*(\.[0-9]*)?` with at least one digit. A
-/// leading `+`, a repeated sign and trailing junk are all rejected rather than
-/// silently reinterpreted — `i64::from_str` would accept every one of them.
+/// **A value with significant digits below one cent is rejected**, not
+/// truncated: `"1.999"` is [`AmountError::SubCentPrecision`], not `199`. The
+/// ISO schema permits five fraction digits, so this is reachable from a bank
+/// file, and truncation would discard money without telling anyone.
 ///
 /// # Errors
 ///
@@ -470,9 +496,14 @@ pub fn ct_from_eur_str(s: &str) -> Result<i64, AmountError> {
     if trimmed.is_empty() {
         return Err(AmountError::Empty);
     }
-    let (negative, magnitude) = match trimmed.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, trimmed),
+    // `xs:decimal` permits an explicit `+`, and banks send it. Rejecting a
+    // legal spelling is the same mistake as `validate_bic`'s six-letter
+    // prefix: it fails on valid input, at the caller, with nothing the caller
+    // can do. What stays rejected is a *repeated* sign.
+    let (negative, magnitude) = match trimmed.split_at_checked(1) {
+        Some(("-", rest)) => (true, rest),
+        Some(("+", rest)) => (false, rest),
+        _ => (false, trimmed),
     };
 
     // Split on the decimal point first, then require both halves to be bare
@@ -492,15 +523,21 @@ pub fn ct_from_eur_str(s: &str) -> Result<i64, AmountError> {
         // Every byte is an ASCII digit, so the only way to fail is overflow.
         euro_str.parse().map_err(|_| overflow())?
     };
-    // Truncated, not rounded, and safe to index: the part is pure ASCII.
-    let cents: i64 = match frac_str.len() {
+    // Anything below one cent has nowhere to go, so it is refused rather than
+    // dropped. Trailing zeros carry no value and are not significant, which is
+    // why `"1.500"` is 150 ct and `"1.999"` is an error. Every byte is an ASCII
+    // digit here, so `get(..2)` and the parses cannot fail on content.
+    let significant = frac_str.trim_end_matches('0');
+    if significant.len() > 2 {
+        return Err(AmountError::SubCentPrecision {
+            value: s.to_owned(),
+            digits: significant.len(),
+        });
+    }
+    let cents: i64 = match significant.len() {
         0 => 0,
-        1 => frac_str.parse::<i64>().map_err(|_| malformed())? * 10,
-        _ => frac_str
-            .get(..2)
-            .ok_or_else(malformed)?
-            .parse()
-            .map_err(|_| malformed())?,
+        1 => significant.parse::<i64>().map_err(|_| malformed())? * 10,
+        _ => significant.parse().map_err(|_| malformed())?,
     };
 
     // Accumulate directly in the sign the input asked for. Building the
@@ -585,8 +622,36 @@ mod tests {
                 "{bad:?} must be rejected, not panic"
             );
         }
-        // Valid amounts still parse, including 3+ decimals (truncated).
-        assert_eq!(ct_from_eur_str("1.239"), Ok(123));
+        // Valid amounts still parse.
+        assert_eq!(ct_from_eur_str("1.23"), Ok(123));
+    }
+
+    #[test]
+    fn a_value_below_one_cent_is_refused_rather_than_truncated() {
+        // `ActiveOrHistoricCurrencyAndAmount` permits five fraction digits, so
+        // every one of these is reachable from a bank file. Truncating them —
+        // which this crate did until 0.8 — discards money silently: `0.001`
+        // became 0, and a tenth of a cent on each of a million collections is
+        // a number somebody has to explain.
+        for (bad, digits) in [("1.239", 3), ("0.001", 3), ("1.23456", 5), ("9.999", 3)] {
+            assert!(
+                matches!(
+                    ct_from_eur_str(bad),
+                    Err(AmountError::SubCentPrecision { digits: d, .. }) if d == digits
+                ),
+                "{bad:?} must be refused, got {:?}",
+                ct_from_eur_str(bad)
+            );
+        }
+        // Trailing zeros carry no value and are not significant.
+        for (ok, ct) in [
+            ("1.500", 150),
+            ("1.23000", 123),
+            ("2.10", 210),
+            ("7.0", 700),
+        ] {
+            assert_eq!(ct_from_eur_str(ok), Ok(ct), "{ok:?} must parse");
+        }
     }
 
     #[test]
@@ -596,7 +661,7 @@ mod tests {
         // turned 1.50 into 0.95, while "--5" came back as +5.00 and "-+5"
         // as −5.00.
         for bad in [
-            "1.-5", "1.+5", "1.-50", "-1.-5", "--5", "-+5", "+5", "+5.00", "5-", "-",
+            "1.-5", "1.+5", "1.-50", "-1.-5", "--5", "-+5", "+-5", "5-", "-", "+",
         ] {
             assert!(
                 matches!(ct_from_eur_str(bad), Err(AmountError::Malformed { .. })),
@@ -604,6 +669,13 @@ mod tests {
                 ct_from_eur_str(bad)
             );
         }
+        // A *single* leading `+` is legal `xs:decimal` and banks send it. It
+        // used to be rejected here, which made every entry carrying one vanish
+        // from the statement — a validator stricter than the standard, with the
+        // failure hidden instead of reported.
+        assert_eq!(ct_from_eur_str("+5"), Ok(500));
+        assert_eq!(ct_from_eur_str("+5.00"), Ok(500));
+        assert_eq!(ct_from_eur_str("+0.01"), Ok(1));
     }
 
     #[test]

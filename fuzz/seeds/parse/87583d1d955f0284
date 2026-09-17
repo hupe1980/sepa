@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ns2:Document xmlns:ns2="urn:iso:std:iso:20022:tech:xsd:pain.002.001.03">
+  <ns2:CstmrPmtStsRpt>
+    <ns2:GrpHdr>
+      <ns2:MsgId>MSG-PREFIX-001</ns2:MsgId>
+      <ns2:CreDtTm>2026-07-14T12:00:00</ns2:CreDtTm>
+    </ns2:GrpHdr>
+    <ns2:OrgnlGrpInfAndSts>
+      <ns2:OrgnlMsgId>ORIG-001</ns2:OrgnlMsgId>
+      <ns2:OrgnlMsgNmId>pain.008</ns2:OrgnlMsgNmId>
+      <ns2:GrpSts>ACTC</ns2:GrpSts>
+    </ns2:OrgnlGrpInfAndSts>
+  </ns2:CstmrPmtStsRpt>
+</ns2:Document>

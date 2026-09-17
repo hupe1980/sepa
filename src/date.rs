@@ -258,9 +258,20 @@ impl IsoDate {
     /// # Ok::<(), sepa::DateError>(())
     /// ```
     pub fn parse(s: &str) -> Result<Self, DateError> {
+        // `xs:date` carries an OPTIONAL timezone — `2026-07-20Z` and
+        // `2026-07-20+02:00` are both schema-valid `ISODate` values, so
+        // refusing them would make a conforming document unreadable. The zone
+        // is accepted and dropped: the value denotes that calendar day, and
+        // every date this crate writes is a bare `xs:date`.
+        let (head, zone) = s.split_at_checked(10).unwrap_or((s, ""));
+        if !is_xsd_timezone(zone) {
+            return Err(DateError::Malformed {
+                value: s.to_owned(),
+            });
+        }
         // Destructuring the exact byte pattern rejects every other length,
         // separator and non-digit without a single fallible index.
-        let [y0, y1, y2, y3, b'-', m0, m1, b'-', d0, d1] = *s.as_bytes() else {
+        let [y0, y1, y2, y3, b'-', m0, m1, b'-', d0, d1] = *head.as_bytes() else {
             return Err(DateError::Malformed {
                 value: s.to_owned(),
             });
@@ -275,6 +286,7 @@ impl IsoDate {
         }
         let d2 = |a: u8, b: u8| u16::from(a - b'0') * 10 + u16::from(b - b'0');
         let year = d2(y0, y1) * 100 + d2(y2, y3);
+        #[allow(clippy::items_after_statements)]
         // `d2` yields at most 99, so both casts are lossless.
         #[allow(clippy::cast_possible_truncation)]
         Self::new(year, d2(m0, m1) as u8, d2(d0, d1) as u8)
@@ -288,13 +300,16 @@ impl IsoDate {
     /// This is what bank files need. ISO 20022 types a booking date as a
     /// `DateAndDateTimeChoice`, so the same field arrives as a bare date from
     /// one bank and as a timestamp from the next, and a reconciliation routine
-    /// posts by the day either way. [`parse`](Self::parse) stays strict,
-    /// because a date a *builder* writes must be exactly an `xs:date`.
+    /// posts by the day either way.
+    ///
+    /// The accepted set is exactly `xs:date` ∪ `xs:dateTime` — the two members
+    /// of that choice — and nothing else, so a value with trailing junk is an
+    /// error rather than a confident date.
     ///
     /// # Errors
     ///
-    /// [`DateError`] when the leading ten characters are not a real calendar
-    /// date. Anything after them is ignored, not validated.
+    /// [`DateError`] when the value is neither an `xs:date` nor an
+    /// `xs:dateTime` whose date part is a real calendar day.
     ///
     /// # Examples
     ///
@@ -308,10 +323,25 @@ impl IsoDate {
     /// # Ok::<(), sepa::DateError>(())
     /// ```
     pub fn parse_date_part(s: &str) -> Result<Self, DateError> {
-        // `get`, not a slice: `s` is bank-supplied and byte 10 can land inside
-        // a multi-byte character.
-        let head = s.get(..10).unwrap_or(s);
-        Self::parse(head)
+        // `split_at_checked`, not a slice: `s` is bank-supplied and byte 10 can
+        // land inside a multi-byte character.
+        let Some((head, rest)) = s.split_at_checked(10) else {
+            return Self::parse(s);
+        };
+        // Either the choice's `xs:date` member — which `parse` now validates
+        // including its optional timezone — or its `xs:dateTime` member, whose
+        // time part must itself be well formed. Trailing anything else is not a
+        // date with noise after it; it is a value this crate cannot read, and
+        // saying so beats returning a day nobody wrote.
+        match rest.as_bytes().first() {
+            Some(b'T') => {
+                IsoDateTime::parse(s).map_err(|_| DateError::Malformed {
+                    value: s.to_owned(),
+                })?;
+                Self::parse(head)
+            }
+            _ => Self::parse(s),
+        }
     }
 
     /// The year, 1–9999.
@@ -360,10 +390,13 @@ impl IsoDate {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // A u64 second count divided by 86_400 cannot exceed i64 range in any
-        // clock this program could observe, and the epoch day is always valid.
+        // Both saturations are toward the end of the calendar the clock is
+        // actually past, never toward its start. `unwrap_or(Self::MIN)` here
+        // turned a clock set past year 9999 into **0001-01-01** — a date that
+        // is not merely wrong but wrong in the opposite direction, and one that
+        // reads as a plausible sentinel rather than as a broken clock.
         let days = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
-        Self::from_epoch_days(days).unwrap_or(Self::MIN)
+        Self::from_epoch_days(days).unwrap_or(Self::MAX)
     }
 
     /// Days since 1970-01-01, negative before it.
@@ -495,6 +528,28 @@ impl TryFrom<&str> for IsoDate {
     }
 }
 
+/// Whether `s` is an empty string or a valid `xs:date`/`xs:dateTime` timezone.
+///
+/// `Z`, `+hh:mm` or `-hh:mm`, with `hh` ≤ 14 and `mm` ≤ 59 — the range XML
+/// Schema permits.
+fn is_xsd_timezone(s: &str) -> bool {
+    match s.as_bytes() {
+        [] | [b'Z'] => true,
+        [b'+' | b'-', h0, h1, b':', m0, m1] => {
+            // The digit check has to short-circuit: `b - b'0'` underflows for
+            // any byte below '0', and this runs on bank-supplied text. Computing
+            // first and validating after is how a parser panics on a file.
+            if ![h0, h1, m0, m1].iter().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            let hours = i16::from(h0 - b'0') * 10 + i16::from(h1 - b'0');
+            let minutes = i16::from(m0 - b'0') * 10 + i16::from(m1 - b'0');
+            hours <= 14 && minutes <= 59 && (hours < 14 || minutes == 0)
+        }
+        _ => false,
+    }
+}
+
 const fn is_leap(year: u16) -> bool {
     year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
@@ -607,7 +662,8 @@ impl IsoDateTime {
             .unwrap_or_default()
             .as_secs();
         let days = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
-        let date = IsoDate::from_epoch_days(days).unwrap_or(IsoDate::MIN);
+        // See `IsoDate::today`: saturate forward, never back to year 1.
+        let date = IsoDate::from_epoch_days(days).unwrap_or(IsoDate::MAX);
         // Each component is bounded well inside u8 before the cast.
         #[allow(clippy::cast_possible_truncation)]
         Self {

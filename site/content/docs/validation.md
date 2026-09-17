@@ -208,3 +208,42 @@ that nothing is silently changed.
 > is the key the bank echoes back on the statement, so quietly rewriting
 > `MND-Straße` to `MND-Strasse` would break your own reconciliation. Out-of-set
 > characters in an identifier are a hard error.
+
+## Reading is validated too, in the other direction
+
+Everything above is about the write path: what this crate refuses to *emit*.
+The read path has the opposite obligation, and it is easy to get backwards.
+
+A statement parser has two obligations, and neither is visible to a schema:
+accept **everything a bank may legally send**, and report **nothing the file did
+not carry**.
+
+The first is easy to get wrong invisibly — a refusal produces no document, so
+nothing catches it. `xs:date` carries an optional timezone, `xs:decimal` an
+optional leading `+`, `xs:dateTime` fractional seconds; all are schema-valid and
+all are accepted here.
+
+The second costs money. An unreadable `<CdtDbtInd>` is **not** a credit: money
+has a magnitude *and* a direction, and losing either means there is no figure.
+
+```rust,no_run
+use sepa::parse_camt053;
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let xml = String::new();
+for entry in &parse_camt053(&xml)?.statements[0].entries {
+    match entry.signed_ct() {
+        Some(ct) => println!("{ct:+} ct"),
+        // The statement did not determine this one. Escalate it — the raw
+        // fields hold exactly what the bank sent.
+        None => println!("unresolved: {:?} {:?}", entry.amount.amount_raw, entry.amount.direction_raw),
+    }
+}
+# Ok(())
+# }
+```
+
+An entry is **never dropped** for being unreadable either — a missing booking
+looks identical to one that never happened. Totals follow the same rule:
+`net_movement_ct()` returns `None` rather than quietly summing only the rows it
+could read.

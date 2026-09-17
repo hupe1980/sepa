@@ -1,8 +1,33 @@
-//! ISO 20022 pain.001 — SEPA Credit Transfer (SCT) initiation.
+//! ISO 20022 pain.001 — credit transfer initiation, for three EPC schemes.
 //!
-//! Builds SEPA Credit Transfer XML for outgoing payments:
-//! supplier credits, refunds to customers, or any IBAN-to-IBAN EUR transfer.
-//! Supports both the DK legacy schema and the current EPC/SCT Inst schema.
+//! Builds credit-transfer XML for outgoing payments: supplier credits, refunds
+//! to customers, or any IBAN-to-IBAN transfer.
+//!
+//! ## Three schemes, one message
+//!
+//! The EPC runs three credit-transfer schemes and they share this message
+//! entirely — same version, same elements, same answers back. What differs is
+//! a handful of coded values, and a wrong one produces a file that passes
+//! `xmllint` and is rejected on ingestion. [`CreditTransferKind`] is the axis:
+//!
+//! | Scheme | Variant | `SvcLvl` | `LclInstrm` | `ChrgBr` |
+//! |---|---|---|---|---|
+//! | SCT | [`CreditTransferKind::Standard`] | `SEPA` | — | `SLEV` |
+//! | SCT Inst | [`CreditTransferKind::Instant`] | `SEPA` | `INST` | `SLEV` |
+//! | OCT Inst | [`CreditTransferKind::OneLegOutInstant`] | `EOLO` | `INST` | `CRED`/`DEBT`/`SHAR` |
+//!
+//! **OCT Inst** — One-Leg Out Instant Credit Transfer — is the euro leg of a
+//! payment whose other leg leaves SEPA. It is the one scheme here that is not
+//! euro-only: the amount may be ordered in the beneficiary's currency
+//! ([`CreditTransferEntry::with_currency`]), and the currency the payee is to
+//! receive travels in `InstrForCdtrAgt`
+//! ([`CreditTransferEntry::with_non_euro_leg_currency`]). Every combination
+//! the schemes forbid — `EOLO` with `SLEV`, a non-euro amount under SEPA — is
+//! either unconstructible or a named error from `build()`.
+//!
+//! The scheme and the schema version are **separate axes**: all three schemes
+//! are specified against `pain.001.001.09`, and a future ISO migration would
+//! move all three together.
 //!
 //! ## Schema versions
 //!
@@ -21,15 +46,17 @@
 //!
 //! `Dbtr/PstlAdr` sits on the group (it belongs to the account holder) and
 //! `Cdtr/PstlAdr` on each transfer. Both are optional, and both must be
-//! structured or hybrid — see [`PostalAddress`] for the
-//! 15 November 2026 cut-over. The legacy DK schema cannot carry one and says
-//! so with [`ValidationError::UnsupportedBySchema`].
+//! structured or hybrid — see [`PostalAddress`] for which forms SEPA accepts.
+//! The legacy DK schema cannot carry one and says so with
+//! [`ValidationError::UnsupportedBySchema`].
 //!
 //! ## References
 //!
 //! - ISO 20022 pain.001.001.03 / pain.001.001.09 / pain.001.003.03 schemas
 //! - EPC SEPA Credit Transfer Rulebook (SCT), 2025 version
 //! - EPC SEPA Instant Credit Transfer Rulebook (SCT Inst), 2025 version
+//! - EPC158-22 One-Leg Out Instant Credit Transfer Scheme Rulebook, 2025 v1.1
+//! - EPC250-22 OCT Inst Customer-to-PSP Implementation Guidelines, 2025 v1.0
 //! - EPC153-22 v2.1, Provision of Addresses under the EPC Payment Schemes
 //! - Deutsche Kreditwirtschaft DFÜ-Abkommen V2.7
 //!
@@ -37,10 +64,11 @@
 //!
 //! ```rust
 //! use sepa::{CreditTransferEntry, CreditTransferGroup, IsoDate, Pain001Builder, validate_iban};
-//! use sepa::pain001::LocalInstrument;
+//! use sepa::pain001::CreditTransferKind;
 //!
-//! let debtor   = validate_iban("DE89370400440532013000")?;
-//! let creditor = validate_iban("NL91ABNA0417164300")?;
+//! let debtor    = validate_iban("DE89370400440532013000")?;
+//! let creditor  = validate_iban("NL91ABNA0417164300")?;
+//! let creditor2 = validate_iban("NL91ABNA0417164300")?;
 //! let execute  = IsoDate::new(2026, 7, 20)?;
 //!
 //! let xml = Pain001Builder::new("Acme GmbH", "CT-2026-07-001")
@@ -61,11 +89,27 @@
 //! let inst = Pain001Builder::new("Acme GmbH", "CT-INST-001")
 //!     .add_group(
 //!         CreditTransferGroup::new("Acme GmbH", &debtor, execute)
-//!             .local_instrument(LocalInstrument::Inst)
+//!             .kind(CreditTransferKind::Instant)
 //!             .add_entry(CreditTransferEntry::new("Max", creditor, 5_000, "INST-001")),
 //!     )
 //!     .build()?;
 //! assert!(inst.contains("<Cd>INST</Cd>"));
+//!
+//! // OCT Inst: the euro leg of a payment leaving SEPA, paying out in USD.
+//! let oct = Pain001Builder::new("Acme GmbH", "OCT-2026-001")
+//!     .add_group(
+//!         CreditTransferGroup::new("Acme GmbH", &debtor, execute)
+//!             .kind(CreditTransferKind::OneLegOutInstant)
+//!             .add_entry(
+//!                 CreditTransferEntry::new("Payee", creditor2, 5_000, "OCT-001")
+//!                     .with_currency("USD".parse()?)
+//!                     .with_non_euro_leg_currency("USD".parse()?),
+//!             ),
+//!     )
+//!     .build()?;
+//! assert!(oct.contains("<SvcLvl><Cd>EOLO</Cd></SvcLvl>"));
+//! assert!(oct.contains("<ChrgBr>SHAR</ChrgBr>"));
+//! assert!(oct.contains("<InstrForCdtrAgt><InstrInf>USD</InstrInf></InstrForCdtrAgt>"));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -79,9 +123,9 @@ use crate::purpose::{CategoryPurpose, Purpose};
 use crate::reference::RemittanceInfo;
 use crate::validate::{
     BuildError, CharsetPolicy, Locate, Location, MAX_ID_LEN, UnknownSchema, ValidationError,
-    WriteError, check_amount, check_id, check_name, truncate_chars,
+    WriteError, accumulate_control_sum, check_amount, check_id, check_name, truncate_chars,
 };
-use crate::{Bic, Iban, IsoDateTime, ct_to_eur_str};
+use crate::{Bic, Currency, Iban, IsoDateTime, ct_to_eur_str};
 
 // ── Schema version ────────────────────────────────────────────────────────────
 
@@ -135,7 +179,7 @@ pub enum CreditTransferSchema {
     ///
     /// Emits a bare `<ReqdExctnDt>2026-07-20</ReqdExctnDt>` and names the agent
     /// BIC element `BIC`. Its `PmtTpInf` has no `LclInstrm` element at all, so
-    /// it cannot carry [`LocalInstrument::Inst`].
+    /// it cannot carry [`CreditTransferKind::Instant`].
     DkV2_7,
 }
 
@@ -177,9 +221,9 @@ impl CreditTransferSchema {
     /// Whether this schema can carry a structured `PstlAdr`.
     ///
     /// The DK schema cannot: its `PostalAddressSEPA` type holds nothing but
-    /// `Ctry` and two `AdrLine`s — precisely the unstructured form the EPC
-    /// retires on 15 November 2026 — so there is no element to put a town or a
-    /// street in. See [`PostalAddress`].
+    /// `Ctry` and two `AdrLine`s — precisely the free-text-only form the EPC is
+    /// retiring — so there is no element to put a town or a street in. See
+    /// [`PostalAddress`].
     #[must_use]
     pub const fn supports_postal_address(self) -> bool {
         !matches!(self, Self::DkV2_7)
@@ -252,27 +296,186 @@ impl TryFrom<&str> for CreditTransferSchema {
     }
 }
 
-// ── LocalInstrument ───────────────────────────────────────────────────────────
+// ── Scheme ────────────────────────────────────────────────────────────────────
 
-/// SEPA Credit Transfer local instrument variant.
+/// Which EPC payment scheme a credit-transfer group is executed under.
 ///
-/// [`Inst`](LocalInstrument::Inst) adds `<LclInstrm><Cd>INST</Cd></LclInstrm>`
-/// to the group's `PmtTpInf`. It needs a schema that has that element:
-/// `pain.001.001.09` (the 2023 rulebooks) or `pain.001.001.03` (the earlier
-/// ones). Combining it with [`CreditTransferSchema::DkV2_7`] is rejected by
-/// `build()` with [`ValidationError::UnsupportedBySchema`] rather than emitting
-/// a file the schema does not allow.
+/// The EPC runs three credit-transfer schemes, and they differ in their
+/// *rules*, not in their messages: all three are carried by `pain.001.001.09`,
+/// answered by `pain.002.001.10` and notified by `camt.054.001.08`. What
+/// changes is a handful of coded elements, and getting one of them wrong
+/// produces a file that validates against the XSD and is rejected on
+/// ingestion.
+///
+/// | | `SvcLvl/Cd` | `LclInstrm/Cd` | `ChrgBr` |
+/// |---|---|---|---|
+/// | [`Standard`](Self::Standard) — SCT | `SEPA` | *absent* | `SLEV` |
+/// | [`Instant`](Self::Instant) — SCT Inst | `SEPA` | `INST` | `SLEV` |
+/// | [`OneLegOutInstant`](Self::OneLegOutInstant) — OCT Inst | `EOLO` | `INST` | `CRED`, `DEBT` or `SHAR` |
+///
+/// One enum rather than two orthogonal fields, because the combinations are
+/// not orthogonal: `EOLO` without `INST` is not a scheme, and neither is
+/// `EOLO` with `SLEV`. A type that can hold only the three real answers
+/// retires the checks for the rest.
+///
+/// # Examples
+///
+/// ```
+/// use sepa::pain001::CreditTransferKind;
+///
+/// assert_eq!(CreditTransferKind::Standard.service_level(), "SEPA");
+/// assert_eq!(CreditTransferKind::OneLegOutInstant.service_level(), "EOLO");
+/// assert_eq!(CreditTransferKind::Instant.local_instrument(), Some("INST"));
+/// assert_eq!(CreditTransferKind::Standard.local_instrument(), None);
+/// assert!(CreditTransferKind::OneLegOutInstant.is_instant());
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum LocalInstrument {
-    /// Standard SEPA Credit Transfer — no local instrument code (default).
+pub enum CreditTransferKind {
+    /// **SCT** — an ordinary SEPA Credit Transfer (default).
     #[default]
-    None,
-    /// SEPA Instant Credit Transfer — 10-second settlement window.
+    Standard,
+
+    /// **SCT Inst** — SEPA Instant Credit Transfer, 10-second settlement.
     ///
-    /// EU Regulation 2024/886 mandates PSP support for SCT Inst in the eurozone.
-    Inst,
+    /// Adds `<LclInstrm><Cd>INST</Cd></LclInstrm>`, so it needs a schema that
+    /// has the element: `pain.001.001.09` or `pain.001.001.03`. Regulation
+    /// (EU) 2024/886 mandates PSP support for it in the euro area.
+    Instant,
+
+    /// **OCT Inst** — One-Leg Out Instant Credit Transfer, the euro leg of a
+    /// payment whose other leg leaves SEPA.
+    ///
+    /// The scheme is implied by `SvcLvl/Cd=EOLO` together with
+    /// `LclInstrm/Cd=INST`; there is no `OCTI` code anywhere, which is the
+    /// usual shape of a rule no XSD can express. Three further differences are
+    /// enforced by `build()`:
+    ///
+    /// - `ChrgBr` must be `CRED`, `DEBT` or `SHAR` — **never** `SLEV`, which
+    ///   is what the four SEPA schemes require.
+    /// - the instructed amount may be ordered in a non-euro currency
+    ///   ([`CreditTransferEntry::with_currency`]), which no other scheme here
+    ///   permits.
+    /// - the currency the payee is to receive travels in `InstrForCdtrAgt`
+    ///   ([`CreditTransferEntry::with_non_euro_leg_currency`]).
+    ///
+    /// Specified against the 2019 message version only, so
+    /// [`CreditTransferSchema::IsoV9`] is the one schema that can carry it.
+    ///
+    /// Source: EPC250-22 *OCT Inst Customer-to-PSP Implementation Guidelines*,
+    /// 2025 v1.0, effective 5 October 2025.
+    OneLegOutInstant,
+}
+
+impl CreditTransferKind {
+    /// The `PmtTpInf/SvcLvl/Cd` this scheme is identified by.
+    #[inline]
+    #[must_use]
+    pub const fn service_level(self) -> &'static str {
+        match self {
+            Self::Standard | Self::Instant => "SEPA",
+            Self::OneLegOutInstant => "EOLO",
+        }
+    }
+
+    /// The `PmtTpInf/LclInstrm/Cd`, or `None` where the scheme has none.
+    #[inline]
+    #[must_use]
+    pub const fn local_instrument(self) -> Option<&'static str> {
+        match self {
+            Self::Standard => None,
+            Self::Instant | Self::OneLegOutInstant => Some("INST"),
+        }
+    }
+
+    /// Whether this scheme settles instantly.
+    ///
+    /// A timed execution (`ReqdExctnDt/DtTm`) is only meaningful for a scheme
+    /// that settles at a moment rather than during a day, so this is what
+    /// gates it.
+    #[inline]
+    #[must_use]
+    pub const fn is_instant(self) -> bool {
+        matches!(self, Self::Instant | Self::OneLegOutInstant)
+    }
+
+    /// The `ChrgBr` used when the caller does not choose one.
+    ///
+    /// `SLEV` for the SEPA schemes, which mandate it. `SHAR` for OCT Inst,
+    /// which forbids `SLEV` and lists `SHAR` among the three it allows.
+    #[inline]
+    #[must_use]
+    pub const fn default_charge_bearer(self) -> ChargeBearer {
+        match self {
+            Self::Standard | Self::Instant => ChargeBearer::Slev,
+            Self::OneLegOutInstant => ChargeBearer::Shar,
+        }
+    }
+
+    /// Whether `bearer` is allowed under this scheme.
+    #[inline]
+    #[must_use]
+    pub const fn allows_charge_bearer(self, bearer: ChargeBearer) -> bool {
+        match self {
+            Self::Standard | Self::Instant => matches!(bearer, ChargeBearer::Slev),
+            Self::OneLegOutInstant => !matches!(bearer, ChargeBearer::Slev),
+        }
+    }
+
+    /// Whether an amount may be ordered in a currency other than the euro.
+    ///
+    /// True for OCT Inst alone: its far leg leaves the euro area by design.
+    #[inline]
+    #[must_use]
+    pub const fn allows_non_euro_amount(self) -> bool {
+        matches!(self, Self::OneLegOutInstant)
+    }
+}
+
+// ── ChargeBearer ──────────────────────────────────────────────────────────────
+
+/// Who bears the transaction charges (`ChrgBr`).
+///
+/// The SEPA schemes permit exactly one value, `SLEV` — "following service
+/// level" — and this crate emitted it as a literal until OCT Inst arrived,
+/// which forbids it and allows the other three. See
+/// [`CreditTransferKind::allows_charge_bearer`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ChargeBearer {
+    /// `SLEV` — charges follow the service level. The only value the four
+    /// SEPA schemes permit, and the default for them.
+    #[default]
+    Slev,
+    /// `CRED` — all charges borne by the creditor. OCT Inst only.
+    Cred,
+    /// `DEBT` — all charges borne by the debtor. OCT Inst only.
+    Debt,
+    /// `SHAR` — sender-side charges to the debtor, receiver-side to the
+    /// creditor. OCT Inst only, and its default.
+    Shar,
+}
+
+impl ChargeBearer {
+    /// The four-letter `ChargeBearerType1Code`.
+    #[inline]
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Slev => "SLEV",
+            Self::Cred => "CRED",
+            Self::Debt => "DEBT",
+            Self::Shar => "SHAR",
+        }
+    }
+}
+
+impl std::fmt::Display for ChargeBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_code())
+    }
 }
 
 // ── ExecutionMoment ───────────────────────────────────────────────────────────
@@ -299,7 +502,7 @@ pub enum LocalInstrument {
 /// that breaks either and the bank rejects it on ingestion. `build()` returns
 /// [`ValidationError::Requires`] instead:
 ///
-/// - [`At`](Self::At) needs [`LocalInstrument::Inst`] on the same group. An
+/// - [`At`](Self::At) needs [`CreditTransferKind::Instant`] on the same group. An
 ///   ordinary SCT settles some time during the banking day, so a time of day on
 ///   one instructs nothing.
 /// - The timestamp needs a UTC offset — `2026-07-20T11:00:00Z` or
@@ -309,7 +512,7 @@ pub enum LocalInstrument {
 ///
 /// ```
 /// use sepa::{CreditTransferGroup, IsoDate, IsoDateTime, validate_iban};
-/// use sepa::pain001::LocalInstrument;
+/// use sepa::pain001::CreditTransferKind;
 ///
 /// let iban = validate_iban("DE89370400440532013000")?;
 ///
@@ -318,7 +521,7 @@ pub enum LocalInstrument {
 ///
 /// // A scheduled instant transfer — a day and a time.
 /// let timed = CreditTransferGroup::new("Acme", &iban, "2026-07-20T11:00:00Z".parse::<IsoDateTime>()?)
-///     .local_instrument(LocalInstrument::Inst);
+///     .kind(CreditTransferKind::Instant);
 /// # let _ = (plain, timed);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -394,8 +597,22 @@ pub struct CreditTransferEntry {
     pub creditor_bic: Option<Bic>,
     /// Beneficiary postal address (`Cdtr/PstlAdr`).
     pub creditor_address: Option<PostalAddress>,
-    /// Payment amount in **ct** (1/100 EUR). Must be positive.
+    /// Payment amount in **minor units** (1/100 of [`currency`](Self::currency)).
+    /// Must be positive.
     pub amount_ct: i64,
+    /// Currency of [`amount_ct`](Self::amount_ct) — `None` means euro.
+    ///
+    /// Only [`CreditTransferKind::OneLegOutInstant`] may set this to anything
+    /// but the euro; under the four SEPA schemes a non-euro value is a
+    /// [`ValidationError::Requires`] at `build()`. The OCT Inst guidelines cap
+    /// the fractional part at two digits whatever the currency, which is what
+    /// lets one `i64` of minor units serve every case.
+    pub currency: Option<Currency>,
+    /// The currency the payee is to receive on the non-euro leg (AT-T020).
+    ///
+    /// Emitted as `InstrForCdtrAgt/InstrInf`, which is where EPC250-22 puts
+    /// it — there is no dedicated element. OCT Inst only.
+    pub non_euro_leg_currency: Option<Currency>,
     /// Unique end-to-end reference (`EndToEndId`) visible on beneficiary's statement.
     pub end_to_end_id: String,
     /// Remittance information (`RmtInf`) — free text or a structured reference.
@@ -423,6 +640,8 @@ impl CreditTransferEntry {
             creditor_iban,
             amount_ct,
             end_to_end_id: end_to_end_id.into(),
+            currency: None,
+            non_euro_leg_currency: None,
             creditor_bic: None,
             creditor_address: None,
             remittance: None,
@@ -430,6 +649,39 @@ impl CreditTransferEntry {
             ultimate_creditor: None,
             purpose: None,
         }
+    }
+
+    /// Order the amount in a currency other than the euro (OCT Inst only).
+    ///
+    /// `amount_ct` is then that currency's minor units rather than euro cents.
+    /// EPC250-22 caps the fractional part of `InstdAmt` at two digits for
+    /// every currency, so the representation does not change.
+    ///
+    /// Setting this under any scheme but
+    /// [`CreditTransferKind::OneLegOutInstant`] is rejected by `build()`.
+    #[must_use]
+    pub fn with_currency(mut self, currency: Currency) -> Self {
+        self.currency = Some(currency);
+        self
+    }
+
+    /// State the currency the payee is to receive on the non-euro leg
+    /// (AT-T020, OCT Inst only).
+    ///
+    /// Travels in `InstrForCdtrAgt/InstrInf` because that is where EPC250-22
+    /// puts it. This is a *different* question from
+    /// [`with_currency`](Self::with_currency): that one says what the payer
+    /// ordered, this one says what the beneficiary should get.
+    #[must_use]
+    pub fn with_non_euro_leg_currency(mut self, currency: Currency) -> Self {
+        self.non_euro_leg_currency = Some(currency);
+        self
+    }
+
+    /// The currency of this entry's amount — the euro unless one was set.
+    #[must_use]
+    pub fn effective_currency(&self) -> Currency {
+        self.currency.unwrap_or(Currency::EUR)
     }
 
     /// Set the beneficiary's BIC (optional).
@@ -442,8 +694,8 @@ impl CreditTransferEntry {
     /// Set the beneficiary's postal address (`Cdtr/PstlAdr`).
     ///
     /// Optional in the SEPA schemes, but asked for by some banks and by
-    /// sanction screening. See [`PostalAddress`] for the
-    /// structured/hybrid rules and the 15 November 2026 cut-over.
+    /// sanction screening. See [`PostalAddress`] for the structured and hybrid
+    /// rules.
     #[must_use]
     pub fn with_creditor_address(mut self, address: PostalAddress) -> Self {
         self.creditor_address = Some(address);
@@ -538,7 +790,8 @@ pub struct CreditTransferGroup {
     debtor_bic: Option<Bic>,
     debtor_address: Option<PostalAddress>,
     execution: ExecutionMoment,
-    local_instrument: LocalInstrument,
+    kind: CreditTransferKind,
+    charge_bearer: Option<ChargeBearer>,
     batch_booking: Option<bool>,
     category_purpose: Option<CategoryPurpose>,
     ultimate_debtor: Option<Party>,
@@ -568,7 +821,8 @@ impl CreditTransferGroup {
             debtor_bic: None,
             debtor_address: None,
             execution: execution.into(),
-            local_instrument: LocalInstrument::None,
+            kind: CreditTransferKind::Standard,
+            charge_bearer: None,
             batch_booking: None,
             category_purpose: None,
             ultimate_debtor: None,
@@ -585,6 +839,12 @@ impl CreditTransferGroup {
     pub fn payment_info_id(mut self, id: impl Into<String>) -> Self {
         self.payment_info_id = Some(id.into());
         self
+    }
+
+    /// Which EPC scheme this group is executed under.
+    #[must_use]
+    pub const fn scheme(&self) -> CreditTransferKind {
+        self.kind
     }
 
     /// When this group is to execute, in whichever form it was given.
@@ -617,15 +877,50 @@ impl CreditTransferGroup {
         self
     }
 
-    /// Set the local instrument for this group.
+    /// Set which EPC scheme this group is executed under.
     ///
-    /// [`LocalInstrument::Inst`] marks the group as SEPA Instant. Note the
-    /// schema is chosen once for the whole message — see
-    /// [`Pain001Builder::schema`].
+    /// Defaults to [`CreditTransferKind::Standard`]. The scheme decides
+    /// `SvcLvl`, `LclInstrm` and which `ChrgBr` values are legal; the schema
+    /// version is chosen once for the whole message and is a separate axis —
+    /// see [`Pain001Builder::schema`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sepa::pain001::{CreditTransferGroup, CreditTransferKind};
+    /// # use sepa::{IsoDate, validate_iban};
+    /// # let iban = validate_iban("DE89370400440532013000")?;
+    /// # let day = IsoDate::new(2026, 7, 20)?;
+    /// let g = CreditTransferGroup::new("Acme", &iban, day)
+    ///     .kind(CreditTransferKind::Instant);
+    /// assert_eq!(g.scheme(), CreditTransferKind::Instant);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
-    pub fn local_instrument(mut self, li: LocalInstrument) -> Self {
-        self.local_instrument = li;
+    pub fn kind(mut self, kind: CreditTransferKind) -> Self {
+        self.kind = kind;
         self
+    }
+
+    /// Override `ChrgBr`.
+    ///
+    /// Defaults to [`CreditTransferKind::default_charge_bearer`] — `SLEV` for
+    /// the SEPA schemes, `SHAR` for OCT Inst. A value the scheme does not
+    /// allow is a [`ValidationError::ChargeBearerNotAllowed`] at `build()`
+    /// rather than a file the bank answers.
+    #[must_use]
+    pub fn charge_bearer(mut self, bearer: ChargeBearer) -> Self {
+        self.charge_bearer = Some(bearer);
+        self
+    }
+
+    /// The `ChrgBr` this group will emit.
+    #[must_use]
+    pub const fn effective_charge_bearer(&self) -> ChargeBearer {
+        match self.charge_bearer {
+            Some(b) => b,
+            None => self.kind.default_charge_bearer(),
+        }
     }
 
     /// Request batch booking (`BtchBookg`).
@@ -910,8 +1205,25 @@ impl Pain001Builder {
         };
         // `LclInstrm` does not exist in every schema, so an SCT Inst group on
         // the DK schema would silently produce an invalid file.
-        if g.local_instrument == LocalInstrument::Inst && !schema.supports_local_instrument() {
+        if g.kind.local_instrument().is_some() && !schema.supports_local_instrument() {
             return Err(unsupported("PmtTpInf/LclInstrm (SCT Inst)"));
+        }
+        // OCT Inst is specified against the 2019 message version and nothing
+        // else: EPC250-22 names `pain.001.001.09` throughout, and the older
+        // schemas predate the scheme by a decade. Emitting `EOLO` into one of
+        // them would be inventing a combination no rulebook describes.
+        if g.kind == CreditTransferKind::OneLegOutInstant && schema != CreditTransferSchema::IsoV9 {
+            return Err(unsupported("PmtTpInf/SvcLvl/Cd = EOLO (OCT Inst)"));
+        }
+        // `SLEV` is mandatory for the four SEPA schemes and forbidden for OCT
+        // Inst, which allows only CRED, DEBT and SHAR. Both directions are a
+        // rejection on ingestion and neither is expressible in XSD.
+        let bearer = g.effective_charge_bearer();
+        if !g.kind.allows_charge_bearer(bearer) {
+            return Err(ValidationError::ChargeBearerNotAllowed {
+                bearer: bearer.as_code(),
+                scheme: g.kind.service_level(),
+            });
         }
         // A timed execution exists only where `ReqdExctnDt` is a choice…
         let ExecutionMoment::At(moment) = g.execution else {
@@ -923,10 +1235,10 @@ impl Pain001Builder {
         // …and only for SCT Inst. The DK validation subset annotates `DtTm`
         // "Only allowed for SCTinst": an ordinary SCT settles some time during
         // the banking day, so a time of day on one instructs nothing.
-        if g.local_instrument != LocalInstrument::Inst {
+        if !g.kind.is_instant() {
             return Err(ValidationError::Requires {
                 feature: "ReqdExctnDt/DtTm (timed execution)",
-                requires: "PmtTpInf/LclInstrm = INST (SCT Inst)",
+                requires: "an instant scheme — CreditTransferKind::Instant or ::OneLegOutInstant",
             });
         }
         // The same annotation carries the usage rule "Only UTC time format or
@@ -990,10 +1302,7 @@ impl Pain001Builder {
         for (j, e) in g.entries.iter().enumerate() {
             let at = Location::transaction(i, j);
             self.validate_entry(at, g, e)?;
-            *total = total.checked_add(e.amount_ct).ok_or(BuildError {
-                location: at,
-                kind: ValidationError::ControlSumOverflow,
-            })?;
+            *total = accumulate_control_sum(*total, e.amount_ct).at(at)?;
         }
         Ok(())
     }
@@ -1014,6 +1323,31 @@ impl Pain001Builder {
         }
         check_id("CdtTrfTxInf/PmtId/EndToEndId", &e.end_to_end_id).at(at)?;
         check_amount("CdtTrfTxInf/Amt/InstdAmt", e.amount_ct).at(at)?;
+        // A non-euro amount and an AT-T020 instruction are both OCT Inst
+        // features. Under a SEPA scheme they would produce a document that is
+        // schema-valid and means something the rulebook does not define, so
+        // they are refused rather than dropped (D9: never silently discard a
+        // value the caller asked for).
+        if !g.kind.allows_non_euro_amount() {
+            if e.currency.is_some_and(|c| !c.is_euro()) {
+                return Err(BuildError {
+                    location: at,
+                    kind: ValidationError::Requires {
+                        feature: "CdtTrfTxInf/Amt/InstdAmt @Ccy other than EUR",
+                        requires: "CreditTransferKind::OneLegOutInstant",
+                    },
+                });
+            }
+            if e.non_euro_leg_currency.is_some() {
+                return Err(BuildError {
+                    location: at,
+                    kind: ValidationError::Requires {
+                        feature: "InstrForCdtrAgt/InstrInf (AT-T020)",
+                        requires: "CreditTransferKind::OneLegOutInstant",
+                    },
+                });
+            }
+        }
         check_name(
             "Cdtr/Nm",
             &self.charset.apply("Cdtr/Nm", &e.creditor_name).at(at)?,
@@ -1147,9 +1481,13 @@ impl Pain001Builder {
             g.entry_count(),
             ct_to_eur_str(g.total_ct())
         )?;
-        w.write_str("      <PmtTpInf>\n        <SvcLvl><Cd>SEPA</Cd></SvcLvl>\n")?;
-        if g.local_instrument == LocalInstrument::Inst {
-            w.write_str("        <LclInstrm><Cd>INST</Cd></LclInstrm>\n")?;
+        writeln!(
+            w,
+            "      <PmtTpInf>\n        <SvcLvl><Cd>{}</Cd></SvcLvl>",
+            g.kind.service_level()
+        )?;
+        if let Some(code) = g.kind.local_instrument() {
+            writeln!(w, "        <LclInstrm><Cd>{code}</Cd></LclInstrm>")?;
         }
         if let Some(p) = &g.category_purpose {
             writeln!(w, "        <CtgyPurp><Cd>{}</Cd></CtgyPurp>", p.as_code())?;
@@ -1195,7 +1533,7 @@ impl Pain001Builder {
         if let Some(p) = &g.ultimate_debtor {
             p.write_xml(w, "UltmtDbtr", "      ", self.charset)?;
         }
-        w.write_str("      <ChrgBr>SLEV</ChrgBr>\n")?;
+        writeln!(w, "      <ChrgBr>{}</ChrgBr>", g.effective_charge_bearer())?;
 
         for entry in &g.entries {
             self.write_transaction(w, entry)?;
@@ -1215,7 +1553,11 @@ impl Pain001Builder {
 
         w.write_str("    <CdtTrfTxInf>\n      <PmtId>\n        <EndToEndId>")?;
         write_escaped(w, &e.end_to_end_id)?;
-        w.write_str("</EndToEndId>\n      </PmtId>\n      <Amt><InstdAmt Ccy=\"EUR\">")?;
+        write!(
+            w,
+            "</EndToEndId>\n      </PmtId>\n      <Amt><InstdAmt Ccy=\"{}\">",
+            e.effective_currency()
+        )?;
         write_eur(w, e.amount_ct)?;
         w.write_str("</InstdAmt></Amt>\n")?;
 
@@ -1249,6 +1591,14 @@ impl Pain001Builder {
 
         if let Some(p) = &e.ultimate_creditor {
             p.write_xml(w, "UltmtCdtr", "      ", self.charset)?;
+        }
+        // XSD sequence in CreditTransferTransaction34: InstrForCdtrAgt sits
+        // between UltmtCdtr and Purp.
+        if let Some(currency) = &e.non_euro_leg_currency {
+            writeln!(
+                w,
+                "      <InstrForCdtrAgt><InstrInf>{currency}</InstrInf></InstrForCdtrAgt>"
+            )?;
         }
         if let Some(purpose) = &e.purpose {
             writeln!(w, "      <Purp><Cd>{}</Cd></Purp>", purpose.as_code())?;
@@ -1445,7 +1795,7 @@ mod tests {
         let xml = Pain001Builder::new("Acme", "CT-INST")
             .add_group(
                 CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
-                    .local_instrument(LocalInstrument::Inst)
+                    .kind(CreditTransferKind::Instant)
                     .add_entry(entry(5_000)),
             )
             .build()
@@ -1669,7 +2019,7 @@ mod tests {
             .schema(CreditTransferSchema::DkV2_7)
             .add_group(
                 CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
-                    .local_instrument(LocalInstrument::Inst)
+                    .kind(CreditTransferKind::Instant)
                     .add_entry(entry(5_000)),
             )
             .build()
@@ -1689,7 +2039,7 @@ mod tests {
                 .schema(schema)
                 .add_group(
                     CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
-                        .local_instrument(LocalInstrument::Inst)
+                        .kind(CreditTransferKind::Instant)
                         .add_entry(entry(5_000)),
                 )
                 .build()
@@ -1774,5 +2124,223 @@ mod tests {
                 .is_err()
         );
         assert!(empty.is_empty());
+    }
+
+    // ── OCT Inst (EOLO) ───────────────────────────────────────────────────
+
+    /// Everything the OCT Inst C2PSP guidelines change, in one document.
+    #[test]
+    fn oct_inst_emits_eolo_inst_and_a_non_slev_charge_bearer() {
+        let xml = Pain001Builder::new("Acme GmbH", "OCT-001")
+            .add_group(
+                CreditTransferGroup::new("Acme GmbH", &de_iban(), d("2026-07-20"))
+                    .kind(CreditTransferKind::OneLegOutInstant)
+                    .add_entry(entry(12_000)),
+            )
+            .build()
+            .unwrap();
+        // EPC250-22: the scheme is *implied* by these two together.
+        assert!(xml.contains("<SvcLvl><Cd>EOLO</Cd></SvcLvl>"), "{xml}");
+        assert!(
+            xml.contains("<LclInstrm><Cd>INST</Cd></LclInstrm>"),
+            "{xml}"
+        );
+        // SLEV is mandatory for SEPA and forbidden here; SHAR is the default.
+        assert!(xml.contains("<ChrgBr>SHAR</ChrgBr>"), "{xml}");
+        assert!(!xml.contains("SLEV"), "{xml}");
+        // The euro amount is still the ordinary case.
+        assert!(
+            xml.contains(r#"<InstdAmt Ccy="EUR">120.00</InstdAmt>"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn oct_inst_carries_a_non_euro_amount_and_at_t020() {
+        let xml = Pain001Builder::new("Acme GmbH", "OCT-002")
+            .add_group(
+                CreditTransferGroup::new("Acme GmbH", &de_iban(), d("2026-07-20"))
+                    .kind(CreditTransferKind::OneLegOutInstant)
+                    .charge_bearer(ChargeBearer::Cred)
+                    .add_entry(
+                        entry(12_000)
+                            .with_currency("USD".parse().unwrap())
+                            .with_non_euro_leg_currency("USD".parse().unwrap()),
+                    ),
+            )
+            .build()
+            .unwrap();
+        assert!(
+            xml.contains(r#"<InstdAmt Ccy="USD">120.00</InstdAmt>"#),
+            "{xml}"
+        );
+        // AT-T020 has no element of its own; EPC250-22 puts it here.
+        assert!(
+            xml.contains("<InstrForCdtrAgt><InstrInf>USD</InstrInf></InstrForCdtrAgt>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<ChrgBr>CRED</ChrgBr>"), "{xml}");
+    }
+
+    #[test]
+    fn the_sepa_schemes_keep_slev_and_euro() {
+        for kind in [CreditTransferKind::Standard, CreditTransferKind::Instant] {
+            let xml = Pain001Builder::new("Acme", "CT-1")
+                .add_group(
+                    CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
+                        .kind(kind)
+                        .add_entry(entry(12_000)),
+                )
+                .build()
+                .unwrap();
+            assert!(xml.contains("<SvcLvl><Cd>SEPA</Cd></SvcLvl>"), "{kind:?}");
+            assert!(xml.contains("<ChrgBr>SLEV</ChrgBr>"), "{kind:?}");
+            assert_eq!(
+                kind == CreditTransferKind::Instant,
+                xml.contains("<LclInstrm><Cd>INST</Cd></LclInstrm>"),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// Each cross-scheme combination is refused, and refused by name.
+    #[test]
+    fn a_rule_from_the_wrong_scheme_is_rejected_rather_than_emitted() {
+        let group = |kind| CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20")).kind(kind);
+        let build =
+            |g: CreditTransferGroup| Pain001Builder::new("Acme", "CT-X").add_group(g).build();
+
+        // SLEV under OCT Inst.
+        assert_eq!(
+            build(
+                group(CreditTransferKind::OneLegOutInstant)
+                    .charge_bearer(ChargeBearer::Slev)
+                    .add_entry(entry(100))
+            )
+            .unwrap_err()
+            .kind,
+            ValidationError::ChargeBearerNotAllowed {
+                bearer: "SLEV",
+                scheme: "EOLO",
+            }
+        );
+        // A non-SLEV bearer under SEPA.
+        assert_eq!(
+            build(
+                group(CreditTransferKind::Standard)
+                    .charge_bearer(ChargeBearer::Shar)
+                    .add_entry(entry(100))
+            )
+            .unwrap_err()
+            .kind,
+            ValidationError::ChargeBearerNotAllowed {
+                bearer: "SHAR",
+                scheme: "SEPA",
+            }
+        );
+        // A non-euro amount under SEPA.
+        assert_eq!(
+            build(
+                group(CreditTransferKind::Instant)
+                    .add_entry(entry(100).with_currency("USD".parse().unwrap()))
+            )
+            .unwrap_err()
+            .kind,
+            ValidationError::Requires {
+                feature: "CdtTrfTxInf/Amt/InstdAmt @Ccy other than EUR",
+                requires: "CreditTransferKind::OneLegOutInstant",
+            }
+        );
+        // AT-T020 under SEPA.
+        assert_eq!(
+            build(
+                group(CreditTransferKind::Standard)
+                    .add_entry(entry(100).with_non_euro_leg_currency("USD".parse().unwrap()))
+            )
+            .unwrap_err()
+            .kind,
+            ValidationError::Requires {
+                feature: "InstrForCdtrAgt/InstrInf (AT-T020)",
+                requires: "CreditTransferKind::OneLegOutInstant",
+            }
+        );
+        // An explicit EUR is not a "non-euro amount" and stays legal anywhere.
+        assert!(
+            build(
+                group(CreditTransferKind::Standard)
+                    .add_entry(entry(100).with_currency(crate::Currency::EUR))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn oct_inst_needs_the_2019_message_version() {
+        for schema in [CreditTransferSchema::IsoV3, CreditTransferSchema::DkV2_7] {
+            let err = Pain001Builder::new("Acme", "CT-OCT")
+                .schema(schema)
+                .add_group(
+                    CreditTransferGroup::new("Acme", &de_iban(), d("2026-07-20"))
+                        .kind(CreditTransferKind::OneLegOutInstant)
+                        .add_entry(entry(100)),
+                )
+                .build()
+                .unwrap_err();
+            assert!(
+                matches!(err.kind, ValidationError::UnsupportedBySchema { .. }),
+                "{schema:?} must refuse EOLO, got {err:?}"
+            );
+        }
+    }
+
+    /// A timed execution is about settling at a moment, so both instant
+    /// schemes allow it and the ordinary one does not.
+    #[test]
+    fn a_timed_execution_follows_the_scheme_not_the_local_instrument() {
+        let at: IsoDateTime = "2026-07-20T11:00:00Z".parse().unwrap();
+        let build = |kind| {
+            Pain001Builder::new("Acme", "CT-T")
+                .add_group(
+                    CreditTransferGroup::new("Acme", &de_iban(), at)
+                        .kind(kind)
+                        .add_entry(entry(100)),
+                )
+                .build()
+        };
+        assert!(build(CreditTransferKind::Instant).is_ok());
+        assert!(build(CreditTransferKind::OneLegOutInstant).is_ok());
+        assert!(build(CreditTransferKind::Standard).is_err());
+    }
+
+    /// The control sum is bounded by `CtrlSum`'s own schema type, not by
+    /// `i64`. Regression: entries each inside `MAX_AMOUNT_CT` could sum to a
+    /// 19-digit `DecimalNumber`, which `totalDigits="18"` rejects.
+    #[test]
+    fn the_control_sum_is_bounded_by_the_schema_not_by_i64() {
+        use crate::validate::{MAX_CTRL_SUM_CT, accumulate_control_sum};
+
+        assert_eq!(accumulate_control_sum(0, 100), Ok(100));
+        assert!(accumulate_control_sum(MAX_CTRL_SUM_CT - 1, 1).is_ok());
+        // The window that used to pass validation and fail `xmllint`: over the
+        // schema's bound, under `i64::MAX`.
+        assert!(accumulate_control_sum(MAX_CTRL_SUM_CT, 1).is_err());
+
+        let digits = |ct| {
+            crate::ct_to_eur_str(ct)
+                .chars()
+                .filter(char::is_ascii_digit)
+                .count()
+        };
+        assert_eq!(
+            digits(MAX_CTRL_SUM_CT),
+            18,
+            "CtrlSum is a DecimalNumber with totalDigits=18"
+        );
+        assert_eq!(
+            digits(i64::MAX),
+            19,
+            "i64::MAX is a 19-digit CtrlSum — one past what the schema allows, \
+             which is why the bound cannot be the integer type's"
+        );
     }
 }

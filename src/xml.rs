@@ -175,8 +175,19 @@ impl Node {
         // A `Cd`/`Prtry` child wins over stray text: on malformed input such as
         // `<Sts>STRAY<Cd>BOOK</Cd></Sts>` the structured value is the one to
         // trust. Bare text is the older, choice-free encoding.
+        //
+        // `Prtry` has two shapes across the camt choices and both are real.
+        // In `BalanceType10Choice`, `EntryStatus1Choice` and
+        // `ReturnReason5Choice` it is a `Max35Text`, so the code is its own
+        // text. In `ChargeType3Choice` it is a `GenericIdentification3`, whose
+        // `Id` is **mandatory** — so a schema-valid proprietary charge type is
+        // `<Prtry><Id>RETURN_FEE</Id></Prtry>` and has no direct text at all.
+        // Reading only the text shape returned `None` for every one of
+        // those, discarding a value the file did carry.
         self.text_of("Cd")
             .or_else(|| self.text_of("Prtry"))
+            .or_else(|| self.child("Prtry").and_then(|p| p.text_of("Id")))
+            .or_else(|| self.child("Prtry").and_then(|p| p.text_of("Cd")))
             .or_else(|| {
                 Some(&self.text)
                     .filter(|t| !t.is_empty())
@@ -528,6 +539,19 @@ mod tests {
         // proprietary fallback
         let prtry = parse("<Rsn><Prtry>BANK-007</Prtry></Rsn>");
         assert_eq!(prtry.code(), Some("BANK-007"));
+
+        // `GenericIdentification3` — the shape `ChargeType3Choice/Prtry` has,
+        // where `Id` is mandatory and the element itself carries no text.
+        let generic = parse("<Tp><Prtry><Id>RETURN_FEE</Id></Prtry></Tp>");
+        assert_eq!(generic.code(), Some("RETURN_FEE"));
+
+        // `ProprietaryBankTransactionCodeStructure1` — `Cd` inside `Prtry`.
+        let bank_tx = parse("<BkTxCd><Prtry><Cd>NTRF+001</Cd><Issr>DK</Issr></Prtry></BkTxCd>");
+        assert_eq!(bank_tx.code(), Some("NTRF+001"));
+
+        // A `Cd` at the top still wins over anything inside `Prtry`.
+        let both = parse("<Tp><Cd>CHRG</Cd><Prtry><Id>IGNORED</Id></Prtry></Tp>");
+        assert_eq!(both.code(), Some("CHRG"));
     }
 
     #[test]

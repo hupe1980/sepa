@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+/// <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.054.001.08">
+///   <BkToCstmrDbtCdtNtfctn>
+///     <GrpHdr><MsgId>NTF-1</MsgId><CreDtTm>2026-07-14T12:00:00</CreDtTm></GrpHdr>
+///     <Ntfctn>
+///       <Id>N-1</Id>
+///       <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+///       <Ntry>
+///         <Amt Ccy="EUR">75.00</Amt>
+///         <CdtDbtInd>DBIT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+///         
+///         <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+/// <NtryDtls><TxDtls>
+///           <RtrInf><Rsn><Cd>MD01</Cd></Rsn></RtrInf>
+///         </TxDtls></NtryDtls>
+///       </Ntry>
+///     </Ntfctn>
+///   </BkToCstmrDbtCdtNtfctn>
+/// </Document>

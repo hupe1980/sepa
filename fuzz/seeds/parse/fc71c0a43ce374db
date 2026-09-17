@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+//! <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
+//!   <RsltnOfInvstgtn>
+//!     <Assgnmt><Id>RES-1</Id>
+//!       <Assgnr><Agt><FinInstnId><BICFI>COBADEFFXXX</BICFI></FinInstnId></Agt></Assgnr>
+//!       <Assgne><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Assgne>
+//!       <CreDtTm>2026-07-15T14:02:00</CreDtTm></Assgnmt>
+//!     <RslvdCase><Id>CXL-1</Id><Cretr><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Cretr></RslvdCase>
+//!     <Sts><Conf>CNCL</Conf></Sts>
+//!     <CxlDtls>
+//!       <OrgnlPmtInfAndSts>
+//!         <OrgnlPmtInfId>PMT-A</OrgnlPmtInfId>
+//!         <TxInfAndSts>
+//!           <OrgnlEndToEndId>E2E-1</OrgnlEndToEndId>
+//!           <TxCxlSts>ACCR</TxCxlSts>
+//!         </TxInfAndSts>
+//!       </OrgnlPmtInfAndSts>
+//!     </CxlDtls>
+//!   </RsltnOfInvstgtn>
+//! </Document>

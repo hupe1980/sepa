@@ -7,6 +7,14 @@ weight = 11
 Which version a bank requires varies by bank and by regulatory cut-over, so it
 is a per-message choice rather than a compile-time constant.
 
+**The version is not the scheme.** These are two independent axes and it is
+worth keeping them apart: all three credit-transfer schemes — SCT, SCT Instant
+and OCT Inst — are specified against `pain.001.001.09`, and a future ISO
+migration would move all three together. Pick the *version* with
+`Pain001Builder::schema` and the *scheme* with `CreditTransferGroup::kind`; see
+[credit transfers](/docs/credit-transfers/). The one interaction is that OCT
+Inst postdates the older schemas, so `EOLO` requires `pain.001.001.09`.
+
 | Message | Versions, default first |
 |---|---|
 | `pain.001` | `.001.09` · `.001.03` · `.003.03` (legacy German, end-of-life) |
@@ -58,13 +66,26 @@ rulebook, and sending `pain.001.001.13` to a SEPA bank gets it rejected.
 | `pain.002` | `.001.15` | **`.001.10`** |
 | `pain.007` | `.001.13` | **`.001.09`** |
 
-Those versions have been mandatory since **19 November 2023**, and nothing on
-the EPC's published roadmap moves SEPA past them. ISO's guidance is written for
-communities free to choose their own version; a scheme participant is not one.
+Those versions have been mandatory since **19 November 2023**. ISO's guidance is
+written for communities free to choose their own version; a scheme participant
+is not one.
 
-The other date you will hear about — 15 November 2026 — is a different rule
-entirely. It is the day unstructured addresses stop being accepted, not a
-change of message version. See [postal addresses](/docs/addresses/).
+The other date you will hear about is the end of unstructured addresses, and it
+is a different rule entirely — the shape of an address, not a change of message
+version. It has also moved twice and been withdrawn; see
+[postal addresses](/docs/addresses/).
+
+### A version migration is now proposed, for 2029
+
+Change request 6 of the EPC's 2026 change-management cycle proposes that the
+schemes move to the latest available ISO 20022 version **as of November 2029**.
+It was raised by the EPC's own One-Leg-Out Task Force with the PSEMWG, which
+recommends incorporating it, and it is subject to the consultation outcome — the
+2027 rulebooks publish in November 2026 and the decision will be visible there.
+
+Nothing changes about what you send today. What it changes is the shelf life of
+the sentence above: the mandated version is fixed until an announced migration,
+not indefinitely.
 
 ## How the output is checked
 

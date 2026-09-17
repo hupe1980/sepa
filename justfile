@@ -40,8 +40,16 @@ test-msrv:
 test-one FILTER:
     cargo test --all-features {{ FILTER }}
 
+# Regulatory watch list — is anything due for a re-read?
+#
+# Time-dependent, so it is not part of `just ci`: an overdue reading means a
+# human must go and look at a publisher's website, which is a different kind of
+# failure from a broken build. CI runs it as a job of its own.
+watch:
+    cargo test --all-features --test watch -- --include-ignored
+
 # Full CI gate — run before every commit.
-ci: fmt-check lint verify-data test-all test-no-features
+ci: fmt-check lint verify-data fuzz-seeds-check test-all test-no-features
     @echo "CI gate passed."
 
 # ── Examples ──────────────────────────────────────────────────────────────────
@@ -77,8 +85,25 @@ deny:
 
 # Fuzz a target (requires nightly + `cargo install cargo-fuzz`).
 # Targets: parse, identifiers, build_batch
+#
+# `fuzz/seeds/<target>` is passed when it exists. For `parse` it is load-bearing
+# rather than an optimisation: random bytes are never a well-formed ISO 20022
+# document, so an unseeded run never reaches the parsers' own logic.
 fuzz TARGET="parse" SECS="60":
-    cargo +nightly fuzz run {{ TARGET }} -- -max_total_time={{ SECS }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    seeds=""
+    [ -d "fuzz/seeds/{{ TARGET }}" ] && seeds="fuzz/seeds/{{ TARGET }}"
+    cargo +nightly fuzz run {{ TARGET }} \
+        fuzz/corpus/{{ TARGET }} $seeds -- -max_total_time={{ SECS }}
+
+# Regenerate `fuzz/seeds/parse` from the document fixtures in `src/` and `tests/`.
+fuzz-seeds:
+    python3 scripts/extract-fuzz-seeds.py
+
+# Fail if the checked-in seeds no longer match the fixtures (what CI runs).
+fuzz-seeds-check:
+    python3 scripts/extract-fuzz-seeds.py --check
 
 # Fuzz every target in turn — what CI runs on each push.
 fuzz-all SECS="60":

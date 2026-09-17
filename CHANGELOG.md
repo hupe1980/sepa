@@ -30,7 +30,312 @@ While the crate is `0.x`:
 - A rise in the **minimum supported Rust version** is a minor bump, called out
   under its own heading.
 
-Pin `sepa = "0.7"` and treat a move to `0.8` as a deliberate migration.
+Pin `sepa = "0.8"` and treat a move to `0.9` as a deliberate migration.
+
+## [0.8.0]
+
+**Three themes, and they rhyme: every one is something the suite could not
+see.** The read path stopped guessing; a fifth EPC payment scheme turned out to
+be missing; and the artefacts outside this repository became checkable.
+
+> **Migration, in three parts.**
+>
+> 1. The money fields on every camt type move into one `amount:
+>    ReportedAmount`, and `signed_ct()` returns `Option<i64>`:
+>    `entry.amount_ct` → `entry.amount.ct`, `entry.currency` →
+>    `entry.amount.currency`, `entry.indicator` → `entry.amount.direction`,
+>    each with a `*_raw` field beside it. A `None` means *the statement did not
+>    determine this* — escalate the row, never substitute a figure.
+> 2. `LocalInstrument` is now `CreditTransferKind` and
+>    `CreditTransferGroup::local_instrument` is `::kind`.
+>    `LocalInstrument::None` → `CreditTransferKind::Standard`,
+>    `LocalInstrument::Inst` → `CreditTransferKind::Instant`. The compiler
+>    finds every site; emitted output for both is unchanged.
+> 3. Nothing else. The value layer is untouched.
+
+### Emitted output
+
+- **New: OCT Inst documents.** A group with
+  `CreditTransferKind::OneLegOutInstant` emits `SvcLvl/Cd=EOLO`, a mandatory
+  `LclInstrm/Cd=INST`, a non-`SLEV` `ChrgBr`, optionally a non-euro
+  `InstdAmt/@Ccy`, and optionally `InstrForCdtrAgt/InstrInf`.
+- **Otherwise unchanged.** Every document 0.7 produced, 0.8 produces
+  byte-for-byte. `ChrgBr` still renders `SLEV` for all four SEPA schemes — it
+  is a value now rather than a literal, and `build()` refuses any other under a
+  SEPA service level.
+
+- **New: OCT Inst documents.** A group with
+  `CreditTransferKind::OneLegOutInstant` emits `SvcLvl/Cd=EOLO`, a mandatory
+  `LclInstrm/Cd=INST`, a non-`SLEV` `ChrgBr`, optionally a non-euro
+  `InstdAmt/@Ccy`, and optionally `InstrForCdtrAgt/InstrInf`. Nothing else
+  changes shape.
+- **Unchanged for SCT, SCT Inst, SDD Core, SDD B2B and every reversal, recall
+  or existing document.** `ChrgBr` still renders `SLEV` for all of them —
+  it is now a value rather than a literal, and `build()` refuses any other
+  under a SEPA service level.
+
+### Added — One-Leg Out Instant Credit Transfer (OCT Inst)
+
+The fifth EPC payment scheme, in force since 5 October 2025 (rulebook
+EPC158-22, customer-to-PSP guidelines EPC250-22 2025 v1.0). It covers the euro
+leg of an instant payment whose other leg leaves SEPA, and it adds no message:
+EPC250-22 specifies `pain.001.001.09`, `pain.002.001.10` and
+`camt.054.001.08`, all already implemented. What it adds is rules.
+
+- **`CreditTransferKind`** replaces `LocalInstrument` and names the scheme
+  rather than one of its elements: `Standard`, `Instant`, `OneLegOutInstant`.
+  One enum rather than two fields, because the combinations are not
+  orthogonal — `EOLO` without `INST` is not a scheme, and neither is `EOLO`
+  with `SLEV`.
+- **`ChargeBearer`** and `CreditTransferGroup::charge_bearer`. SEPA mandates
+  `SLEV`; OCT Inst forbids it and allows `CRED`, `DEBT`, `SHAR` (default
+  `SHAR`). Either violation is `ValidationError::ChargeBearerNotAllowed`.
+- **`Currency`** — a validated ISO 4217 code — and
+  `CreditTransferEntry::with_currency`, to order an amount in one. Reserved
+  codes that match `[A-Z]{3}` and name no money (`XXX`, `XTS`, the four
+  metals) are refused; there is no table of active codes.
+- **`CreditTransferEntry::with_non_euro_leg_currency`** — AT-T020, which
+  EPC250-22 carries in `InstrForCdtrAgt/InstrInf`.
+- Cross-scheme combinations are refused by name: a non-euro amount or an
+  AT-T020 instruction under SEPA, and `EOLO` on a pre-2019 schema.
+- A timed execution (`ReqdExctnDt/DtTm`) now follows the scheme rather than
+  the local instrument, so OCT Inst can carry one.
+
+### Added — the regulatory watch list, as a gate
+
+Every other check here measures the crate against an artefact *inside* the
+repository, which cannot notice a publisher issuing a newer one. Two defects
+reached a release through that gap with the whole suite green.
+
+- **`tests/watch.rs`** pins each external publication — IBAN Registry release,
+  rulebook version, guideline, code list — with the artefact in force, when it
+  was last read, how long that stays good, and the files it reaches. It fails
+  when one falls due, naming the source and what to look for. Consumer version
+  pins are checked the same way, against the sibling manifests.
+- Run by `just watch` and a CI job of its own. `#[ignore]`d in the default
+  suite: an overdue reading is a human task, not a reason to fail an unrelated
+  pull request. Excluded from the published package.
+- A row pointing at a file that no longer exists fails, so it cannot outlive
+  what it describes.
+
+### Added — a schema gate for inline fixtures
+
+- **`tests/fixtures.rs`** walks `src/` for ISO 20022 document literals and
+  validates each against the schema its own namespace names, so coverage does
+  not depend on a fixture being added to a list. Deliberately invalid fixtures
+  opt out with `// xsd-exempt: <reason>`.
+- It found **eighteen fixtures no bank could have sent**: missing mandatory
+  `CreDtTm`, `Bal`, `Sts`, `BkTxCd`, `Amt`, `CdtDbtInd`, `OrgnlMsgNmId`, and
+  five element-order errors — plus the parser defect below.
+- Three more schemas vendored so nothing is skipped: `camt.053.001.06`,
+  `pain.002.001.03`, `pain.002.003.03`. Each is checked to **reject** as well
+  as accept; `pain.002.003.03` is single-sourced, so that pair is its only
+  bound.
+- **The legacy DK status report is reject-only.** `pain.002.003.03` restricts
+  every status to `RJCT` and drops proprietary reasons and `AddtlInf`. Three
+  fixtures asserting acceptances under it described documents that cannot
+  exist; they move to `pain.002.001.03`, and a genuine DK reject report now
+  covers the variant.
+
+### Fixed — a proprietary code the parser could not read
+
+- **`<Prtry><Id>…</Id></Prtry>` read as `None`.** `Node::code` handled
+  `Prtry` only as text, which is its shape in `BalanceType10Choice`,
+  `EntryStatus1Choice` and `ReturnReason5Choice`. In `ChargeType3Choice` it is
+  a `GenericIdentification3` whose `Id` is **mandatory**, so every
+  schema-valid proprietary charge type — a return fee, typically — was
+  discarded. `BkTxCd/Prtry`, which nests a `Cd`, had the same problem. Both
+  shapes now resolve.
+
+  The fixture that should have caught it wrote `<Prtry>RETURN_FEE</Prtry>`,
+  which no schema admits; the new inline-fixture gate is what surfaced it.
+
+### Fixed — the control sum
+
+- **The control sum was bounded by `i64`, not by the schema.** `CtrlSum` is a
+  `DecimalNumber` with `totalDigits="18"` — 9,999,999,999,999,999.99 EUR with
+  two fraction digits. The guard was a bare `checked_add`, bounded by
+  `i64::MAX`, which is a nineteen-digit value. Between the two lay a window in
+  which individually legal entries summed to a file that passed this crate's
+  validation and failed `xmllint`. All three writers now share
+  `validate::accumulate_control_sum`.
+
+### Changed — error messages
+
+- `ValidationError::ControlSumOverflow`'s message names the schema bound rather
+  than `i64`.
+- The timed-execution error's `requires` text names the scheme rather than
+  `PmtTpInf/LclInstrm = INST`, because both instant schemes now allow one.
+
+### Fixed — money
+
+- **An unreadable `ChrgInclInd` is no longer indistinguishable from an absent
+  one.** `included_in_amount` is `Option<bool>` and `None` was documented as
+  "the bank did not say", but it also swallowed values outside the four
+  `xs:boolean` forms — `TRUE`, `yes`. That field decides whether a ledger
+  posts a charge or treats it as already inside the entry amount, so losing
+  the distinction is a double-count waiting for a bank that spells it
+  differently. `ChargeRecord::included_in_amount_raw` keeps what arrived.
+- **An unreadable `CdtDbtInd` is no longer read as a credit.** `indicator_of`
+  ended in `.unwrap_or(CreditDebitIndicator::Credit)`, so an entry whose
+  credit/debit indicator was absent, empty or misspelled — `DBTI` for `DBIT` —
+  was reported as a **credit of the same magnitude**. In a ledger that is a
+  two-for-one error: a EUR 1,000 debit became a EUR 1,000 credit, a EUR 2,000
+  swing, from one mistyped character in a third party's file. It applied to
+  entries, to balances (an overdraft read as funds) and to transaction details.
+  `CreditDebitIndicator` has also lost its `Default` derive — a money direction
+  has no default.
+- **An entry is no longer dropped when its amount cannot be read.**
+  `parse_entry` and `parse_balance` returned `Option` and were collected with
+  `filter_map`, so a booking whose `Amt` this crate could not represent
+  **vanished from the statement** with no error. That is the one parse failure
+  an importer cannot detect: a missing booking is indistinguishable from one
+  that never happened. Entries, balances and charge records are now always
+  reported, carrying `None` amounts and the verbatim text.
+- **Sub-cent amounts are refused instead of truncated.** `ct_from_eur_str`
+  truncated below two decimals, so `0.001` parsed as `0` and `1.999` as `199`.
+  `ActiveOrHistoricCurrencyAndAmount` permits five fraction digits, so both are
+  reachable from a bank file. New `AmountError::SubCentPrecision`. Trailing
+  zeros remain insignificant: `"1.500"` is still `150`.
+- **A leading `+` is accepted.** `+1000.00` is legal `xs:decimal` and banks send
+  it; it was rejected, and — via the bug above — took its whole entry out of the
+  statement with it. A repeated sign is still rejected.
+- **`net_movement_ct()` is all-or-nothing.** It summed with `saturating_add`
+  over entries that silently resolved to zero or the wrong sign. A total that
+  skips the rows it could not read looks right and is not.
+- **`details_reconcile()` no longer reports agreement with an unreadable
+  entry.** It compared against a fabricated entry total; with no total to
+  compare against, it now answers `false`.
+- **An absent `Amt/@Ccy` is no longer read as `EUR`.** camt statements are not
+  EUR-only, and the fabricated currency propagated: a detail is excluded from
+  its entry's sum when the two differ, so guessing here silently changed which
+  transactions were counted.
+- **A `Bal` with no `Tp` is `BalanceType::Unspecified`**, not `Other("")` —
+  which is what a bank sending an empty code produces. Two different facts had
+  been collapsed into one value.
+- **A `NbOfTxsPerSts` row survives a count it cannot read.** The whole row was
+  dropped, losing the bank's assertion that the status bucket exists;
+  `StatusCount::count` is now `Option<u64>` with `count_raw` beside it.
+
+### Fixed — lexical conformance
+
+Two places where the crate was **stricter than the standard it names**, which is
+the direction where nothing fails visibly: the caller is refused, at the call
+site, with nothing they can do.
+
+- **`IsoDate` rejected a legal `xs:date` timezone.** `xs:date` is
+  `'-'? yyyy '-' mm '-' dd zzzzzz?` — the zone is optional but legal, so
+  `2026-07-20Z` and `2026-07-20+02:00` are schema-valid `ISODate` values that
+  this crate could not read. Both are accepted now; the zone is dropped, since
+  every date the builders write is a bare `xs:date`.
+- **`IsoDate::parse_date_part` accepted anything after the tenth character.**
+  `2026-07-20GARBAGE` returned a confident booking date. It now accepts exactly
+  the two members of `DateAndDateTimeChoice` — `xs:date` and `xs:dateTime` —
+  and nothing else.
+- Found by the seeded fuzzer, in code added by the fix above: the timezone check
+  computed `byte - b'0'` before verifying the byte was a digit, so
+  `2026-07-20+!!:!!` **panicked**. Reachable from any parsed date.
+
+### Fixed — other
+
+- `IsoDate::today()` and `IsoDateTime::now()` saturated to **`0001-01-01`** on a
+  clock past year 9999 — wrong, and wrong in the opposite direction from the
+  fault. They saturate forward now.
+- `PostalAddress` looked up its length bounds with a silent
+  `.unwrap_or(MAX_NAME_LEN)`, so an address element added to the writer without
+  a bound in `validate::max_text_len` would have inherited a plausible 70. The
+  element list and the table are now checked against each other by a test —
+  D37 applied where it had been skipped.
+
+### API
+
+Breaking, with no deprecation path, and the compiler finds every site:
+
+| Was | Is |
+|---|---|
+| `CashEntry::signed_ct() -> i64` | `-> Option<i64>` |
+| `StatementBalance::signed_ct() -> i64` | `-> Option<i64>` |
+| `ChargeRecord::signed_ct() -> i64` | `-> Option<i64>` |
+| `net_movement_ct() -> i64` (camt.052/053/054) | `-> Option<i64>` |
+| `amount_ct: i64` | `amount_ct: Option<i64>`, plus `amount_raw: Option<String>` |
+| `currency: String` | `currency: Option<String>` |
+| `indicator: CreditDebitIndicator` | `indicator: Option<CreditDebitIndicator>`, plus `indicator_raw: Option<String>` |
+| `CreditDebitIndicator: Default` | removed |
+| `CashEntry`/`StatementBalance`/`ChargeRecord`/`EntryDetail` money fields | one `amount: ReportedAmount` |
+| `StatusCount::count: u64` | `count: Option<u64>`, plus `count_raw: Option<String>` |
+| — | `BalanceType::Unspecified` |
+| `Pain002Document::created_at: String` | `created_at_raw: String`, plus `created_at() -> Option<IsoDateTime>` |
+| `Camt029Document::created_at: String` | `created_at_raw: String`, plus `created_at() -> Option<IsoDateTime>` |
+| — | `AmountError::SubCentPrecision { value, digits }` (`#[non_exhaustive]`, so no `match` breaks) |
+
+The shape is not new: `EntryDetail::signed_ct()` has returned `Option<i64>`
+since 0.5, for exactly this reason. What 0.8 does is apply it one level up,
+where the same question was being answered with a guess. The `created_at`
+rename is the same correction applied to the other direction — camt.05x gained
+"verbatim *and* typed" in 0.7 and pain.002/camt.029 did not.
+
+### Testing — why none of this was caught
+
+Three separate mechanisms, and the new gates target each one.
+
+- **Two of the defects were asserted as correct.** The truncation and the
+  dropped entry both had tests pinning them down — written to lock in a *panic*
+  fix in 0.6, recording whatever the non-crashing behaviour happened to be
+  without asking whether it was right. A regression test for a crash encodes the
+  recovery as the specification.
+- **The sign flip was never exercised.** All 25 `CdtDbtInd` occurrences in the
+  entire fixture corpus were a correctly spelled `CRDT` or `DBIT`. The invalid
+  branch of a two-branch enum had no coverage at all, because every fixture was
+  hand-written by somebody who knew the right codes.
+- **The fuzzer could not see any of them.** The `parse` target's whole invariant
+  was "does not panic" — every accessor result was discarded with `let _ =`. A
+  fabricated value is a perfectly ordinary `Ok`.
+
+The gates added in response:
+
+- **`tests/conformance.rs`** — 22 tests over the three classes the rest of the
+  suite is blind to: input the crate wrongly **refuses** (oracle: the XML
+  Schema lexical spaces for `xs:decimal`, `xs:date`, `xs:dateTime` and
+  `xs:boolean`), values it **invents** (oracle: the input bytes), and elements
+  it **drops** (oracle: the input element count). Each gate was verified by
+  reintroducing the defect it targets and confirming it fails.
+- **The `parse` fuzz target asserts the money invariants**, not just absence of
+  panics: a ledger figure exists exactly when its magnitude and its direction
+  both do, signing changes only the sign, and a resolved direction must
+  round-trip to the text it was read from.
+- **`fuzz/seeds/`, checked in** — and load-bearing rather than an optimisation.
+  Random bytes are never a well-formed ISO 20022 document, so an unseeded
+  `parse` run explores only the XML rejection path: **315,449 unseeded
+  executions did not rediscover the sign-flip defect, and a seeded run finds it
+  in seconds.** `just fuzz-seeds` regenerates them from the shared fixtures, and
+  CI fails if the committed seeds no longer match — a generated artefact that is
+  committed and never re-derived is a comment.
+
+### Internal
+
+- The four camt types that carry money now embed a single `ReportedAmount`
+  instead of repeating five fields and an accessor with identical semantics.
+  The invariant has one definition, so a new money-bearing type inherits it.
+
+### Documentation
+
+- The **EPC withdrew the 15 November 2026 unstructured-address end-date** on
+  9 September 2026, after Swift extended its own migration period on 27 August.
+  A new date is to be set in October 2026. That date was asserted as settled
+  fact in 24 places — the README, the crate root, seven modules, the examples
+  and five site pages. Nothing in the code changed, because `PostalAddress` was
+  built around which forms are durable rather than around when the others
+  expire; the claims are now pinned to the rule, and the date itself is stated
+  once, in `address`, with its history.
+- **A migration to a newer ISO 20022 version is now on the EPC's roadmap** —
+  change request 6 of the 2026 cycle, recommended for November 2029. The crate's
+  long-standing "nothing on the EPC roadmap moves SEPA past them" is retired;
+  the decision to emit the mandated versions is unchanged.
+- Verification of Payee rulebook v1.1 (effective 20 September 2026) was read in
+  full: `AT-R001` still carries exactly four outcomes, and nothing this crate
+  parses changes.
+- Internal decision identifiers were removed from public rustdoc and the site.
+  They referenced a directory that is not published.
 
 ## [0.7.0]
 
@@ -418,6 +723,12 @@ New `validate::MAX_CODE_LEN` (4) and `validate::MAX_BUILDING_LEN` (16).
   locally and it is part of `just ci`; `just verify-tables` adds the
   reference-data conformance tests.
 
+### Internal
+
+- The four camt types that carry money now embed a single `ReportedAmount`
+  instead of repeating five fields and an accessor with identical semantics.
+  The invariant has one definition, so a new money-bearing type inherits it.
+
 ### Documentation
 
 - The Extended Remittance Information option (EPC092-19) is named in the scope
@@ -749,6 +1060,12 @@ removed code did.
   `.execution_date(…)` explicitly, as every real caller does.
 - New address elements appear only when an address is set. Nothing else changes
   the bytes emitted for an input that 0.5 accepted.
+
+### Internal
+
+- The four camt types that carry money now embed a single `ReportedAmount`
+  instead of repeating five fields and an accessor with identical semantics.
+  The invariant has one definition, so a new money-bearing type inherits it.
 
 ### Documentation
 

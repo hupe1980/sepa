@@ -1,0 +1,5 @@
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+<BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S</Id>
+<Bal><Tp><CdOrPrtry><Cd>XPCD</Cd></CdOrPrtry></Tp>
+  <Amt Ccy="EUR">20.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Bal>
+</Stmt></BkToCstmrStmt></Document>

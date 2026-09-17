@@ -25,7 +25,10 @@
 //!         <Amt Ccy="EUR">250.00</Amt>
 //!         <CdtDbtInd>CRDT</CdtDbtInd>
 //!         <Sts><Cd>PDNG</Cd></Sts>
-//!       </Ntry>
+//!         
+//!
+//! <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+//! </Ntry>
 //!     </Rpt>
 //!   </BkToCstmrAcctRpt>
 //! </Document>"#;
@@ -95,12 +98,19 @@ impl Camt052Report {
         crate::IsoDate::parse_date_part(self.to_date_raw.as_deref()?).ok()
     }
 
-    /// Net movement in ct across all entries in this report.
+    /// Net movement in **ct** for this report — the sum of the signed entry
+    /// amounts — or `None` when any entry's amount or direction is unreadable.
+    ///
+    /// All-or-nothing on purpose. Skipping the entries that cannot be resolved
+    /// produces a total that looks right and is not, which is the failure mode
+    /// a net movement exists to rule out; `None` says "ask about this file"
+    /// where a partial sum says nothing at all. Overflow saturates rather than
+    /// panicking, because the input is a third party's file.
     #[must_use]
-    pub fn net_movement_ct(&self) -> i64 {
+    pub fn net_movement_ct(&self) -> Option<i64> {
         self.entries
             .iter()
-            .fold(0i64, |acc, e| acc.saturating_add(e.signed_ct()))
+            .try_fold(0i64, |acc, e| Some(acc.saturating_add(e.signed_ct()?)))
     }
 
     /// Entries that are not yet booked (`PDNG`).
@@ -216,11 +226,11 @@ mod tests {
     <Rpt>
       <Id>INTRADAY-1</Id>
       <ElctrncSeqNb>7</ElctrncSeqNb>
+      <FrToDt><FrDtTm>2026-07-14T00:00:00</FrDtTm><ToDtTm>2026-07-14T11:00:00</ToDtTm></FrToDt>
       <Acct>
         <Id><IBAN>DE89370400440532013000</IBAN></Id>
         <Svcr><FinInstnId><BICFI>COBADEFFXXX</BICFI></FinInstnId></Svcr>
       </Acct>
-      <FrToDt><FrDtTm>2026-07-14T00:00:00</FrDtTm><ToDtTm>2026-07-14T11:00:00</ToDtTm></FrToDt>
       <Bal>
         <Tp><CdOrPrtry><Cd>ITBD</Cd></CdOrPrtry></Tp>
         <Amt Ccy="EUR">1000.00</Amt>
@@ -231,6 +241,8 @@ mod tests {
         <Amt Ccy="EUR">250.00</Amt>
         <CdtDbtInd>CRDT</CdtDbtInd>
         <Sts><Cd>PDNG</Cd></Sts>
+        
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
         <NtryDtls><TxDtls>
           <Refs><EndToEndId>E2E-PENDING</EndToEndId></Refs>
           <RltdPties><Dbtr><Pty><Nm>Zahler GmbH</Nm></Pty></Dbtr></RltdPties>
@@ -240,6 +252,7 @@ mod tests {
         <Amt Ccy="EUR">75.00</Amt>
         <CdtDbtInd>DBIT</CdtDbtInd>
         <Sts><Cd>BOOK</Cd></Sts>
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
       </Ntry>
     </Rpt>
   </BkToCstmrAcctRpt>
@@ -275,17 +288,20 @@ mod tests {
     fn intraday_balance_and_entries() {
         let doc = parse_camt052(REPORT).unwrap();
         let rpt = &doc.reports[0];
-        assert_eq!(rpt.balances[0].amount_ct, 100_000);
-        assert_eq!(rpt.balances[0].currency, "EUR");
+        assert_eq!(rpt.balances[0].amount.ct, Some(100_000));
+        assert_eq!(rpt.balances[0].amount.currency, Some("EUR".to_owned()));
 
         assert_eq!(rpt.entries.len(), 2);
-        assert_eq!(rpt.entries[0].signed_ct(), 25_000);
+        assert_eq!(rpt.entries[0].signed_ct(), Some(25_000));
         assert_eq!(rpt.entries[0].status, EntryStatus::Pending);
         assert_eq!(rpt.entries[0].end_to_end_id(), Some("E2E-PENDING"));
         assert_eq!(rpt.entries[0].counterparty_name(), Some("Zahler GmbH"));
-        assert_eq!(rpt.entries[1].indicator, CreditDebitIndicator::Debit);
+        assert_eq!(
+            rpt.entries[1].amount.direction,
+            Some(CreditDebitIndicator::Debit)
+        );
         // 250.00 credit − 75.00 debit
-        assert_eq!(rpt.net_movement_ct(), 17_500);
+        assert_eq!(rpt.net_movement_ct(), Some(17_500));
     }
 
     #[test]
@@ -293,7 +309,7 @@ mod tests {
         let doc = parse_camt052(REPORT).unwrap();
         let pending: Vec<_> = doc.reports[0].pending_entries().collect();
         assert_eq!(pending.len(), 1, "only the PDNG entry is provisional");
-        assert_eq!(pending[0].amount_ct, 25_000);
+        assert_eq!(pending[0].amount.ct, Some(25_000));
     }
 
     #[test]

@@ -1,0 +1,4 @@
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+<CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-20T09:00:00.123Z</CreDtTm></GrpHdr>
+<OrgnlGrpInfAndSts><OrgnlMsgId>O</OrgnlMsgId><GrpSts>ACTC</GrpSts></OrgnlGrpInfAndSts>
+</CstmrPmtStsRpt></Document>

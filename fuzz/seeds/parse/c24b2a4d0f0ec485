@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
+  <RsltnOfInvstgtn>
+    <Assgnmt><Id>RES-1</Id>
+      <Assgnr><Agt><FinInstnId><BICFI>COBADEFFXXX</BICFI></FinInstnId></Agt></Assgnr>
+      <Assgne><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Assgne>
+      <CreDtTm>2026-07-15T14:02:00</CreDtTm></Assgnmt>
+    <RslvdCase><Id>CXL-1</Id><Cretr><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Cretr></RslvdCase>
+    <Sts><Conf>CNCL</Conf></Sts>
+    <CxlDtls>
+      <OrgnlGrpInfAndSts>
+        <OrgnlMsgId>DD-2026-07-001</OrgnlMsgId>
+        <OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+        <OrgnlCreDtTm>2026-07-15T09:00:00</OrgnlCreDtTm>
+        <OrgnlNbOfTxs>3</OrgnlNbOfTxs>
+        <OrgnlCtrlSum>225.00</OrgnlCtrlSum>
+      </OrgnlGrpInfAndSts>
+      <OrgnlPmtInfAndSts>
+        <OrgnlPmtInfCxlId>PC-1</OrgnlPmtInfCxlId>
+        <OrgnlPmtInfId>PMT-A</OrgnlPmtInfId>
+        <NbOfTxsPerCxlSts><DtldNbOfTxs>1</DtldNbOfTxs><DtldSts>ACCR</DtldSts>
+          <DtldCtrlSum>75.00</DtldCtrlSum></NbOfTxsPerCxlSts>
+        <TxInfAndSts>
+          <CxlStsId>CS-1</CxlStsId>
+          <OrgnlEndToEndId>E2E-1</OrgnlEndToEndId>
+          <TxCxlSts>ACCR</TxCxlSts>
+          <OrgnlInstdAmt Ccy="EUR">75.00</OrgnlInstdAmt>
+          <OrgnlReqdColltnDt>2026-07-20</OrgnlReqdColltnDt>
+        </TxInfAndSts>
+      </OrgnlPmtInfAndSts>
+    </CxlDtls>
+  </RsltnOfInvstgtn>
+</Document>

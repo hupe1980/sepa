@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+ <CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr>
+  <OrgnlGrpInfAndSts>
+    <OrgnlMsgId>DD-1</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+    <GrpSts>RJCT</GrpSts>
+    <StsRsnInf><Rsn><Cd>DUPL</Cd></Rsn>
+      <AddtlInf>MsgId already received</AddtlInf>
+      <AddtlInf>on 2026-07-19</AddtlInf></StsRsnInf>
+  </OrgnlGrpInfAndSts>
+ </CstmrPmtStsRpt></Document>

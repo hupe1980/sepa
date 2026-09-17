@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.06">
+  <BkToCstmrStmt>
+    <GrpHdr><MsgId>STMT-RTN</MsgId><CreDtTm>2026-07-14T23:59:00</CreDtTm></GrpHdr>
+    <Stmt>
+      <Id>2026-07-14-R</Id>
+      <CreDtTm>2026-07-14T23:59:00</CreDtTm>
+      <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+      <Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-14</Dt></Dt></Bal>
+      <Ntry>
+        <Amt Ccy="EUR">75.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <Sts>BOOK</Sts>
+        
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><EndToEndId>MND-001</EndToEndId></Refs>
+            <Amt Ccy="EUR">75.00</Amt>
+            <CdtDbtInd>DBIT</CdtDbtInd>
+            <RtrInf>
+              <Rsn><Cd>MD01</Cd></Rsn>
+              <AddtlInf>No mandate found</AddtlInf>
+            </RtrInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>T</CreDtTm></GrpHdr>
+    <Stmt>
+      <Id>S1</Id>
+      <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+      <Ntry>
+        <Amt Ccy="EUR">1.&#8364;5</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>

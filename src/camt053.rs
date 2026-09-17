@@ -40,7 +40,7 @@
 //! let doc = parse_camt053(xml)?;
 //! let stmt = &doc.statements[0];
 //! assert_eq!(stmt.account.iban.as_deref(), Some("DE89370400440532013000"));
-//! assert_eq!(stmt.closing_balance().unwrap().amount_ct, 115_542);
+//! assert_eq!(stmt.closing_balance().unwrap().amount.ct, Some(115_542));
 //! # Ok::<(), sepa::Camt053ParseError>(())
 //! ```
 
@@ -122,18 +122,19 @@ impl Camt053Statement {
             .find(|b| b.balance_type == BalanceType::ClosingBooked)
     }
 
-    /// Net movement in ct for this statement (sum of signed entry amounts),
-    /// saturating rather than panicking on an implausible total.
+    /// Net movement in **ct** for this statement — the sum of the signed entry
+    /// amounts — or `None` when any entry's amount or direction is unreadable.
     ///
-    /// `Iterator::sum` was the previous implementation and panics on overflow in
-    /// a debug build — reachable from a bank file, which is the one place this
-    /// crate does not take input on trust. camt.052 and camt.054 already
-    /// saturated; the three agree now.
+    /// All-or-nothing on purpose. Skipping the entries that cannot be resolved
+    /// produces a total that looks right and is not, which is the failure mode
+    /// a net movement exists to rule out; `None` says "ask about this file"
+    /// where a partial sum says nothing at all. Overflow saturates rather than
+    /// panicking, because the input is a third party's file.
     #[must_use]
-    pub fn net_movement_ct(&self) -> i64 {
+    pub fn net_movement_ct(&self) -> Option<i64> {
         self.entries
             .iter()
-            .fold(0i64, |acc, e| acc.saturating_add(e.signed_ct()))
+            .try_fold(0i64, |acc, e| Some(acc.saturating_add(e.signed_ct()?)))
     }
 }
 
@@ -255,6 +256,7 @@ mod tests {
     <Stmt>
       <Id>2026-07-14</Id>
       <ElctrncSeqNb>42</ElctrncSeqNb>
+      <CreDtTm>2026-07-14T23:59:00</CreDtTm>
       <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
       <Bal>
         <Tp><CdOrPrtry><Cd>OPBD</Cd></CdOrPrtry></Tp>
@@ -275,16 +277,20 @@ mod tests {
         <BookgDt><Dt>2026-07-14</Dt></BookgDt>
         <ValDt><Dt>2026-07-14</Dt></ValDt>
         <AcctSvcrRef>SVCRREF-001</AcctSvcrRef>
+        
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
         <NtryDtls>
           <TxDtls>
             <Refs>
               <EndToEndId>E2E-INV-2026</EndToEndId>
             </Refs>
-            <RmtInf><Ustrd>Invoice 2026-07-001</Ustrd></RmtInf>
+            <Amt Ccy="EUR">155.42</Amt>
+            <CdtDbtInd>CRDT</CdtDbtInd>
             <RltdPties>
               <Dbtr><Nm>Max Mustermann GmbH</Nm></Dbtr>
               <DbtrAcct><Id><IBAN>NL91ABNA0417164300</IBAN></Id></DbtrAcct>
             </RltdPties>
+            <RmtInf><Ustrd>Invoice 2026-07-001</Ustrd></RmtInf>
           </TxDtls>
         </NtryDtls>
       </Ntry>
@@ -314,12 +320,12 @@ mod tests {
         let stmt = &doc.statements[0];
 
         let opening = stmt.opening_balance().unwrap();
-        assert_eq!(opening.amount_ct, 100_000);
+        assert_eq!(opening.amount.ct, Some(100_000));
         assert_eq!(opening.date_raw, "2026-07-13");
         assert_eq!(opening.date(), Some(IsoDate::new(2026, 7, 13).unwrap()));
 
         let closing = stmt.closing_balance().unwrap();
-        assert_eq!(closing.amount_ct, 115_542);
+        assert_eq!(closing.amount.ct, Some(115_542));
         assert_eq!(closing.date(), Some(IsoDate::new(2026, 7, 14).unwrap()));
     }
 
@@ -330,8 +336,8 @@ mod tests {
         assert_eq!(stmt.entries.len(), 1);
 
         let e = &stmt.entries[0];
-        assert_eq!(e.amount_ct, 15_542);
-        assert_eq!(e.indicator, CreditDebitIndicator::Credit);
+        assert_eq!(e.amount.ct, Some(15_542));
+        assert_eq!(e.amount.direction, Some(CreditDebitIndicator::Credit));
         assert_eq!(e.status, EntryStatus::Booked);
         assert_eq!(e.booking_date(), Some(IsoDate::new(2026, 7, 14).unwrap()));
         assert_eq!(e.account_servicer_ref.as_deref(), Some("SVCRREF-001"));
@@ -340,13 +346,13 @@ mod tests {
         assert_eq!(e.counterparty_name(), Some("Max Mustermann GmbH"));
         assert_eq!(e.counterparty_iban(), Some("NL91ABNA0417164300"));
         assert!(!e.is_return());
-        assert_eq!(e.signed_ct(), 15_542); // credit = positive
+        assert_eq!(e.signed_ct(), Some(15_542)); // credit = positive
     }
 
     #[test]
     fn net_movement() {
         let doc = parse_camt053(CAMT053_EXAMPLE).unwrap();
-        assert_eq!(doc.statements[0].net_movement_ct(), 15_542);
+        assert_eq!(doc.statements[0].net_movement_ct(), Some(15_542));
     }
 
     #[test]
@@ -357,7 +363,7 @@ mod tests {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
   <BkToCstmrStmt>
-    <GrpHdr><MsgId>M</MsgId><CreDtTm>T</CreDtTm></GrpHdr>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr>
     <Stmt>
       <Id>S1</Id>
       <Acct>
@@ -365,6 +371,7 @@ mod tests {
         <Ccy>CHF</Ccy>
         <Svcr><FinInstnId><BICFI>POFICHBEXXX</BICFI></FinInstnId></Svcr>
       </Acct>
+      <Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-21</Dt></Dt></Bal>
     </Stmt>
   </BkToCstmrStmt>
 </Document>"#;
@@ -406,20 +413,26 @@ mod tests {
     <GrpHdr><MsgId>STMT-DEBIT</MsgId><CreDtTm>2026-07-14T23:59:00</CreDtTm></GrpHdr>
     <Stmt>
       <Id>2026-07-14-D</Id>
+      <CreDtTm>2026-07-14T23:59:00</CreDtTm>
       <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+      <Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-14</Dt></Dt></Bal>
       <Ntry>
         <Amt Ccy="EUR">500.00</Amt>
         <CdtDbtInd>DBIT</CdtDbtInd>
         <Sts>BOOK</Sts>
         <BookgDt><Dt>2026-07-14</Dt></BookgDt>
+        
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
         <NtryDtls>
           <TxDtls>
             <Refs><EndToEndId>PAY-OUT-001</EndToEndId></Refs>
-            <RmtInf><Ustrd>Supplier invoice July</Ustrd></RmtInf>
+            <Amt Ccy="EUR">500.00</Amt>
+            <CdtDbtInd>DBIT</CdtDbtInd>
             <RltdPties>
               <Cdtr><Nm>Supplier AG</Nm></Cdtr>
               <CdtrAcct><Id><IBAN>NL91ABNA0417164300</IBAN></Id></CdtrAcct>
             </RltdPties>
+            <RmtInf><Ustrd>Supplier invoice July</Ustrd></RmtInf>
           </TxDtls>
         </NtryDtls>
       </Ntry>
@@ -428,9 +441,9 @@ mod tests {
 </Document>"#;
         let doc = parse_camt053(xml).unwrap();
         let e = &doc.statements[0].entries[0];
-        assert_eq!(e.amount_ct, 50_000);
-        assert_eq!(e.indicator, CreditDebitIndicator::Debit);
-        assert_eq!(e.signed_ct(), -50_000); // debit = negative
+        assert_eq!(e.amount.ct, Some(50_000));
+        assert_eq!(e.amount.direction, Some(CreditDebitIndicator::Debit));
+        assert_eq!(e.signed_ct(), Some(-50_000)); // debit = negative
         assert_eq!(e.counterparty_name(), Some("Supplier AG"));
         assert_eq!(e.counterparty_iban(), Some("NL91ABNA0417164300"));
         assert_eq!(e.reference(), Some("Supplier invoice July"));
@@ -444,14 +457,20 @@ mod tests {
     <GrpHdr><MsgId>STMT-RTN</MsgId><CreDtTm>2026-07-14T23:59:00</CreDtTm></GrpHdr>
     <Stmt>
       <Id>2026-07-14-R</Id>
+      <CreDtTm>2026-07-14T23:59:00</CreDtTm>
       <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+      <Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-14</Dt></Dt></Bal>
       <Ntry>
         <Amt Ccy="EUR">75.00</Amt>
         <CdtDbtInd>DBIT</CdtDbtInd>
         <Sts>BOOK</Sts>
+        
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
         <NtryDtls>
           <TxDtls>
             <Refs><EndToEndId>MND-001</EndToEndId></Refs>
+            <Amt Ccy="EUR">75.00</Amt>
+            <CdtDbtInd>DBIT</CdtDbtInd>
             <RtrInf>
               <Rsn><Cd>MD01</Cd></Rsn>
               <AddtlInf>No mandate found</AddtlInf>
@@ -477,7 +496,9 @@ mod tests {
     <GrpHdr><MsgId>STMT-NO-PERIOD</MsgId><CreDtTm>2026-07-14T23:59:00</CreDtTm></GrpHdr>
     <Stmt>
       <Id>2026-07-14</Id>
+      <CreDtTm>2026-07-14T23:59:00</CreDtTm>
       <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+      <Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-14</Dt></Dt></Bal>
     </Stmt>
   </BkToCstmrStmt>
 </Document>"#;

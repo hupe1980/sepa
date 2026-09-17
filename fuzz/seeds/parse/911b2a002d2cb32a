@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ns2:Document xmlns:ns2="urn:iso:std:iso:20022:tech:xsd:pain.002.001.03">
+  <ns2:CstmrPmtStsRpt>
+    <ns2:GrpHdr>
+      <ns2:MsgId>BANK-RESP-1</ns2:MsgId>
+      <ns2:CreDtTm>2026-07-21T09:00:00</ns2:CreDtTm>
+      <ns2:DbtrAgt><ns2:FinInstnId><ns2:BICFI>COBADEFFXXX</ns2:BICFI></ns2:FinInstnId></ns2:DbtrAgt>
+    </ns2:GrpHdr>
+    <ns2:OrgnlGrpInfAndSts>
+      <ns2:OrgnlMsgId>CT-2026-07-001</ns2:OrgnlMsgId>
+      <ns2:OrgnlMsgNmId>pain.001.001.09</ns2:OrgnlMsgNmId>
+      <ns2:GrpSts>PART</ns2:GrpSts>
+    </ns2:OrgnlGrpInfAndSts>
+    <ns2:OrgnlPmtInfAndSts>
+      <ns2:OrgnlPmtInfId>CT-2026-07-001-1</ns2:OrgnlPmtInfId>
+      <!-- <ns2:TxInfAndSts><ns2:TxSts>IGNORED</ns2:TxSts></ns2:TxInfAndSts> -->
+      <ns2:TxInfAndSts>
+        <ns2:OrgnlEndToEndId>INV-2026-001</ns2:OrgnlEndToEndId>
+        <ns2:TxSts>RJCT</ns2:TxSts>
+        <ns2:StsRsnInf><ns2:Rsn><ns2:Cd>AC04</ns2:Cd></ns2:Rsn></ns2:StsRsnInf>
+        <ns2:OrgnlTxRef>
+          <ns2:Amt><ns2:InstdAmt Ccy="EUR">120.00</ns2:InstdAmt></ns2:Amt>
+          <ns2:Cdtr><ns2:Nm>Bl&#252;mel &amp; S&#246;hne</ns2:Nm></ns2:Cdtr>
+          <ns2:CdtrAcct><ns2:Id><ns2:IBAN>NL91ABNA0417164300</ns2:IBAN></ns2:Id></ns2:CdtrAcct>
+        </ns2:OrgnlTxRef>
+      </ns2:TxInfAndSts>
+    </ns2:OrgnlPmtInfAndSts>
+  </ns2:CstmrPmtStsRpt>
+</ns2:Document>

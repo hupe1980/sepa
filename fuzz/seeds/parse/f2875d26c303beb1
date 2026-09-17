@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+//! <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.03">
+//!   <CstmrPmtStsRpt>
+//!     <GrpHdr>
+//!       <MsgId>AAAADEBBXXX20260714000001</MsgId>
+//!       <CreDtTm>2026-07-14T10:20:30</CreDtTm>
+//!     </GrpHdr>
+//!     <OrgnlGrpInfAndSts>
+//!       <OrgnlMsgId>CT-2026-07-001</OrgnlMsgId>
+//!       <OrgnlMsgNmId>pain.001</OrgnlMsgNmId>
+//!       <GrpSts>ACTC</GrpSts>
+//!     </OrgnlGrpInfAndSts>
+//!   </CstmrPmtStsRpt>
+//! </Document>

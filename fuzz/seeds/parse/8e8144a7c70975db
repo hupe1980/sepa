@@ -1,0 +1,6 @@
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.03">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>REAL</MsgId><CreDtTm>T</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts><OrgnlMsgId>O-REAL</OrgnlMsgId><GrpSts>ACTC</GrpSts></OrgnlGrpInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>

@@ -55,6 +55,13 @@ pub enum BalanceType {
     ForwardAvailable,
     /// Any other balance type code.
     Other(String),
+    /// The statement carried no `Tp/CdOrPrtry` at all.
+    ///
+    /// Distinct from `Other("")`, which is a bank that sent an *empty* code.
+    /// `Tp` is mandatory on a `CashBalance`, so this means the document is
+    /// already outside the schema — and an unlabelled balance must not be
+    /// mistaken for one whose label happened to be blank.
+    Unspecified,
 }
 
 impl BalanceType {
@@ -69,6 +76,7 @@ impl BalanceType {
             Self::OpeningAvailable => "OPAV",
             Self::ForwardAvailable => "FWAV",
             Self::Other(s) => s,
+            Self::Unspecified => "",
         }
     }
 
@@ -125,12 +133,8 @@ impl EntryStatus {
 pub struct StatementBalance {
     /// Balance type (opening booked, closing booked, …).
     pub balance_type: BalanceType,
-    /// Amount in **ct** (1/100 of `currency`). Always positive.
-    pub amount_ct: i64,
-    /// ISO 4217 currency of `amount_ct`, from the `Ccy` attribute.
-    pub currency: String,
-    /// Whether the balance is a credit (positive) or debit (negative) balance.
-    pub indicator: CreditDebitIndicator,
+    /// The balance, as far as the statement determined it.
+    pub amount: ReportedAmount,
     /// Balance date exactly as the bank reported it.
     ///
     /// `Bal/Dt` is a date/time choice, so this is `"2026-07-20"` from one bank
@@ -140,17 +144,142 @@ pub struct StatementBalance {
 }
 
 impl StatementBalance {
-    /// Balance as signed ct value (+credit, −debit).
+    /// Balance as a signed ct value (+credit, −debit), or `None` when the
+    /// statement does not determine it.
+    ///
+    /// A balance defaulted to credit reports an overdraft as funds available,
+    /// which is why there is no default. See [`ReportedAmount`].
     #[inline]
     #[must_use]
-    pub fn signed_ct(&self) -> i64 {
-        signed(self.indicator, self.amount_ct)
+    pub fn signed_ct(&self) -> Option<i64> {
+        self.amount.signed_ct()
     }
 
     /// The balance date, or `None` if the bank reported none this crate can read.
     #[must_use]
     pub fn date(&self) -> Option<crate::IsoDate> {
         crate::IsoDate::parse_date_part(&self.date_raw).ok()
+    }
+}
+
+/// An amount as a bank statement reported it — and only as far as it did.
+///
+/// Money has three parts and a statement may fail to give any of them: a
+/// magnitude (`Amt`), a currency (`Amt/@Ccy`) and a direction (`CdtDbtInd`).
+/// **None of them is defaulted.** An unknown direction read as a credit turns a
+/// EUR 1,000 debit into a EUR 1,000 credit — a double-sized error in a ledger —
+/// so [`signed_ct`](Self::signed_ct) answers `None` instead, and the `*_raw`
+/// fields keep what arrived for the operator to look at.
+///
+/// Every level of a camt document that carries money embeds this type, so the
+/// rule has one definition rather than four copies of a convention.
+///
+/// ```
+/// use sepa::parse_camt053;
+///
+/// # let xml = r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+/// # <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr><Stmt><Id>S</Id>
+/// # <Ntry><Amt Ccy="EUR">1000.00</Amt><CdtDbtInd>DBTI</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+/// #
+/// #
+/// # <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+/// # </Ntry>
+/// # </Stmt></BkToCstmrStmt></Document>"#;
+/// let doc = parse_camt053(xml)?;
+/// let entry = &doc.statements[0].entries[0];
+///
+/// // `DBTI` is not a direction this crate knows, so there is no ledger figure.
+/// assert_eq!(entry.signed_ct(), None);
+/// // The magnitude is still known, and what arrived is still readable.
+/// assert_eq!(entry.amount.ct, Some(100_000));
+/// assert_eq!(entry.amount.direction_raw.as_deref(), Some("DBTI"));
+/// # Ok::<(), sepa::Camt053ParseError>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReportedAmount {
+    /// Magnitude in **ct** — 1/100 of [`currency`](Self::currency) — always
+    /// non-negative.
+    ///
+    /// `None` when `Amt` was absent, or carried a value this type cannot hold:
+    /// a magnitude outside `i64` ct, or significant digits below one cent.
+    pub ct: Option<i64>,
+    /// ISO 4217 code from the `Ccy` attribute.
+    ///
+    /// `None` when the attribute was absent. It is **not** defaulted to `EUR`:
+    /// camt statements are not EUR-only, and a fabricated currency propagates —
+    /// a detail in a different currency is excluded from its entry's sum, so
+    /// guessing here silently changes which transactions are counted.
+    pub currency: Option<String>,
+    /// `Amt` exactly as the bank wrote it.
+    pub amount_raw: Option<String>,
+    /// Credit (into the account) or debit (out of it).
+    ///
+    /// `None` when `CdtDbtInd` was absent or carried a code this crate does not
+    /// recognise. The direction is the entire content of this field, and a
+    /// wrong one is a two-for-one error in a ledger.
+    pub direction: Option<CreditDebitIndicator>,
+    /// `CdtDbtInd` exactly as the bank wrote it.
+    pub direction_raw: Option<String>,
+}
+
+impl ReportedAmount {
+    /// The ledger figure: positive for a credit, negative for a debit.
+    ///
+    /// `None` when the statement did not determine it — either the magnitude or
+    /// the direction is missing. There is no safe substitute for either, and
+    /// the raw fields hold whatever arrived so an importer can log *what* it
+    /// could not read and escalate the row rather than post a guess.
+    #[inline]
+    #[must_use]
+    pub fn signed_ct(&self) -> Option<i64> {
+        Some(signed(self.direction?, self.ct?))
+    }
+
+    /// Whether a ledger figure could be established at all.
+    #[inline]
+    #[must_use]
+    pub fn is_resolved(&self) -> bool {
+        self.ct.is_some() && self.direction.is_some()
+    }
+
+    /// Whether this amount is denominated in `currency`, case-insensitively.
+    ///
+    /// `false` when either side did not state one: an unknown currency is not
+    /// a match, because the alternative is summing figures that are not
+    /// comparable.
+    #[must_use]
+    pub fn is_currency(&self, currency: Option<&str>) -> bool {
+        match (self.currency.as_deref(), currency) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            _ => false,
+        }
+    }
+
+    /// Read `Amt` and `CdtDbtInd` from a node, inventing nothing.
+    fn parse(node: &Node, tag: &str) -> Self {
+        let (ct, currency, amount_raw) = match node.child(tag) {
+            None => (None, None, None),
+            Some(amt) => (
+                crate::ct_from_eur_str(&amt.text)
+                    .ok()
+                    .and_then(i64::checked_abs),
+                amt.attr("Ccy").map(str::to_owned),
+                Some(amt.text.clone()),
+            ),
+        };
+        let (direction, direction_raw) = match node.text_of("CdtDbtInd") {
+            None => (None, None),
+            Some(raw) => (raw.parse().ok(), Some(raw.to_owned())),
+        };
+        Self {
+            ct,
+            currency,
+            amount_raw,
+            direction,
+            direction_raw,
+        }
     }
 }
 
@@ -176,22 +305,14 @@ impl StatementBalance {
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntryDetail {
-    /// This transaction's own amount in **ct**, as reported (`TxDtls/Amt` or
-    /// `TxDtls/AmtDtls/TxAmt/Amt`). Always positive; `None` when the bank
-    /// itemises no amount. See [`signed_ct`](Self::signed_ct).
-    pub amount_ct: Option<i64>,
-    /// ISO 4217 currency of `amount_ct`, when one was reported.
+    /// What **this transaction** stated about its own amount (`TxDtls/Amt`, or
+    /// `TxDtls/AmtDtls/TxAmt/Amt` in the versions that omit it).
     ///
-    /// A detail in a different currency from its entry is a foreign-currency
-    /// transaction whose booked amount the statement does not restate, so it is
-    /// not summable against the entry total.
-    pub currency: Option<String>,
-    /// Credit or debit for this transaction (`TxDtls/CdtDbtInd`), falling back
-    /// to the entry's indicator when the detail does not carry its own.
-    ///
-    /// A returned collection inside an otherwise-credit batch is exactly the
-    /// case where the two differ.
-    pub indicator: CreditDebitIndicator,
+    /// Distinct from [`signed_amount_ct`](Self::signed_amount_ct), which is the
+    /// *resolved* figure and may have been inherited from the entry. A detail
+    /// in a different currency from its entry is real but is not the amount
+    /// that hit the account, so it is not summable against the entry total.
+    pub amount: ReportedAmount,
     /// The resolved ledger amount in **ct**: positive for a credit, negative
     /// for a debit. `None` when it could not be established — see
     /// [`signed_ct`](Self::signed_ct).
@@ -272,31 +393,47 @@ impl EntryDetail {
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChargeRecord {
-    /// Charge amount in **ct** (1/100 of `currency`). Always positive.
-    pub amount_ct: i64,
-    /// ISO 4217 currency of `amount_ct`.
-    pub currency: String,
-    /// Whether the charge is a debit (the usual case) or a credit.
-    pub indicator: CreditDebitIndicator,
+    /// The charge, as far as the statement determined it.
+    ///
+    /// An *absent* `CdtDbtInd` on a charge is taken as a debit — that is what a
+    /// fee is, and the one direction that cannot inflate a balance if the
+    /// assumption is wrong. An *unrecognised* code is left unresolved, because
+    /// that is a different thing.
+    pub amount: ReportedAmount,
     /// `ChrgInclInd` — whether this charge is **already included** in the
     /// entry's own amount.
     ///
     /// This is the field that decides whether a ledger adds the charge or not.
     /// `Some(true)` means the entry amount already carries it and posting it
     /// again double-counts; `Some(false)` means it is separate. `None` means
-    /// the bank did not say, which is not the same as either — treat it as
-    /// unresolved rather than picking a default.
+    /// the value was not determined — treat it as unresolved rather than
+    /// picking a default.
+    ///
+    /// `None` covers two different situations, and
+    /// [`included_in_amount_raw`](Self::included_in_amount_raw) is what tells
+    /// them apart: the bank sent no `ChrgInclInd` at all (raw is `None` too),
+    /// or it sent one this crate could not read (raw holds it verbatim).
     pub included_in_amount: Option<bool>,
+    /// `ChrgInclInd` exactly as it arrived, when it arrived at all.
+    ///
+    /// `xs:boolean` has four lexical forms — `true`, `false`, `1`, `0` — and
+    /// all four resolve. Anything else leaves
+    /// [`included_in_amount`](Self::included_in_amount) `None` and lands here,
+    /// so "the bank said nothing" and "the bank said `TRUE`" stay
+    /// distinguishable. Conflating them would be the `CdtDbtInd` defect on a
+    /// field that also decides whether money is posted twice.
+    pub included_in_amount_raw: Option<String>,
     /// `Tp/Cd` or `Tp/Prtry` — what kind of charge, when the bank names one.
     pub type_code: Option<String>,
 }
 
 impl ChargeRecord {
-    /// The charge as a signed ledger amount: negative for a debit.
+    /// The charge as a signed ledger amount: negative for a debit. `None` when
+    /// the statement did not determine it.
     #[inline]
     #[must_use]
-    pub fn signed_ct(&self) -> i64 {
-        signed(self.indicator, self.amount_ct)
+    pub fn signed_ct(&self) -> Option<i64> {
+        self.amount.signed_ct()
     }
 }
 
@@ -323,16 +460,19 @@ pub struct Charges {
 }
 
 impl Charges {
-    /// The summed signed charge in **ct**, or `None` on overflow.
+    /// The summed signed charge in **ct**, or `None` on overflow or when any
+    /// record's direction is unreadable.
     ///
     /// Taken from the records, which is the level that carries the
     /// credit/debit indicator; `TtlChrgsAndTaxAmt` is a magnitude with no sign
-    /// of its own.
+    /// of its own. All-or-nothing, like
+    /// [`CashEntry::details_signed_sum_ct`]: a partial sum of fees understates
+    /// them, and a fee understated is a fee somebody eats.
     #[must_use]
     pub fn total_signed_ct(&self) -> Option<i64> {
         self.records
             .iter()
-            .try_fold(0i64, |acc, r| acc.checked_add(r.signed_ct()))
+            .try_fold(0i64, |acc, r| acc.checked_add(r.signed_ct()?))
     }
 
     /// Whether every record says it is already inside the entry amount.
@@ -351,32 +491,35 @@ impl Charges {
 
     fn parse(node: &Node) -> Option<Self> {
         let chrgs = node.child("Chrgs")?;
+        // A charge record is never dropped for being unreadable: a lost fee is
+        // a fee somebody eats, and `total_signed_ct` would then sum what is
+        // left and report a confident, understated total.
         let record_of = |n: &Node| {
-            let (amount_ct, currency) = amount_of(n, "Amt")?;
-            Some(ChargeRecord {
-                amount_ct,
-                currency,
-                // A charge with no indicator is a debit: that is what a fee is,
-                // and it is the direction that cannot silently inflate a
-                // balance if the assumption is wrong.
-                indicator: n
-                    .text_of("CdtDbtInd")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(CreditDebitIndicator::Debit),
-                included_in_amount: n.text_of("ChrgInclInd").and_then(|v| match v.trim() {
+            let mut amount = ReportedAmount::parse(n, "Amt");
+            // `Chrgs/Rcrd/CdtDbtInd` is optional, and an absent one on a charge
+            // means a debit: that is what a fee is.
+            if amount.direction_raw.is_none() {
+                amount.direction = Some(CreditDebitIndicator::Debit);
+            }
+            let incl_raw = n.text_of("ChrgInclInd");
+            ChargeRecord {
+                amount,
+                // The whole `xs:boolean` lexical space, and nothing else.
+                included_in_amount: incl_raw.and_then(|v| match v.trim() {
                     "true" | "1" => Some(true),
                     "false" | "0" => Some(false),
                     _ => None,
                 }),
+                included_in_amount_raw: incl_raw.map(str::to_owned),
                 type_code: n.child("Tp").and_then(Node::code).map(str::to_owned),
-            })
+            }
         };
 
-        let mut records: Vec<ChargeRecord> =
-            chrgs.children_named("Rcrd").filter_map(record_of).collect();
+        let mut records: Vec<ChargeRecord> = chrgs.children_named("Rcrd").map(&record_of).collect();
         // The pre-.001.04 shape puts the charge directly under `Chrgs`.
         if records.is_empty()
-            && let Some(flat) = record_of(chrgs)
+            && let flat = record_of(chrgs)
+            && flat.amount.amount_raw.is_some()
         {
             records.push(flat);
         }
@@ -494,15 +637,12 @@ impl BatchInfo {
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CashEntry {
-    /// Amount in **ct** (1/100 of `currency`). Always positive — see `indicator`.
-    pub amount_ct: i64,
-    /// ISO 4217 currency of `amount_ct`, from the `Ccy` attribute.
+    /// The booking amount, as far as the statement determined it.
     ///
-    /// SEPA statements are EUR, but camt.053 is not EUR-only and banks do report
-    /// foreign-currency accounts. Check this before treating the amount as EUR.
-    pub currency: String,
-    /// Credit (incoming) or Debit (outgoing).
-    pub indicator: CreditDebitIndicator,
+    /// The entry is reported even when this resolves to nothing — a booking is
+    /// never dropped for being unreadable, because a missing booking is
+    /// indistinguishable from one that never happened.
+    pub amount: ReportedAmount,
     /// Booking status.
     pub status: EntryStatus,
     /// `true` when the bank booked several transactions as one aggregate entry.
@@ -549,12 +689,18 @@ pub struct CashEntry {
 }
 
 impl CashEntry {
-    /// Signed ledger amount: credit is positive (balance increase),
-    /// debit is negative (balance decrease).
+    /// Signed ledger amount: credit is positive (balance increase), debit is
+    /// negative (balance decrease). `None` when the statement does not
+    /// determine it.
+    ///
+    /// `None` means the statement did not say — the magnitude or the direction
+    /// was missing or unreadable. Escalate the row; [`amount`](Self::amount)
+    /// holds what arrived. There is no defensible default: an unknown direction
+    /// taken for a credit is a double-sized error in a ledger.
     #[inline]
     #[must_use]
-    pub fn signed_ct(&self) -> i64 {
-        signed(self.indicator, self.amount_ct)
+    pub fn signed_ct(&self) -> Option<i64> {
+        self.amount.signed_ct()
     }
 
     /// The booking date — the day the entry hits the account balance.
@@ -663,10 +809,12 @@ impl CashEntry {
     ///
     /// let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
     /// <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
-    ///   <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S</Id>
+    ///   <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr><Stmt><Id>S</Id>
     ///     <Ntry>
-    ///       <Amt Ccy="EUR">125.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>
-    ///       <NtryDtls>
+    ///       <Amt Ccy="EUR">125.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+    ///       
+    ///       <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+    /// <NtryDtls>
     ///         <TxDtls><Amt Ccy="EUR">100.00</Amt></TxDtls>
     ///         <TxDtls><Amt Ccy="EUR">25.00</Amt></TxDtls>
     ///       </NtryDtls>
@@ -685,7 +833,12 @@ impl CashEntry {
         if self.details.is_empty() {
             return true;
         }
-        self.details_signed_sum_ct() == Some(self.signed_ct())
+        match (self.details_signed_sum_ct(), self.signed_ct()) {
+            (Some(sum), Some(total)) => sum == total,
+            // The entry's own amount or direction is unreadable, so there is
+            // nothing to reconcile *against*. That is not agreement.
+            _ => false,
+        }
     }
 }
 
@@ -701,13 +854,6 @@ pub(crate) fn amount_of(node: &Node, tag: &str) -> Option<(i64, String)> {
     let amt = node.child(tag)?;
     let ct = crate::ct_from_eur_str(&amt.text).ok()?.checked_abs()?;
     Some((ct, amt.attr("Ccy").unwrap_or("EUR").to_owned()))
-}
-
-/// `CdtDbtInd`, defaulting to credit when absent or unrecognised.
-pub(crate) fn indicator_of(node: &Node) -> CreditDebitIndicator {
-    node.text_of("CdtDbtInd")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(CreditDebitIndicator::Credit)
 }
 
 /// The date part of an optional bank-supplied date or date-time.
@@ -759,13 +905,11 @@ pub(crate) fn party_name(parties: Option<&Node>, tag: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(crate) fn parse_balance(b: &Node) -> Option<StatementBalance> {
+pub(crate) fn parse_balance(b: &Node) -> StatementBalance {
     let balance_type = b
         .path(&["Tp", "CdOrPrtry"])
         .and_then(Node::code)
-        .map_or_else(|| BalanceType::Other(String::new()), BalanceType::from_code);
-
-    let (amount_ct, currency) = amount_of(b, "Amt")?;
+        .map_or(BalanceType::Unspecified, BalanceType::from_code);
 
     // `Dt` is a DateAndDateTimeChoice: `Dt/Dt` or `Dt/DtTm`.
     let date = b
@@ -774,18 +918,15 @@ pub(crate) fn parse_balance(b: &Node) -> Option<StatementBalance> {
         .unwrap_or_default()
         .to_owned();
 
-    Some(StatementBalance {
+    StatementBalance {
         balance_type,
-        amount_ct,
-        currency,
-        indicator: indicator_of(b),
+        amount: ReportedAmount::parse(b, "Amt"),
         date_raw: date,
-    })
+    }
 }
 
-pub(crate) fn parse_entry(e: &Node) -> Option<CashEntry> {
-    let (amount_ct, currency) = amount_of(e, "Amt")?;
-    let indicator = indicator_of(e);
+pub(crate) fn parse_entry(e: &Node) -> CashEntry {
+    let amount = ReportedAmount::parse(e, "Amt");
 
     // `Sts` is a bare code up to camt.053.001.02 (`<Sts>BOOK</Sts>`) and a
     // choice from .001.08 (`<Sts><Cd>BOOK</Cd></Sts>`). `Node::code` accepts both.
@@ -836,19 +977,15 @@ pub(crate) fn parse_entry(e: &Node) -> Option<CashEntry> {
             parse_detail(
                 td,
                 &EntryContext {
-                    indicator,
-                    amount_ct,
-                    currency: &currency,
+                    amount: &amount,
                     sole_detail,
                 },
             )
         })
         .collect();
 
-    Some(CashEntry {
-        amount_ct,
-        currency,
-        indicator,
+    CashEntry {
+        amount,
         status,
         batch_booked,
         batch,
@@ -859,14 +996,12 @@ pub(crate) fn parse_entry(e: &Node) -> Option<CashEntry> {
         additional_info: e.text_of("AddtlNtryInf").map(str::to_owned),
         charges: Charges::parse(e),
         details,
-    })
+    }
 }
 
 /// What the enclosing `Ntry` says, for resolving a detail's amount and sign.
 pub(crate) struct EntryContext<'a> {
-    pub(crate) indicator: CreditDebitIndicator,
-    pub(crate) amount_ct: i64,
-    pub(crate) currency: &'a str,
+    pub(crate) amount: &'a ReportedAmount,
     pub(crate) sole_detail: bool,
 }
 
@@ -877,40 +1012,59 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
     // `TxDtls/CdtDbtInd` is optional and overrides the entry's when present —
     // that is how a single returned collection inside a credit batch is
     // reported.
-    let indicator = td
-        .text_of("CdtDbtInd")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(entry.indicator);
+    let mut amount = ReportedAmount::parse(td, "Amt");
+    // `TxDtls/CdtDbtInd` is optional and overrides the entry's when present.
+    // When it is *absent* the entry's applies; when it is present but
+    // unreadable it does not silently fall back, because that would resolve a
+    // direction the detail itself contradicted.
+    if amount.direction_raw.is_none() {
+        amount.direction = entry.amount.direction;
+    }
+    let indicator = amount.direction;
 
     // Counterparty: for a credit the other side is the debtor, for a debit the creditor.
     let parties = td.child("RltdPties");
     let (name_tag, acct_tag) = match indicator {
-        CreditDebitIndicator::Credit => ("Dbtr", "DbtrAcct"),
-        CreditDebitIndicator::Debit => ("Cdtr", "CdtrAcct"),
+        // An unknown direction cannot pick a side; `Dbtr`/`Cdtr` are then read
+        // in that order so a name is still surfaced where the file has one.
+        Some(CreditDebitIndicator::Credit) | None => ("Dbtr", "DbtrAcct"),
+        Some(CreditDebitIndicator::Debit) => ("Cdtr", "CdtrAcct"),
     };
 
     // `TxDtls/Amt` is the transaction amount; `AmtDtls/TxAmt/Amt` carries the
-    // same figure in the messages that omit the former. Either is reported as a
-    // magnitude, so the sign comes from the indicator above.
-    let reported = amount_of(td, "Amt").or_else(|| {
-        td.child("AmtDtls")
+    // same figure in the messages that omit the former. The direction stays the
+    // one resolved above — only the magnitude and currency come from the
+    // fallback.
+    if amount.amount_raw.is_none()
+        && let Some(fallback) = td
+            .child("AmtDtls")
             .and_then(|ad| ad.child("TxAmt"))
-            .and_then(|ta| amount_of(ta, "Amt"))
-    });
+            .map(|ta| ReportedAmount::parse(ta, "Amt"))
+    {
+        amount.ct = fallback.ct;
+        amount.currency = fallback.currency;
+        amount.amount_raw = fallback.amount_raw;
+    }
 
-    let signed_amount_ct = match &reported {
-        // A foreign-currency transaction: the figure is real but is not what
-        // hit the account, so it must not be summed against the entry total.
-        Some((_, ccy)) if !ccy.eq_ignore_ascii_case(entry.currency) => None,
-        Some((ct, _)) => Some(signed(indicator, *ct)),
-        None if entry.sole_detail => Some(signed(indicator, entry.amount_ct)),
-        None => None,
+    let signed_amount_ct = if amount.amount_raw.is_some() {
+        // A foreign-currency transaction, or one whose currency (or the
+        // entry's) the statement did not give: either way the figure is not
+        // what hit the account and must not be summed against the entry total.
+        if amount.is_currency(entry.amount.currency.as_deref()) {
+            amount.signed_ct()
+        } else {
+            None
+        }
+    } else if entry.sole_detail {
+        // A sole detail with no itemised amount inherits the entry's, which is
+        // safe precisely because there is one transaction to attribute it to.
+        entry.amount.signed_ct()
+    } else {
+        None
     };
 
     EntryDetail {
-        amount_ct: reported.as_ref().map(|(ct, _)| *ct),
-        currency: reported.map(|(_, ccy)| ccy),
-        indicator,
+        amount,
         signed_amount_ct,
         end_to_end_id: ref_of("EndToEndId"),
         mandate_id: ref_of("MndtId"),
@@ -960,16 +1114,12 @@ pub(crate) fn period(node: &Node) -> (Option<String>, Option<String>) {
 
 /// Read `Ntry` children into entries, and `Bal` children into balances.
 pub(crate) fn entries_of(node: &Node) -> Vec<CashEntry> {
-    node.children_named("Ntry")
-        .filter_map(parse_entry)
-        .collect()
+    node.children_named("Ntry").map(parse_entry).collect()
 }
 
 /// Read `Bal` children into balances (camt.052 and camt.053 only).
 pub(crate) fn balances_of(node: &Node) -> Vec<StatementBalance> {
-    node.children_named("Bal")
-        .filter_map(parse_balance)
-        .collect()
+    node.children_named("Bal").map(parse_balance).collect()
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -983,7 +1133,7 @@ mod tests {
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
-  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S</Id>
+  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr><Stmt><Id>S</Id>
     {entry_xml}
   </Stmt></BkToCstmrStmt>
 </Document>"#
@@ -1041,7 +1191,7 @@ mod tests {
                </Ntry>"#,
         );
         assert!(!e.batch_booked);
-        assert_eq!(e.details[0].amount_ct, None, "nothing was itemised");
+        assert_eq!(e.details[0].amount.ct, None, "nothing was itemised");
         assert_eq!(e.details[0].signed_ct(), Some(-7_500));
         assert!(e.details_reconcile());
     }
@@ -1061,8 +1211,14 @@ mod tests {
                  </NtryDtls>
                </Ntry>"#,
         );
-        assert_eq!(e.details[0].indicator, CreditDebitIndicator::Credit);
-        assert_eq!(e.details[1].indicator, CreditDebitIndicator::Debit);
+        assert_eq!(
+            e.details[0].amount.direction,
+            Some(CreditDebitIndicator::Credit)
+        );
+        assert_eq!(
+            e.details[1].amount.direction,
+            Some(CreditDebitIndicator::Debit)
+        );
         assert_eq!(e.details[1].signed_ct(), Some(-2_500));
         assert_eq!(e.details_signed_sum_ct(), Some(7_500));
         assert!(e.details_reconcile());
@@ -1097,8 +1253,8 @@ mod tests {
                  <NtryDtls><TxDtls><Amt Ccy="USD">100.00</Amt></TxDtls></NtryDtls>
                </Ntry>"#,
         );
-        assert_eq!(e.details[0].amount_ct, Some(10_000));
-        assert_eq!(e.details[0].currency.as_deref(), Some("USD"));
+        assert_eq!(e.details[0].amount.ct, Some(10_000));
+        assert_eq!(e.details[0].amount.currency.as_deref(), Some("USD"));
         assert_eq!(e.details[0].signed_ct(), None);
         assert!(!e.details_reconcile());
     }
@@ -1152,19 +1308,21 @@ mod tests {
         // rather than inside its amount.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
-  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S</Id>
+  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr><Stmt><Id>S</Id><Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct><Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-21</Dt></Dt></Bal>
     <Ntry>
-      <Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
-      <Chrgs>
+      <Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+      <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+        <Chrgs>
         <TtlChrgsAndTaxAmt Ccy="EUR">3.00</TtlChrgsAndTaxAmt>
         <Rcrd><Amt Ccy="EUR">3.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
               <ChrgInclInd>false</ChrgInclInd>
-              <Tp><Prtry>RETURN_FEE</Prtry></Tp></Rcrd>
+              <Tp><Prtry><Id>RETURN_FEE</Id></Prtry></Tp></Rcrd>
       </Chrgs>
-      <NtryDtls><TxDtls>
+      
+        <NtryDtls><TxDtls>
         <Amt Ccy="EUR">75.00</Amt>
-        <RtrInf><Rsn><Cd>MS02</Cd></Rsn></RtrInf>
         <Chrgs><Rcrd><Amt Ccy="EUR">1.50</Amt><CdtDbtInd>DBIT</CdtDbtInd></Rcrd></Chrgs>
+        <RtrInf><Rsn><Cd>MS02</Cd></Rsn></RtrInf>
       </TxDtls></NtryDtls>
     </Ntry>
   </Stmt></BkToCstmrStmt>
@@ -1209,10 +1367,12 @@ mod tests {
         // wrong, so `all_included_in_amount` is false and the caller decides.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
-  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S</Id>
-    <Ntry><Amt Ccy="EUR">10.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
-      <Chrgs><Rcrd><Amt Ccy="EUR">2.00</Amt></Rcrd></Chrgs>
-    </Ntry>
+  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr><Stmt><Id>S</Id><Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct><Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-21</Dt></Dt></Bal>
+    <Ntry><Amt Ccy="EUR">10.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+      <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+        <Chrgs><Rcrd><Amt Ccy="EUR">2.00</Amt></Rcrd></Chrgs>
+        
+      </Ntry>
   </Stmt></BkToCstmrStmt>
 </Document>"#;
         let doc = crate::parse_camt053(xml).unwrap();
@@ -1221,7 +1381,7 @@ mod tests {
         assert!(!charges.all_included_in_amount());
         // A charge with no indicator is a debit — a fee is money out, and that
         // is the direction that cannot inflate a balance if the guess is wrong.
-        assert_eq!(charges.records[0].signed_ct(), -200);
+        assert_eq!(charges.records[0].signed_ct(), Some(-200));
     }
 
     #[test]
@@ -1374,7 +1534,75 @@ mod tests {
                </Ntry>"#,
         );
         assert_eq!(e.details_signed_sum_ct(), Some(12_000));
-        assert_eq!(e.signed_ct(), 12_500);
+        assert_eq!(e.signed_ct(), Some(12_500));
         assert!(!e.details_reconcile());
+    }
+
+    /// Every type in this module that reports a ledger figure is accounted
+    /// for, so a new one cannot be added silently.
+    ///
+    /// `tests/conformance.rs::cross_level_consistency` requires these types to
+    /// answer identically for an unreadable code — but it *names* them, and a
+    /// test whose coverage is a list stops covering things. The list is
+    /// checked against the module's own source here, so a fifth `signed_ct`
+    /// fails the build until somebody classifies it.
+    #[test]
+    fn every_type_that_reports_money_is_covered_by_the_cross_level_gate() {
+        const SRC: &str = include_str!("camt.rs");
+
+        /// Types whose `signed_ct` delegates to [`ReportedAmount`], so the
+        /// resolution rule is written once. `tests/conformance.rs` feeds all
+        /// of these one unreadable code and requires identical answers.
+        const DELEGATES: &[&str] = &["StatementBalance", "ChargeRecord", "CashEntry"];
+        /// Types that deliberately answer differently, each with a reason.
+        const DIVERGES: &[(&str, &str)] = &[
+            ("ReportedAmount", "the definition the others delegate to"),
+            (
+                "EntryDetail",
+                "reports a *resolved* figure that may be inherited from its \
+                 entry, so it is not a function of its own `amount` alone",
+            ),
+        ];
+
+        // Walk the source for `impl <Type> {` blocks containing `fn signed_ct`.
+        let mut found: Vec<&str> = Vec::new();
+        let mut current: Option<&str> = None;
+        for line in SRC.lines() {
+            if let Some(rest) = line.strip_prefix("impl ") {
+                current = rest.split_whitespace().next().map(str::trim);
+            }
+            if line.contains("fn signed_ct(")
+                && let Some(ty) = current
+            {
+                found.push(ty);
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+
+        let mut accounted: Vec<&str> = DELEGATES
+            .iter()
+            .copied()
+            .chain(DIVERGES.iter().map(|(t, _)| *t))
+            .collect();
+        accounted.sort_unstable();
+
+        assert_eq!(
+            found, accounted,
+            "a `signed_ct` in this module is not accounted for.\n\
+             Add it to DELEGATES (and to the four types named in \
+             tests/conformance.rs::cross_level_consistency), or to DIVERGES \
+             with the reason it may answer differently.\n\
+             found:     {found:?}\n\
+             accounted: {accounted:?}"
+        );
+
+        // The guard is only worth having if it can fail, so prove the walk
+        // actually sees something rather than comparing two empty lists.
+        assert!(
+            found.len() >= 5,
+            "the source walk found {} types — it has stopped working",
+            found.len()
+        );
     }
 }

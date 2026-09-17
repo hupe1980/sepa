@@ -8,7 +8,7 @@
 //! - A camt.055 recall of one collection, *before* it settles
 //! - A pain.007 reversal of one of those collections, *after* it settles
 //! - Structured ISO 11649 references and ultimate parties
-//! - Structured postal addresses, ready for the 15 Nov 2026 EPC cut-over
+//! - Structured postal addresses — the form SEPA accepts durably
 //! - Typed `IsoDate` values, so no date is ever hand-formatted
 //! - Integer-safe money formatting — no f64
 //! - Build errors that name the group and transaction that failed
@@ -41,9 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor_a = validate_iban("NL91ABNA0417164300").expect("debtor A IBAN is valid");
     let debtor_b = validate_iban("GB29NWBK60161331926819").expect("debtor B IBAN is valid");
 
-    // From 15 November 2026 an address the EPC schemes accept must carry a town
-    // and a country, so `PostalAddress` takes both up front — the unstructured
-    // form is simply not constructible.
+    // A SEPA address must carry a town and a country whenever it is present at
+    // all, so `PostalAddress` takes both up front — the free-text-only form is
+    // simply not constructible.
     let creditor_address = PostalAddress::new("Musterstadt", "DE")?
         .street("Rathausplatz")
         .building_number("1")

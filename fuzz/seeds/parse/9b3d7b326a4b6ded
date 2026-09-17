@@ -1,0 +1,7 @@
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.054.001.08">
+//! # <BkToCstmrDbtCdtNtfctn><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr><Ntfctn><Id>N</Id>
+//! # <Ntry><Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+//! #
+//! # <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+//! # <NtryDtls><TxDtls><RtrInf><Rsn><Cd>AM04</Cd></Rsn></RtrInf></TxDtls></NtryDtls>
+//! # </Ntry></Ntfctn></BkToCstmrDbtCdtNtfctn></Document>

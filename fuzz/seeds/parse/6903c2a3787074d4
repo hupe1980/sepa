@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.052.001.08">
+  <BkToCstmrAcctRpt>
+    <GrpHdr><MsgId>RPT-2026-07-14</MsgId><CreDtTm>2026-07-14T11:00:00</CreDtTm></GrpHdr>
+    <Rpt>
+      <Id>INTRADAY-1</Id>
+      <ElctrncSeqNb>7</ElctrncSeqNb>
+      <FrToDt><FrDtTm>2026-07-14T00:00:00</FrDtTm><ToDtTm>2026-07-14T11:00:00</ToDtTm></FrToDt>
+      <Acct>
+        <Id><IBAN>DE89370400440532013000</IBAN></Id>
+        <Svcr><FinInstnId><BICFI>COBADEFFXXX</BICFI></FinInstnId></Svcr>
+      </Acct>
+      <Bal>
+        <Tp><CdOrPrtry><Cd>ITBD</Cd></CdOrPrtry></Tp>
+        <Amt Ccy="EUR">1000.00</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <Dt><Dt>2026-07-14</Dt></Dt>
+      </Bal>
+      <Ntry>
+        <Amt Ccy="EUR">250.00</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <Sts><Cd>PDNG</Cd></Sts>
+        
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+        <NtryDtls><TxDtls>
+          <Refs><EndToEndId>E2E-PENDING</EndToEndId></Refs>
+          <RltdPties><Dbtr><Pty><Nm>Zahler GmbH</Nm></Pty></Dbtr></RltdPties>
+        </TxDtls></NtryDtls>
+      </Ntry>
+      <Ntry>
+        <Amt Ccy="EUR">75.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <Sts><Cd>BOOK</Cd></Sts>
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+      </Ntry>
+    </Rpt>
+  </BkToCstmrAcctRpt>
+</Document>

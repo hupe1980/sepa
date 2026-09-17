@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-14T10:00:00</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>CT-1</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.001.001.09</OrgnlMsgNmId>
+      <GrpSts>PART</GrpSts>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>PMT-1</OrgnlPmtInfId>
+      <TxInfAndSts>
+        <OrgnlInstrId>INSTR-7</OrgnlInstrId>
+        <TxSts>RJCT</TxSts>
+        <StsRsnInf><Rsn><Cd>AC01</Cd></Rsn></StsRsnInf>
+      </TxInfAndSts>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>E2E-2</OrgnlEndToEndId>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>

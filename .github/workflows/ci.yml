@@ -135,10 +135,24 @@ jobs:
           workspaces: ". -> target\nfuzz -> fuzz/target"
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+      # The seeds are derived from the test fixtures and committed, so the
+      # derivation is verified rather than assumed — D38's rule applied to a
+      # generated artefact that is not a schema. A fixture added without
+      # regenerating them is a document the read-path target never explores.
+      - name: Seed corpus is up to date
+        if: matrix.target == 'parse'
+        run: python3 scripts/extract-fuzz-seeds.py --check
       # A short run on every push, a long one on the weekly schedule. The
       # targets assert invariants, not just absence of panics, so this is a
       # correctness gate rather than a crash hunt: `build_batch` checks that
-      # every accepted document's text is inside the SEPA character set.
+      # every accepted document's text is inside the SEPA character set, and
+      # `parse` checks that no figure is reported that the input did not carry.
+      #
+      # `fuzz/seeds/` is what makes the read-path target able to reach anything
+      # at all. Random bytes essentially never form a well-formed ISO 20022
+      # document, so an unseeded `parse` run explores the XML rejection path and
+      # nothing else — measured: 315k unseeded executions did not rediscover the
+      # sign-flip defect, and a seeded run finds it in seconds.
       - name: Fuzz
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -146,7 +160,12 @@ jobs:
           else
             SECS=60
           fi
-          cargo fuzz run ${{ matrix.target }} -- -max_total_time=$SECS
+          SEEDS=""
+          if [ -d "fuzz/seeds/${{ matrix.target }}" ]; then
+            SEEDS="fuzz/seeds/${{ matrix.target }}"
+          fi
+          cargo fuzz run ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} $SEEDS -- -max_total_time=$SECS
       - name: Upload crash artefacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -184,6 +203,21 @@ jobs:
             charset::tests::every_replacement_is_itself_legal_and_non_empty \
             charset::tests::exactly_twenty_entries_lengthen_the_text \
             --exact
+
+  # Every other job measures the crate against an artefact inside the
+  # repository. This one asks whether those artefacts are still the current
+  # ones — the blind spot that let a withdrawn EPC deadline reach a release
+  # with the whole suite green. It is a job of its own so that an overdue
+  # *reading* is not reported as a broken *build*.
+  watch-list:
+    name: Regulatory watch list
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Sources are still current
+        run: cargo test --all-features --test watch -- --include-ignored
 
   deny:
     name: cargo-deny (licenses + advisories)

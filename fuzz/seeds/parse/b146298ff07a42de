@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.06">
+  <BkToCstmrStmt>
+    <GrpHdr><MsgId>STMT-NO-PERIOD</MsgId><CreDtTm>2026-07-14T23:59:00</CreDtTm></GrpHdr>
+    <Stmt>
+      <Id>2026-07-14</Id>
+      <CreDtTm>2026-07-14T23:59:00</CreDtTm>
+      <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+      <Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-14</Dt></Dt></Bal>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>

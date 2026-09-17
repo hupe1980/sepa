@@ -14,17 +14,28 @@
 //! |---|---|---|
 //! | **Structured** | dedicated elements only — `StrtNm`, `BldgNb`, `PstCd`, `TwnNm`, `Ctry` | preferred |
 //! | **Hybrid** | `TwnNm` + `Ctry` plus up to two free-text `AdrLine`s | permitted |
-//! | **Unstructured** | `AdrLine` only, nothing parsable | **rejected from 15 November 2026** |
+//! | **Unstructured** | `AdrLine` only, nothing parsable | being retired — no end-date currently in force |
 //!
-//! The cut-over is one industry-wide date. Version 1.0 of the 2025 rulebooks
-//! set it at 22 November 2026; version 1.1, in force since 5 October 2025,
-//! moved it to **15 November 2026** to line up with that year's Swift Standards
-//! MX release. From then on `TwnNm` and `Ctry` are mandatory whenever an
-//! address is present at all — the address itself stays optional.
+//! ## Which form to send
+//!
+//! Send structured, or hybrid where you must. Both are accepted today and stay
+//! accepted: the EPC is retiring only the free-text-only form, and **no
+//! end-date is currently in force** — 22 November 2026 was moved to 15 November
+//! 2026, and that was withdrawn on 9 September 2026 with a replacement due.
+//! Migrate anyway; the direction of travel has never changed.
+//!
+//! What binds regardless of the date: an address is optional, but `TwnNm` and
+//! `Ctry` are mandatory *whenever one is present*. That is what
+//! [`PostalAddress::new`] takes.
+//!
+//! If all you have is free-text lines, you have no address to build here —
+//! **omit it**, which every SEPA schema permits. Do not invent a town to get
+//! past the constructor: it travels to the bank as though the counterparty had
+//! supplied it.
 //!
 //! This type therefore **cannot represent an unstructured address**: [`new`]
 //! takes the town and the country, so the only reachable forms are the two that
-//! survive the deadline. That is the same treatment [`Iban`](crate::Iban) and
+//! are durably accepted. That is the same treatment [`Iban`](crate::Iban) and
 //! [`IsoDate`](crate::IsoDate) get — the invalid state is unconstructible
 //! rather than caught late.
 //!
@@ -71,6 +82,31 @@ use crate::xml_util::write_escaped;
 
 // ── limits ────────────────────────────────────────────────────────────────────
 
+/// Every text-bearing `PstlAdr` element this crate emits, with its ISO 20022
+/// path.
+///
+/// One list, used by the validator and by the test that requires
+/// [`max_text_len`] to bound every one of them. Adding an element to the writer
+/// without adding it here leaves its text unchecked on the wire.
+const ADDRESS_ELEMENTS: [(&str, &str); 8] = [
+    ("Dept", "PstlAdr/Dept"),
+    ("SubDept", "PstlAdr/SubDept"),
+    ("StrtNm", "PstlAdr/StrtNm"),
+    ("BldgNb", "PstlAdr/BldgNb"),
+    ("PstCd", "PstlAdr/PstCd"),
+    ("TwnNm", "PstlAdr/TwnNm"),
+    ("CtrySubDvsn", "PstlAdr/CtrySubDvsn"),
+    ("AdrLine", "PstlAdr/AdrLine"),
+];
+
+/// The ISO 20022 path for a `PstlAdr` element name.
+fn address_field(element: &str) -> &'static str {
+    ADDRESS_ELEMENTS
+        .iter()
+        .find(|(name, _)| *name == element)
+        .map_or("PstlAdr/AdrLine", |(_, path)| *path)
+}
+
 /// Maximum number of `AdrLine` elements the EPC permits.
 ///
 /// The XSD allows seven; the EPC address guidance allows two, and a hybrid
@@ -108,7 +144,7 @@ pub enum AddressError {
 /// Which of the ISO 20022 address forms an address is written in.
 ///
 /// There is deliberately no `Unstructured` variant: [`PostalAddress`] requires
-/// a town and a country, so the form the EPC retires on 15 November 2026 is not
+/// a town and a country, so the free-text-only form the EPC is retiring is not
 /// constructible. See the [module docs](self).
 ///
 /// This set is closed on purpose — a `match` over it needs no wildcard arm.
@@ -161,10 +197,10 @@ pub struct PostalAddress {
 impl PostalAddress {
     /// An address in `town`, in `country`.
     ///
-    /// Both are required: from 15 November 2026 the EPC schemes reject an
-    /// address that carries neither, so an address without them is not a form
-    /// this crate will emit. `country` is an ISO 3166-1 alpha-2 code and is
-    /// upper-cased.
+    /// Both are required. `TwnNm` and `Ctry` are mandatory whenever a SEPA
+    /// address is present at all, so an address carrying neither is not a form
+    /// this crate will emit — see the [module docs](self). `country` is an
+    /// ISO 3166-1 alpha-2 code and is upper-cased.
     ///
     /// # Errors
     ///
@@ -323,18 +359,14 @@ impl PostalAddress {
         // `max_text_len` rather than from a constant repeated here — one table,
         // so a limit cannot be right in the validator and wrong in the docs.
         let check = |element: &'static str, value: &str| -> Result<(), ValidationError> {
-            let field: &'static str = match element {
-                "Dept" => "PstlAdr/Dept",
-                "SubDept" => "PstlAdr/SubDept",
-                "StrtNm" => "PstlAdr/StrtNm",
-                "BldgNb" => "PstlAdr/BldgNb",
-                "PstCd" => "PstlAdr/PstCd",
-                "TwnNm" => "PstlAdr/TwnNm",
-                "CtrySubDvsn" => "PstlAdr/CtrySubDvsn",
-                _ => "PstlAdr/AdrLine",
-            };
-            let max =
-                max_text_len(Some("PstlAdr"), element).unwrap_or(crate::validate::MAX_NAME_LEN);
+            let field = address_field(element);
+            // The bound comes from `validate::max_text_len` and from nowhere
+            // else: a limit written at the call site is a limit the next call
+            // site forgets. `ADDRESS_ELEMENTS` and the test below make the
+            // lookup total for every element this writer emits, so the `0`
+            // fallback is unreachable and fails loudly rather than inventing a
+            // plausible 70 if it ever stops being.
+            let max = max_text_len(Some("PstlAdr"), element).unwrap_or(0);
             check_text(field, &charset.apply(field, value)?, max)
         };
 
@@ -415,6 +447,20 @@ impl PostalAddress {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_address_element_this_crate_emits_has_a_bound() {
+        // The length table must explain every element this writer emits, so an
+        // element cannot gain a writer and silently
+        // inherit a plausible-looking default.
+        for (element, field) in super::ADDRESS_ELEMENTS {
+            assert!(
+                crate::validate::max_text_len(Some("PstlAdr"), element).is_some(),
+                "{field}: no bound in validate::max_text_len"
+            );
+            assert_eq!(super::address_field(element), field);
+        }
+    }
+
     use super::{AddressError, AddressFormat, PostalAddress};
     use crate::validate::{CharsetPolicy, ValidationError};
 

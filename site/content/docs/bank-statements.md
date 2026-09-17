@@ -31,12 +31,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // are exposed and `any_id()` is the display shortcut.
     println!("{:?} {:?}", stmt.account.any_id(), stmt.account.currency);
 
-    if let Some(closing) = stmt.closing_balance() {
-        println!("closing {} ct", closing.signed_ct());
+    if let Some(ct) = stmt.closing_balance().and_then(|b| b.signed_ct()) {
+        println!("closing {ct} ct");
     }
 
     for entry in &stmt.entries {
-        println!("{:+} ct {}", entry.signed_ct(), entry.reference().unwrap_or(""));
+        match entry.signed_ct() {
+            Some(ct) => println!("{ct:+} ct {}", entry.reference().unwrap_or("")),
+            // The statement did not determine this one. Escalate the row —
+            // never substitute a figure.
+            None => println!("unresolved: amount {:?} direction {:?}",
+                             entry.amount.amount_raw, entry.amount.direction_raw),
+        }
     }
     Ok(())
 }
@@ -44,6 +50,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Amounts are always positive in the file with a separate credit/debit indicator.
 `signed_ct()` gives the ledger amount: credit positive, debit negative.
+
+**It returns `Option`, and the `None` is load-bearing.** A statement can fail to
+give you a ledger figure two ways: an `Amt` this crate cannot represent — more
+than two significant decimals, or a magnitude past `i64` ct — or a `CdtDbtInd`
+that is absent or unrecognised. Neither is defaulted, because an unknown
+direction taken for a credit turns a EUR 1,000 debit into a EUR 1,000 credit.
+
+The entry is reported either way. `entry.amount` holds exactly what the bank
+sent, so you can log what you could not read, and **a booking is never dropped**
+for being unreadable — a missing booking looks identical to one that never
+happened.
 
 `reference()` is the remittance information — the *Verwendungszweck*. ISO makes
 `RmtInf/Ustrd` repeatable, and German banks routinely split a long reference

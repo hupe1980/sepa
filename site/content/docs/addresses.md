@@ -1,6 +1,6 @@
 +++
 title = "Postal addresses"
-description = "Structured and hybrid PstlAdr postal addresses for SEPA payments in Rust, ahead of the 15 November 2026 deadline for unstructured addresses."
+description = "Structured and hybrid PstlAdr postal addresses for SEPA payments in Rust — the two forms the schemes accept, whatever the migration date turns out to be."
 weight = 9
 +++
 
@@ -16,20 +16,23 @@ one of them:
 |---|---|---|
 | **Structured** | Dedicated elements only — street, building number, post code, town, country | Preferred |
 | **Hybrid** | Town and country in their own elements, plus up to two free-text lines | Permitted |
-| **Unstructured** | Free-text lines only, nothing machine-readable | **Rejected from 15 November 2026** |
+| **Unstructured** | Free-text lines only, nothing machine-readable | Being retired — no end-date in force |
 
-The date moved. Version 1.0 of the 2025 rulebooks set it at 22 November 2026;
-version 1.1, in force since 5 October 2025, brought it forward to **15 November
-2026** so that it lands with that year's Swift Standards MX release. If your
-project notes still say the 22nd, they are a rulebook version behind.
+## The migration date
 
-From then on, town and country are mandatory whenever an address is present at
-all. The address itself stays optional — what changes is its shape.
+There is currently **no end-date in force** for unstructured addresses. The EPC
+set 22 November 2026, moved it to 15 November 2026, then withdrew that on
+9 September 2026 with a replacement due. A lot of published guidance still
+quotes one of the old dates.
+
+Migrate anyway — the direction has never changed, only the deadline. And build
+against the rule rather than the date: an address is optional, but town and
+country are mandatory **whenever one is present**. That has held throughout.
 
 ## Unstructured addresses are unrepresentable
 
-`PostalAddress::new` takes the town and the country, so the form that is about
-to be rejected cannot be built:
+`PostalAddress::new` takes the town and the country, so the free-text-only form
+cannot be built:
 
 ```rust
 use sepa::PostalAddress;
@@ -97,3 +100,9 @@ silently dropped. Lengths are checked *after* transliteration, because
 The legacy German schemas have no structured address type at all — theirs holds
 only a country and two free-text lines — so selecting one and then setting an
 address is rejected rather than emitting something that schema forbids.
+
+## If all you have is free text
+
+Then you have no address to build here. Omit it — the element is optional in
+every SEPA schema. Do not invent a town to get past the constructor: it reaches
+the bank as though your counterparty had supplied it.

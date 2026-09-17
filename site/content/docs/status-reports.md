@@ -94,8 +94,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for block in &parse_pain002(&xml)?.payment_info_statuses {
         // A file of hundreds reports counts per outcome and itemises only
         // what needs a decision.
-        for count in &block.status_counts {
-            println!("{} x {}", count.count, count.status);
+        for bucket in &block.status_counts {
+            // `count` is an Option: the bank asserting that a status bucket
+            // exists is worth reporting even when the number beside it is
+            // unreadable, so the row is kept rather than dropped.
+            match bucket.count {
+                Some(n) => println!("{n} x {}", bucket.status),
+                None => println!("? x {} (count was {:?})", bucket.status, bucket.count_raw),
+            }
         }
 
         for tx in &block.transactions {

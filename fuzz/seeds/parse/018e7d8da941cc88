@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+    /// <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+    ///   <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr><Stmt><Id>S</Id>
+    ///     <Ntry>
+    ///       <Amt Ccy="EUR">125.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+    ///       
+    ///       <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+    /// <NtryDtls>
+    ///         <TxDtls><Amt Ccy="EUR">100.00</Amt></TxDtls>
+    ///         <TxDtls><Amt Ccy="EUR">25.00</Amt></TxDtls>
+    ///       </NtryDtls>
+    ///     </Ntry>
+    ///   </Stmt></BkToCstmrStmt>
+    /// </Document>

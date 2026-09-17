@@ -37,9 +37,9 @@
 //!
 //! `Cdtr/PstlAdr` sits on the group (it belongs to the account holder) and
 //! `Dbtr/PstlAdr` on each collection. Both are optional, and both must be
-//! structured or hybrid — see [`PostalAddress`] for the
-//! 15 November 2026 cut-over. The legacy DK schema cannot carry one and says
-//! so with [`ValidationError::UnsupportedBySchema`].
+//! structured or hybrid — see [`PostalAddress`] for which forms SEPA accepts.
+//! The legacy DK schema cannot carry one and says so with
+//! [`ValidationError::UnsupportedBySchema`].
 //!
 //! ## References
 //!
@@ -106,7 +106,7 @@ use crate::purpose::{CategoryPurpose, Purpose};
 use crate::reference::RemittanceInfo;
 use crate::validate::{
     BuildError, CharsetPolicy, Locate, Location, MAX_ID_LEN, UnknownSchema, ValidationError,
-    WriteError, check_amount, check_id, check_name, truncate_chars,
+    WriteError, accumulate_control_sum, check_amount, check_id, check_name, truncate_chars,
 };
 use crate::{Bic, Iban, IsoDateTime, ct_to_eur_str};
 
@@ -189,9 +189,9 @@ impl DirectDebitSchema {
     /// Whether this schema can carry a structured `PstlAdr`.
     ///
     /// The DK schema cannot: its `PostalAddressSEPA` type holds nothing but
-    /// `Ctry` and two `AdrLine`s — precisely the unstructured form the EPC
-    /// retires on 15 November 2026 — so there is no element to put a town or a
-    /// street in. See [`PostalAddress`].
+    /// `Ctry` and two `AdrLine`s — precisely the free-text-only form the EPC is
+    /// retiring — so there is no element to put a town or a street in. See
+    /// [`PostalAddress`].
     #[must_use]
     pub const fn supports_postal_address(self) -> bool {
         !matches!(self, Self::DkV2_7)
@@ -706,8 +706,8 @@ impl DirectDebitEntry {
     /// Set the debtor's postal address (`Dbtr/PstlAdr`).
     ///
     /// Optional in the SEPA schemes, but asked for by some banks and by
-    /// sanction screening. See [`PostalAddress`] for the
-    /// structured/hybrid rules and the 15 November 2026 cut-over.
+    /// sanction screening. See [`PostalAddress`] for the structured and hybrid
+    /// rules.
     #[must_use]
     pub fn with_debtor_address(mut self, address: PostalAddress) -> Self {
         self.debtor_address = Some(address);
@@ -840,10 +840,10 @@ impl DirectDebitGroup {
     ///
     /// `collection_date` is required for the same reason `ReqdExctnDt` is on a
     /// credit transfer: `ReqdColltnDt` is the day money leaves somebody else's
-    /// account. It used to default to five days out — the SDD Core
-    /// pre-notification floor — which is a banking-calendar answer this crate
-    /// cannot give: it depends on the scheme, the sequence type, the system
-    /// clock and TARGET2. Compute it against your own calendar and pass it in.
+    /// account. There is no default, because the right day is a
+    /// banking-calendar answer this crate cannot give: it depends on the
+    /// scheme, the sequence type and TARGET2. Compute it against your own
+    /// calendar and pass it in.
     pub fn new(
         creditor_name: impl Into<String>,
         creditor_iban: &Iban,
@@ -1225,10 +1225,7 @@ impl Pain008Builder {
 
         for (j, e) in g.entries.iter().enumerate() {
             self.validate_entry(Location::transaction(i, j), g, e)?;
-            *total = total.checked_add(e.amount_ct).ok_or(BuildError {
-                location: Location::transaction(i, j),
-                kind: ValidationError::ControlSumOverflow,
-            })?;
+            *total = accumulate_control_sum(*total, e.amount_ct).at(Location::transaction(i, j))?;
         }
         Ok(())
     }

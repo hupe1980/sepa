@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.03">
+  <CstmrPmtStsRpt>
+    <GrpHdr>
+      <MsgId>AAAADEBBJJJJMMTT0000000001</MsgId>
+      <CreDtTm>2026-07-14T10:20:30</CreDtTm>
+      <DbtrAgt><FinInstnId><BIC>AAAADEBB</BIC></FinInstnId></DbtrAgt>
+    </GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>CT-BATCH-001</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.001</OrgnlMsgNmId>
+      <GrpSts>PART</GrpSts>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>PMT-001</OrgnlPmtInfId>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>E2E-001</OrgnlEndToEndId>
+        <TxSts>RJCT</TxSts>
+        <StsRsnInf>
+          <Orgtr><Id><OrgId><BICOrBEI>AAAADEBBXXX</BICOrBEI></OrgId></Id></Orgtr>
+          <Rsn><Cd>AC04</Cd></Rsn>
+        </StsRsnInf>
+        <OrgnlTxRef>
+          <Amt><InstdAmt Ccy="EUR">88.88</InstdAmt></Amt>
+          <Dbtr><Nm>Max Mustermann</Nm></Dbtr>
+          <DbtrAcct><Id><IBAN>DE99888888885555555555</IBAN></Id></DbtrAcct>
+          <Cdtr><Nm>Creditor GmbH</Nm></Cdtr>
+          <CdtrAcct><Id><IBAN>DE89370400440532013000</IBAN></Id></CdtrAcct>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>E2E-002</OrgnlEndToEndId>
+        <TxSts>RJCT</TxSts>
+        <StsRsnInf>
+          <Rsn><Cd>DS02</Cd></Rsn>
+          <AddtlInf>Customer order to stop</AddtlInf>
+        </StsRsnInf>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>

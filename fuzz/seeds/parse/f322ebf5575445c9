@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
+  <RsltnOfInvstgtn>
+    <Assgnmt><Id>RES-2</Id>
+      <Assgnr><Agt><FinInstnId><BICFI>COBADEFFXXX</BICFI></FinInstnId></Agt></Assgnr>
+      <Assgne><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Assgne>
+      <CreDtTm>2026-07-15T14:02:00</CreDtTm></Assgnmt>
+    <RslvdCase><Id>CXL-2</Id><Cretr><Pty><Nm>Stadtwerke GmbH</Nm></Pty></Cretr></RslvdCase>
+    <Sts><Conf>RJCR</Conf></Sts>
+    <CxlDtls>
+      <OrgnlGrpInfAndSts>
+        <OrgnlMsgId>DD-2026-07-001</OrgnlMsgId>
+        <OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+        <GrpCxlSts>RJCR</GrpCxlSts>
+        <CxlStsRsnInf><Rsn><Cd>ARDT</Cd></Rsn>
+          <AddtlInf>Bereits ausgefuehrt und zurueckgegeben</AddtlInf>
+          <AddtlInf>Bitte pain.007 verwenden</AddtlInf></CxlStsRsnInf>
+      </OrgnlGrpInfAndSts>
+    </CxlDtls>
+  </RsltnOfInvstgtn>
+</Document>

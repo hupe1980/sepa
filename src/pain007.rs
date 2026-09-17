@@ -85,7 +85,7 @@ use crate::date::IsoDate;
 use crate::pain008::{DirectDebitEntry, DirectDebitGroup, DirectDebitScheme, SequenceType};
 use crate::validate::{
     BuildError, CharsetPolicy, Locate, Location, MAX_ID_LEN, ValidationError, WriteError,
-    check_amount, check_id, check_name, truncate_chars,
+    accumulate_control_sum, check_amount, check_id, check_name, truncate_chars,
 };
 use crate::xml_util::{write_escaped, write_eur};
 use crate::{Bic, Iban, IsoDateTime, ct_to_eur_str};
@@ -801,12 +801,7 @@ impl Pain007Builder {
             for (j, e) in g.entries.iter().enumerate() {
                 let at = Location::transaction(i, j);
                 e.validate(self.charset).at(at)?;
-                total = total
-                    .checked_add(e.effective_amount_ct())
-                    .ok_or(BuildError {
-                        location: at,
-                        kind: ValidationError::ControlSumOverflow,
-                    })?;
+                total = accumulate_control_sum(total, e.effective_amount_ct()).at(at)?;
             }
         }
         Ok(())

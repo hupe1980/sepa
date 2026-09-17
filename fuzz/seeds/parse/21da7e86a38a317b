@@ -1,0 +1,19 @@
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+//!   <CstmrPmtStsRpt>
+//!     <GrpHdr><MsgId>M</MsgId><CreDtTm>2025-11-10T09:31:30Z</CreDtTm></GrpHdr>
+//!     <OrgnlGrpInfAndSts>
+//!       <OrgnlMsgId>K563</OrgnlMsgId><OrgnlMsgNmId>pain.001</OrgnlMsgNmId>
+//!       <GrpSts>RVCM</GrpSts>
+//!       <NbOfTxsPerSts><DtldNbOfTxs>454</DtldNbOfTxs><DtldSts>RCVC</DtldSts></NbOfTxsPerSts>
+//!     </OrgnlGrpInfAndSts>
+//!     <OrgnlPmtInfAndSts>
+//!       <OrgnlPmtInfId>B001</OrgnlPmtInfId>
+//!       <TxInfAndSts>
+//!         <OrgnlEndToEndId>T087</OrgnlEndToEndId>
+//!         <TxSts>RVMC</TxSts>
+//!         <StsRsnInf><AddtlInf>Peter Schmitz</AddtlInf></StsRsnInf>
+//!         <OrgnlTxRef><Cdtr><Pty><Nm>P. Schmitz</Nm></Pty></Cdtr></OrgnlTxRef>
+//!       </TxInfAndSts>
+//!     </OrgnlPmtInfAndSts>
+//!   </CstmrPmtStsRpt>
+//! </Document>

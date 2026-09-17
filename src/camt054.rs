@@ -30,16 +30,24 @@
 //! use sepa::parse_camt054;
 //!
 //! # let xml = r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.054.001.08">
-//! # <BkToCstmrDbtCdtNtfctn><GrpHdr><MsgId>M</MsgId></GrpHdr><Ntfctn><Id>N</Id>
-//! # <Ntry><Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
+//! # <BkToCstmrDbtCdtNtfctn><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr><Ntfctn><Id>N</Id>
+//! # <Ntry><Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+//! #
+//! # <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
 //! # <NtryDtls><TxDtls><RtrInf><Rsn><Cd>AM04</Cd></Rsn></RtrInf></TxDtls></NtryDtls>
 //! # </Ntry></Ntfctn></BkToCstmrDbtCdtNtfctn></Document>"#;
 //! let doc = parse_camt054(xml)?;
 //!
 //! // The reason to consume camt.054: collections that came back.
 //! for returned in doc.notifications[0].returns() {
-//!     println!("{} ct returned, reason {:?}",
-//!              returned.signed_ct(), returned.return_reason_code());
+//!     // `signed_ct` is an Option: a statement may not determine the amount
+//!     // or the direction, and neither is ever guessed at.
+//!     match returned.signed_ct() {
+//!         Some(ct) => println!("{ct} ct returned, reason {:?}",
+//!                              returned.return_reason_code()),
+//!         None => println!("unresolved entry: amount {:?} direction {:?}",
+//!                          returned.amount.amount_raw, returned.amount.direction_raw),
+//!     }
 //! }
 //! # Ok::<(), sepa::Camt054ParseError>(())
 //! ```
@@ -59,16 +67,18 @@ pub struct UnknownIndicator(
     pub String,
 );
 
-/// Whether a CAMT.054 entry is a credit or debit from the account holder's perspective.
+/// Whether a camt entry is a credit or a debit, from the account holder's
+/// perspective.
 ///
-/// Defaults to [`Credit`](Self::Credit), matching how the parsers treat an
-/// absent or unrecognised `CdtDbtInd`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+/// **There is deliberately no `Default`.** A direction is the entire content of
+/// this type, so a default would be a guess about which way money moved, and
+/// the parsers report an absent or unrecognised `CdtDbtInd` as `None` rather
+/// than picking one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CreditDebitIndicator {
     /// Money received into the account (`CRDT`).
-    #[default]
     #[cfg_attr(feature = "serde", serde(rename = "CRDT"))]
     Credit,
     /// Money debited from the account (`DBIT`).
@@ -156,12 +166,19 @@ impl Camt054Notification {
         crate::IsoDate::parse_date_part(self.to_date_raw.as_deref()?).ok()
     }
 
-    /// Net movement in ct across all entries.
+    /// Net movement in **ct** for this notification — the sum of the signed entry
+    /// amounts — or `None` when any entry's amount or direction is unreadable.
+    ///
+    /// All-or-nothing on purpose. Skipping the entries that cannot be resolved
+    /// produces a total that looks right and is not, which is the failure mode
+    /// a net movement exists to rule out; `None` says "ask about this file"
+    /// where a partial sum says nothing at all. Overflow saturates rather than
+    /// panicking, because the input is a third party's file.
     #[must_use]
-    pub fn net_movement_ct(&self) -> i64 {
+    pub fn net_movement_ct(&self) -> Option<i64> {
         self.entries
             .iter()
-            .fold(0i64, |acc, e| acc.saturating_add(e.signed_ct()))
+            .try_fold(0i64, |acc, e| Some(acc.saturating_add(e.signed_ct()?)))
     }
 
     /// Entries that are SEPA returns (Rückläufer) — a returned direct debit or
@@ -238,8 +255,10 @@ pub enum Camt054ParseError {
 ///       <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
 ///       <Ntry>
 ///         <Amt Ccy="EUR">75.00</Amt>
-///         <CdtDbtInd>DBIT</CdtDbtInd>
-///         <NtryDtls><TxDtls>
+///         <CdtDbtInd>DBIT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+///         
+///         <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RDDT</Cd><SubFmlyCd>PMDD</SubFmlyCd></Fmly></Domn></BkTxCd>
+/// <NtryDtls><TxDtls>
 ///           <RtrInf><Rsn><Cd>MD01</Cd></Rsn></RtrInf>
 ///         </TxDtls></NtryDtls>
 ///       </Ntry>

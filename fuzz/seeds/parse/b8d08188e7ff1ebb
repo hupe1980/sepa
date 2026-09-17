@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr>
+      <MsgId>B78567267384</MsgId>
+      <CreDtTm>2025-11-10T09:31:30Z</CreDtTm>
+      <DbtrAgt><FinInstnId><BICFI>SPUEDE2UXXX</BICFI></FinInstnId></DbtrAgt>
+    </GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>K563</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.001</OrgnlMsgNmId>
+      <OrgnlNbOfTxs>462</OrgnlNbOfTxs>
+      <GrpSts>RVCM</GrpSts>
+      <StsRsnInf><AddtlInf>legal notice</AddtlInf></StsRsnInf>
+      <NbOfTxsPerSts><DtldNbOfTxs>454</DtldNbOfTxs><DtldSts>RCVC</DtldSts></NbOfTxsPerSts>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>B001</OrgnlPmtInfId>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>K563-B001-T087</OrgnlEndToEndId>
+        <TxSts>RVMC</TxSts>
+        <StsRsnInf><AddtlInf>Peter Schmitz</AddtlInf></StsRsnInf>
+        <OrgnlTxRef>
+          <Cdtr><Pty><Nm>P. Schmitz</Nm></Pty></Cdtr>
+          <CdtrAcct><Id><IBAN>DE34500500009876543210</IBAN></Id></CdtrAcct>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>

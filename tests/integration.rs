@@ -406,6 +406,59 @@ mod xsd {
         }
     }
 
+    /// OCT Inst output, measured against the ISO schema rather than against
+    /// this crate's own opinion of it.
+    ///
+    /// The scheme adds no message — EPC250-22 specifies `pain.001.001.09`, the
+    /// version already emitted here — so the only question a schema can answer
+    /// is whether the four elements it *does* change still sit in a document
+    /// `CustomerCreditTransferInitiationV09` admits. `InstrForCdtrAgt` in
+    /// particular has to land between `UltmtCdtr` and `Purp`, which is the
+    /// class of mistake that produced D43.
+    #[test]
+    fn oct_inst_validates_against_the_iso_schema() {
+        let xml = super::Pain001Builder::new("Acme GmbH", "OCT-XSD")
+            .add_group(
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
+                    .kind(sepa::pain001::CreditTransferKind::OneLegOutInstant)
+                    .charge_bearer(sepa::pain001::ChargeBearer::Shar)
+                    .add_entry(
+                        super::CreditTransferEntry::new("Payee", super::creditor(), 5_000, "OCT-1")
+                            .with_currency("USD".parse().unwrap())
+                            .with_non_euro_leg_currency("USD".parse().unwrap())
+                            .with_purpose("RRTP".parse().unwrap())
+                            .with_description("one leg out"),
+                    ),
+            )
+            .build()
+            .unwrap();
+
+        assert!(xml.contains("<SvcLvl><Cd>EOLO</Cd></SvcLvl>"), "{xml}");
+        assert!(
+            xml.contains("<LclInstrm><Cd>INST</Cd></LclInstrm>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<ChrgBr>SHAR</ChrgBr>"), "{xml}");
+        assert!(
+            xml.contains(r#"<InstdAmt Ccy="USD">50.00</InstdAmt>"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<InstrForCdtrAgt><InstrInf>USD</InstrInf></InstrForCdtrAgt>"),
+            "{xml}"
+        );
+        // Element order is the thing only a schema can check.
+        let instr = xml.find("<InstrForCdtrAgt>").expect("AT-T020 present");
+        let ultmt = xml.find("<UltmtCdtr>").unwrap_or(0);
+        let purp = xml.find("<Purp>").expect("purpose present");
+        assert!(
+            ultmt <= instr && instr < purp,
+            "InstrForCdtrAgt is misplaced"
+        );
+
+        assert_validates(&xml, &schema_file("pain.001.001.09"));
+    }
+
     #[test]
     fn sct_instant_validates_in_every_schema_version_that_allows_it() {
         // Regression: the DK schema has no LclInstrm element, and the builder
@@ -419,7 +472,7 @@ mod xsd {
                         &super::debtor(),
                         date("2026-07-20"),
                     )
-                    .local_instrument(sepa::pain001::LocalInstrument::Inst)
+                    .kind(sepa::pain001::CreditTransferKind::Instant)
                     .add_entry(super::CreditTransferEntry::new(
                         "Payee",
                         super::creditor(),
@@ -572,7 +625,7 @@ mod xsd {
                         &super::debtor(),
                         "2026-07-20T11:00:00Z".parse::<sepa::IsoDateTime>().unwrap(),
                     )
-                    .local_instrument(sepa::LocalInstrument::Inst)
+                    .kind(sepa::CreditTransferKind::Instant)
                     .add_entry(super::CreditTransferEntry::new(
                         "Payee",
                         super::creditor(),
@@ -614,7 +667,7 @@ mod xsd {
             let moment: sepa::IsoDateTime = moment.parse().unwrap();
             let mut group = super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), moment);
             if instant {
-                group = group.local_instrument(sepa::LocalInstrument::Inst);
+                group = group.kind(sepa::CreditTransferKind::Instant);
             }
             super::Pain001Builder::new("Acme GmbH", "CT-TIMED")
                 .add_group(group.add_entry(super::CreditTransferEntry::new(
@@ -630,7 +683,7 @@ mod xsd {
             build(false, "2026-07-20T11:00:00Z").unwrap_err().kind,
             ValidationError::Requires {
                 feature: "ReqdExctnDt/DtTm (timed execution)",
-                requires: "PmtTpInf/LclInstrm = INST (SCT Inst)",
+                requires: "an instant scheme — CreditTransferKind::Instant or ::OneLegOutInstant",
             },
         );
         assert_eq!(
@@ -825,7 +878,7 @@ mod xsd {
                     &super::debtor(),
                     "2026-07-20T11:00:00Z".parse::<sepa::IsoDateTime>().unwrap(),
                 )
-                .local_instrument(sepa::LocalInstrument::Inst)
+                .kind(sepa::CreditTransferKind::Instant)
                 .debtor_bic("COBADEFFXXX".parse().unwrap())
                 .add_entry(
                     super::CreditTransferEntry::new(
@@ -1067,7 +1120,7 @@ mod xsd {
         let xml = super::Pain001Builder::new("Acme GmbH", "CT-INST-001")
             .add_group(
                 super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
-                    .local_instrument(sepa::pain001::LocalInstrument::Inst)
+                    .kind(sepa::pain001::CreditTransferKind::Instant)
                     .add_entry(super::CreditTransferEntry::new(
                         "Payee",
                         super::creditor(),
@@ -1104,6 +1157,67 @@ mod xsd {
         for xml in super::camt029_fixtures() {
             assert_validates(&xml, "camt.029.001.06.xsd");
         }
+    }
+
+    /// Each newly vendored schema is a real gate, not a permissive stub.
+    ///
+    /// `tests/fixtures.rs` proves they *accept* the parser's fixtures; a
+    /// schema stripped of its restrictions would too. Each must also
+    /// **reject** a document breaking a rule only it enforces. That pair is
+    /// the whole bound for `pain.002.003.03`, which is single-sourced.
+    #[test]
+    fn each_vendored_schema_rejects_what_only_it_forbids() {
+        // The DK V2.7 status report is reject-only: `GroupStatus3Code` has the
+        // single value `RJCT`. An acceptance is not a document this variant
+        // can carry, which is a scheme fact no ISO schema states.
+        let dk_accepted = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.003.03">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-14T10:20:30</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>O</OrgnlMsgId><OrgnlMsgNmId>pain.008.003.02</OrgnlMsgNmId>
+      <GrpSts>ACTC</GrpSts>
+    </OrgnlGrpInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#;
+        assert!(
+            !matches!(xmllint(dk_accepted, "pain.002.003.03.xsd"), Some(Ok(()))),
+            "pain.002.003.03 must refuse ACTC — it is a reject-only report"
+        );
+
+        // camt.053.001.06 makes `Stmt/CreDtTm` mandatory where .08 does not.
+        let camt_no_credttm = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.06">
+  <BkToCstmrStmt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-14T23:59:00</CreDtTm></GrpHdr>
+    <Stmt><Id>S</Id>
+      <Acct><Id><IBAN>DE89370400440532013000</IBAN></Id></Acct>
+      <Bal><Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp><Amt Ccy="EUR">0.00</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-07-14</Dt></Dt></Bal>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>"#;
+        assert!(
+            !matches!(
+                xmllint(camt_no_credttm, "camt.053.001.06.xsd"),
+                Some(Ok(()))
+            ),
+            "camt.053.001.06 must require Stmt/CreDtTm"
+        );
+
+        // pain.002.001.03 is the unrestricted ISO original, so the rule to
+        // break is a structural one: `OrgnlMsgNmId` is mandatory.
+        let iso_missing = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.03">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-14T10:20:30</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts><OrgnlMsgId>O</OrgnlMsgId><GrpSts>ACTC</GrpSts></OrgnlGrpInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#;
+        assert!(
+            !matches!(xmllint(iso_missing, "pain.002.001.03.xsd"), Some(Ok(()))),
+            "pain.002.001.03 must require OrgnlMsgNmId"
+        );
     }
 
     #[test]
@@ -1410,11 +1524,11 @@ fn maximal_reversal() -> String {
 
 #[test]
 fn every_emitted_text_value_is_in_the_sepa_character_set() {
-    // Every text node, not a hand-listed set of tags. The list was the bug:
-    // `RmtInf/Strd/CdtrRefInf/Tp/Issr` was neither validated nor transliterated
-    // for three releases, and a per-tag assertion could not see it because
-    // nobody thought to add the tag. Walking the document means the next
-    // element added to a writer is covered the day it is added.
+    // Every text node, not a hand-listed set of tags. The list is the bug:
+    // `RmtInf/Strd/CdtrRefInf/Tp/Issr` went neither validated nor
+    // transliterated because nobody thought to add the tag, and a per-tag
+    // assertion cannot see that. Walking the document means the next element
+    // added to a writer is covered the day it is added.
     for xml in [
         &maximal_direct_debit(),
         &maximal_credit_transfer(),
@@ -1577,11 +1691,11 @@ fn camt053_batch_booking_exposes_every_transaction() {
     let doc = parse_camt053(xml).unwrap();
     let stmt = &doc.statements[0];
     assert_eq!(stmt.account.iban.as_deref(), Some("DE89370400440532013000"));
-    assert_eq!(stmt.closing_balance().unwrap().signed_ct(), 122_500);
+    assert_eq!(stmt.closing_balance().unwrap().signed_ct(), Some(122_500));
 
     let entry = &stmt.entries[0];
-    assert_eq!(entry.amount_ct, 22_500);
-    assert_eq!(entry.currency, "EUR");
+    assert_eq!(entry.amount.ct, Some(22_500));
+    assert_eq!(entry.amount.currency, Some("EUR".to_owned()));
     assert!(entry.batch_booked);
     // camt.053.001.08 wraps Sts in a Cd choice — v02 does not.
     assert_eq!(entry.status, sepa::EntryStatus::Booked);
@@ -1595,8 +1709,8 @@ fn camt053_batch_booking_exposes_every_transaction() {
         .collect();
     assert_eq!(ids, ["E2E-1", "E2E-2", "E2E-3"]);
     // The details sum to the aggregate entry amount.
-    let sum: i64 = entry.details.iter().filter_map(|d| d.amount_ct).sum();
-    assert_eq!(sum, entry.amount_ct);
+    let sum: i64 = entry.details.iter().filter_map(|d| d.amount.ct).sum();
+    assert_eq!(Some(sum), entry.amount.ct);
     // Party40Choice nesting (Dbtr/Pty/Nm) must resolve.
     assert_eq!(
         entry.details[0].counterparty_name.as_deref(),
@@ -1644,7 +1758,7 @@ fn camt053_v2_and_v8_shapes_parse_identically() {
     for xml in [&v2, &v8] {
         let e = &parse_camt053(xml).unwrap().statements[0].entries[0];
         assert_eq!(e.status, sepa::EntryStatus::Booked);
-        assert_eq!(e.signed_ct(), 15_542);
+        assert_eq!(e.signed_ct(), Some(15_542));
         assert_eq!(e.counterparty_name(), Some("Zahler"));
         assert_eq!(e.end_to_end_id(), Some("E2E-X"));
     }
@@ -1682,9 +1796,78 @@ fn a_multibyte_amount_is_rejected_not_a_panic() {
   </BkToCstmrStmt>
 </Document>"#;
 
-    // The entry is dropped as unparseable; the parser must not panic.
     let doc = parse_camt053(xml).unwrap();
-    assert!(doc.statements[0].entries.is_empty());
+    let entries = &doc.statements[0].entries;
+
+    // The booking is REPORTED, not dropped. A dropped entry is the one kind
+    // of parse failure an importer cannot detect: a missing booking looks
+    // exactly like a booking that never happened.
+    assert_eq!(
+        entries.len(),
+        1,
+        "an unreadable amount must not delete a booking"
+    );
+    let entry = &entries[0];
+    assert_eq!(entry.amount.ct, None, "the amount is not invented");
+    assert_eq!(entry.signed_ct(), None, "and neither is a ledger figure");
+    assert_eq!(
+        entry.amount.amount_raw.as_deref(),
+        Some("1.\u{20ac}5"),
+        "what the bank actually sent survives for the operator to look at"
+    );
+    // And the statement's net movement refuses to answer rather than
+    // understating itself by the row it could not read.
+    assert_eq!(doc.statements[0].net_movement_ct(), None);
+}
+
+#[test]
+fn an_unreadable_credit_debit_indicator_is_never_taken_for_a_credit() {
+    // Regression, and the worst defect this crate has had. `CdtDbtInd` was
+    // parsed with `.unwrap_or(Credit)`, so a debit whose indicator a bank
+    // mistyped — or spelled in a case this parser did not fold — was reported
+    // as a credit of the same magnitude. In a ledger that is a two-for-one
+    // error: EUR 1000 removed from the wrong side and added to the other.
+    let doc_with = |ind: &str| {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt><GrpHdr><MsgId>M</MsgId></GrpHdr><Stmt><Id>S1</Id>
+    <Ntry><Amt Ccy="EUR">1000.00</Amt>{ind}</Ntry>
+  </Stmt></BkToCstmrStmt>
+</Document>"#
+        );
+        parse_camt053(&xml).unwrap()
+    };
+
+    // The two codes that exist still work, in both cases.
+    assert_eq!(
+        doc_with("<CdtDbtInd>CRDT</CdtDbtInd>").statements[0].entries[0].signed_ct(),
+        Some(100_000)
+    );
+    assert_eq!(
+        doc_with("<CdtDbtInd>DBIT</CdtDbtInd>").statements[0].entries[0].signed_ct(),
+        Some(-100_000)
+    );
+
+    // Everything else refuses to answer, and keeps what arrived.
+    for bad in ["<CdtDbtInd>DBTI</CdtDbtInd>", "<CdtDbtInd></CdtDbtInd>", ""] {
+        let doc = doc_with(bad);
+        let entry = &doc.statements[0].entries[0];
+        assert_eq!(
+            entry.amount.direction, None,
+            "{bad:?} must not resolve to a direction"
+        );
+        assert_eq!(
+            entry.signed_ct(),
+            None,
+            "{bad:?} must not produce a ledger figure"
+        );
+        assert_eq!(
+            entry.amount.ct,
+            Some(100_000),
+            "{bad:?} — the magnitude is still known; only the direction is not"
+        );
+    }
 }
 
 #[test]

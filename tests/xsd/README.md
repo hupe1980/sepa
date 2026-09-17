@@ -13,12 +13,15 @@ generates. They are **test fixtures only** — nothing in `src/` reads them.
 | `pain.008.003.02.xsd` | SDD, legacy DK V2.7 |
 | `pain.007.001.09.xsd` | SDD reversal — the only version SEPA defines |
 | `pain.002.001.10.xsd` | Status report + Verification of Payee (parser fixtures) |
+| `pain.002.001.03.xsd` | Status report, ISO pre-2023 generation (parser fixtures) |
+| `pain.002.003.03.xsd` | Status report, legacy DK V2.7 (parser fixtures) |
 | `pain.001.001.09_GBIC_5.xsd` | SCT — the DK's stricter validation subset |
 | `pain.008.001.08_GBIC_5.xsd` | SDD — the DK's stricter validation subset |
 | `camt.055.001.05.xsd` | Payment cancellation request (recall) |
 | `camt.029.001.06.xsd` | Resolution of investigation — the answer to a recall (parser fixtures) |
 | `camt.052.001.08.xsd` | Intraday report (parser fixtures) |
 | `camt.053.001.08.xsd` | End-of-day statement (parser fixtures) |
+| `camt.053.001.06.xsd` | End-of-day statement, 2016 version (parser fixtures) |
 | `camt.054.001.08.xsd` | Debit/credit notification (parser fixtures) |
 
 The file name is derived from the schema variant's `message_id()`, so adding a
@@ -145,13 +148,52 @@ cross-checked byte-for-byte between two independent copies.
   `58c51f123ac66c4981adfede7478851cfc76c6a5e722f7cbff7e2b9719aa22fc`.
 - `pain.008.003.02.xsd` — SHA-256
   `2bfaaae0239adef8d62ddf8c48472aec640971724425a26e493fccca586e805a`.
+- `pain.002.003.03.xsd` — SHA-256
+  `9d7d07c228e180ebc4a68245fa6fa7e4907025dcbbeccffcfdcb1ea3a5521130`.
 
-  Both from [willuhn/hbci4java](https://github.com/willuhn/hbci4java), the
+  All three from [willuhn/hbci4java](https://github.com/willuhn/hbci4java), the
   German DK schemas per DFÜ-Abkommen Anlage 3 V2.7.
+
+  `pain.002.003.03` is **single-sourced**: the format was retired with DFÜ V2.7
+  in November 2022 and no second copy exists to diff against. The
+  accept/reject pair below stands in for the byte-comparison.
+- `pain.002.001.03.xsd` — SHA-256
+  `c0c2b98f51638147598678bbec3d5aedfa270a819c2fda8014ba3c34a5972195`. From
+  [sladjan/xsd-camt](https://github.com/sladjan/xsd-camt), corroborated
+  byte-for-byte against
+  [sebastienrousseau/pain001](https://github.com/sebastienrousseau/pain001).
+  Generator stamp `SWIFTStandards Workstation (build:R6.1.0.2) on 2009 Jan 08`.
+
+  ⚠️ hbci4java *also* ships a `pain.002.001.03.xsd`, and it is **not** this
+  one — it is the DK's restricted Bank-Kunde-Bank schema under the ISO
+  namespace. Not defective, just a different artefact with the same name, and
+  vendoring it would silently narrow the gate.
+- `camt.053.001.06.xsd` — SHA-256
+  `f09fcac3f524a231fc06bdc0da4014a1054b5aeb1797de591daeee7c2d6d6242`. From
+  [sebastienrousseau/camt053](https://github.com/sebastienrousseau/camt053),
+  corroborated byte-for-byte (after CRLF→LF) against
+  [jHetzer/go-camt](https://github.com/jHetzer/go-camt). Generator stamp
+  `Standards Editor (build:R1.6.5.6) on 2016 Feb 12`. Real `<xs:choice>` in
+  `AccountIdentification4Choice` and `ChargeType3Choice`, checked.
 
 Replacing a mirror-sourced file with an archive copy is a welcome change; the
 sensible check afterwards is that the test suite still passes, since the DK
 subsets validate the same documents from the other direction.
+
+### Every schema is checked to reject, not only to accept
+
+A schema stripped of its restrictions accepts every fixture too, and two
+mirrors can share a defective ancestor — so agreement is not proof. Each
+vendored schema must also **refuse** a document breaking a rule only it
+enforces (`integration::xsd::each_vendored_schema_rejects_what_only_it_forbids`):
+
+| Schema | Must refuse |
+|---|---|
+| `pain.002.003.03` | `GrpSts` = `ACTC` — the DK variant is reject-only |
+| `camt.053.001.06` | a statement without `Stmt/CreDtTm`, mandatory only here |
+| `pain.002.001.03` | a group without `OrgnlMsgNmId` |
+
+For the single-sourced schema that pair of checks is the whole bound.
 
 ## The digests are enforced, not decorative
 

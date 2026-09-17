@@ -1,0 +1,3 @@
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
+          <RsltnOfInvstgtn><Assgnmt><Id>R</Id><CreDtTm>2026-07-15T14:00:00</CreDtTm></Assgnmt>
+          </RsltnOfInvstgtn></Document>

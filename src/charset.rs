@@ -434,9 +434,10 @@ mod tests {
 
     #[test]
     fn exactly_twenty_entries_lengthen_the_text() {
-        // The documented claim, pinned. Everything else in the published table
-        // is one character to one character, which is what makes the EPC style
-        // length-preserving — and the docs said 26 for three releases.
+        // The documented claim, pinned. Everything else in the published
+        // table is one character to one character, which is what makes the
+        // EPC style length-preserving. A count stated in prose and nowhere
+        // else drifts.
         let multi: Vec<_> = crate::charset_table::EPC_CONVERSION_TABLE
             .iter()
             .filter(|(_, r)| r.chars().count() > 1)

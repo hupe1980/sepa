@@ -520,7 +520,9 @@ pub struct Camt029Document {
     /// `Assgnmt/Id` — the bank's identifier for this answer.
     pub assignment_id: String,
     /// `Assgnmt/CreDtTm` exactly as the bank reported it.
-    pub created_at: String,
+    ///
+    /// Read [`created_at`](Self::created_at) for the typed value.
+    pub created_at_raw: String,
     /// BIC of the institution that answered (`Assgnmt/Assgnr/Agt`).
     pub assigner_bic: Option<String>,
     /// Name of the party that answered, when it is not an institution.
@@ -540,6 +542,19 @@ pub struct Camt029Document {
     pub namespace: Option<String>,
     /// One per `CxlDtls` block.
     pub groups: Vec<GroupCancellationStatus>,
+}
+
+impl Camt029Document {
+    /// When the bank generated this answer, typed.
+    ///
+    /// `None` when it reported none, or one this crate cannot read;
+    /// [`created_at_raw`](Self::created_at_raw) still holds whatever arrived.
+    /// Verbatim *and* typed, never in place of: a timestamp this crate
+    /// cannot read still reaches the caller as the bank wrote it.
+    #[must_use]
+    pub fn created_at(&self) -> Option<crate::IsoDateTime> {
+        crate::IsoDateTime::parse(&self.created_at_raw).ok()
+    }
 }
 
 impl Camt029Document {
@@ -685,7 +700,7 @@ pub fn parse_camt029(xml: &str) -> Result<Camt029Document, Camt029ParseError> {
     let assigner = assignment.child("Assgnr");
     Ok(Camt029Document {
         assignment_id,
-        created_at: assignment.text_of("CreDtTm").unwrap_or_default().to_owned(),
+        created_at_raw: assignment.text_of("CreDtTm").unwrap_or_default().to_owned(),
         assigner_bic: assigner
             .and_then(|a| a.child("Agt"))
             .and_then(crate::camt::agent_bic)
@@ -976,6 +991,10 @@ mod tests {
     fn an_empty_document_is_not_an_acceptance() {
         // A bank that lists nothing has told you nothing, and defaulting that
         // to success is how a recall gets assumed to have worked.
+        //
+        // xsd-exempt: deliberately not a document — `RsltnOfInvstgtn` requires
+        // `Sts`, and the whole point is that a truncated or malformed answer
+        // must not read as an acceptance.
         let xml = r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
           <RsltnOfInvstgtn><Assgnmt><Id>R</Id><CreDtTm>2026-07-15T14:00:00</CreDtTm></Assgnmt>
           </RsltnOfInvstgtn></Document>"#;
@@ -992,7 +1011,7 @@ mod tests {
         // loses every answer to a request that named no group.
         let xml = r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
           <RsltnOfInvstgtn>
-            <Assgnmt><Id>R</Id><CreDtTm>2026-07-15T14:00:00</CreDtTm></Assgnmt>
+            <Assgnmt><Id>R</Id><Assgnr><Pty><Nm>Bank</Nm></Pty></Assgnr><Assgne><Pty><Nm>Acme GmbH</Nm></Pty></Assgne><CreDtTm>2026-07-15T14:00:00</CreDtTm></Assgnmt>
             <Sts><Conf>PECR</Conf></Sts>
             <CxlDtls>
               <TxInfAndSts><OrgnlEndToEndId>E2E-1</OrgnlEndToEndId>
@@ -1042,6 +1061,9 @@ mod tests {
 
     #[test]
     fn a_document_that_is_not_camt029_is_refused() {
+        // xsd-exempt: a camt.053 stub handed to the camt.029 parser on
+        // purpose. It is invalid as camt.053 too, which is the point — the
+        // parser must refuse on the root element, before any of that matters.
         let xml = r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
           <BkToCstmrStmt/></Document>"#;
         assert!(matches!(

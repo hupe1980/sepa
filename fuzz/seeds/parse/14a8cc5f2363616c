@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.003.03">
+  <CstmrPmtStsRpt>
+    <GrpHdr>
+      <MsgId>DKPSR-2026-07-14-001</MsgId>
+      <CreDtTm>2026-07-14T10:20:30</CreDtTm>
+    </GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>DD-2026-07-001</OrgnlMsgId>
+      <OrgnlMsgNmId>pain.008.003.02</OrgnlMsgNmId>
+      <GrpSts>RJCT</GrpSts>
+      <StsRsnInf>
+        <Rsn><Cd>AM05</Cd></Rsn>
+      </StsRsnInf>
+    </OrgnlGrpInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>
