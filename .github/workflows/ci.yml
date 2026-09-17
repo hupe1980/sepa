@@ -160,6 +160,11 @@ jobs:
           else
             SECS=60
           fi
+          # libFuzzer requires every corpus directory named on the command
+          # line to exist. `fuzz/corpus/` is gitignored — it is generated, not
+          # source — so on a fresh checkout it is absent, and naming it
+          # explicitly means cargo-fuzz does not create it for us.
+          mkdir -p "fuzz/corpus/${{ matrix.target }}"
           SEEDS=""
           if [ -d "fuzz/seeds/${{ matrix.target }}" ]; then
             SEEDS="fuzz/seeds/${{ matrix.target }}"

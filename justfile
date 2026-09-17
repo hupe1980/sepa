@@ -92,6 +92,10 @@ deny:
 fuzz TARGET="parse" SECS="60":
     #!/usr/bin/env bash
     set -euo pipefail
+    # libFuzzer requires every corpus directory on the command line to exist,
+    # and `fuzz/corpus/` is gitignored — it is generated, not source. Naming
+    # it explicitly means cargo-fuzz does not create it for us.
+    mkdir -p "fuzz/corpus/{{ TARGET }}"
     seeds=""
     [ -d "fuzz/seeds/{{ TARGET }}" ] && seeds="fuzz/seeds/{{ TARGET }}"
     cargo +nightly fuzz run {{ TARGET }} \
