@@ -1220,7 +1220,7 @@ mod tests {
                 .write_to(&mut empty)
                 .is_err()
         );
-        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
     }
 
     #[test]

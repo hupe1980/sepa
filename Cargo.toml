@@ -1,37 +1,28 @@
 [package]
 name         = "sepa"
-version      = "0.8.0"
+version      = "0.9.0"
 rust-version = "1.88"
 edition      = "2024"
 authors      = ["hupe1980"]
-description  = """\
-SEPA payment utilities for all five EPC payment schemes: SCT, SCT Inst, \
-SDD Core, SDD B2B and One-Leg Out Instant (OCT Inst). Builds pain.001, \
-pain.008, pain.007 and camt.055; parses pain.002 (incl. Verification of \
-Payee), camt.029 and camt.052/053/054. IBAN, BIC, Creditor Identifier and \
-ISO 11649 RF reference validation, structured addresses, EPC field rules and \
-charset transliteration. Output is XSD-validated in CI against the ISO \
-schemas and the German GBIC 5 subsets. No I/O, no async, no f64 in monetary \
-arithmetic.\
-"""
+description  = "SEPA identifiers and ISO 20022 payment messages: builders, bank-report parsers, validation and integer monetary arithmetic."
 repository   = "https://github.com/hupe1980/sepa"
 license      = "MIT OR Apache-2.0"
 keywords     = ["sepa", "iban", "iso20022", "payments", "banking"]
 exclude      = [
   "/.github",
+  "/.specify",
+  "/.claude",
+  "/specs",
+  "/concepts",
   "/justfile",
   "/deny.toml",
   "/fuzz",
   "/schemas",
-  # Maintenance scripts: they act on files that are not published.
+  # Maintainer-only files.
   "/scripts",
-  # The regulatory watch gate is a maintainer tool and is deliberately
-  # time-dependent: it fails when a source falls due for a re-read. A consumer
-  # who pins this crate must not inherit a test that starts failing on our
-  # review calendar.
+  # Consumers must not inherit our time-dependent source-review gate.
   "/tests/watch.rs",
-  # The site's markdown is compile-tested by `site_doctests`, so it ships;
-  # its templates, styles and build output are not needed to build the crate.
+  # Site Markdown ships for doctests; site assets and build output do not.
   "/site/templates",
   "/site/static",
   "/site/public",
@@ -40,14 +31,16 @@ exclude      = [
 categories   = ["finance", "encoding"]
 readme       = "README.md"
 
-# The fuzz crate is standalone: it needs nightly and must not be pulled
-# into `cargo test`/`cargo build` for the library.
+[package.metadata.docs.rs]
+all-features = true
+
+# The standalone fuzz crate requires nightly.
 [workspace]
 exclude = ["fuzz"]
 
 [features]
 default = []
-## Enable serde Serialize / Deserialize on all public types.
+## Serialize/deserialize supported values, payment inputs and reports.
 serde = ["dep:serde"]
 ## Convert between `IsoDate` / `IsoDateTime` and the `time` crate's types.
 time = ["dep:time"]
@@ -58,8 +51,7 @@ chrono = ["dep:chrono"]
 thiserror  = { version = "2", default-features = false }
 quick-xml  = { version = "0.41", default-features = false }
 serde      = { version = "1", features = ["derive"], optional = true }
-# Date interop only — neither crate is used inside the library's own logic, so
-# the calendar arithmetic stays dependency-free and identical in every build.
+# Optional interop; core calendar arithmetic is dependency-free.
 time       = { version = "0.3.47", default-features = false, optional = true }
 chrono     = { version = "0.4", default-features = false, optional = true }
 

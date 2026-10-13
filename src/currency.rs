@@ -110,7 +110,8 @@ impl Currency {
     /// The euro — the currency of every message the four SEPA schemes carry.
     pub const EUR: Self = Self(*b"EUR");
 
-    /// Validate `code` as an ISO 4217 currency, upper-casing it.
+    /// Validate three-letter currency syntax, upper-casing it.
+    /// This does not check registration or a PSP's supported currency list.
     ///
     /// # Errors
     ///

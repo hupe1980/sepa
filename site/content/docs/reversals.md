@@ -14,10 +14,10 @@ events people often confuse it with:
 | The debtor claims the money back | The debtor | `camt.054` return |
 | **You collected in error** | **You** | **`pain.007`** |
 
-A reversal is the *late* option. If the collection has not settled yet, a
-[recall](@/docs/recalls.md) — `camt.055` — asks the bank to stop it instead, and
-costs nothing. A recall refused with `ARDT` is the bank saying the window has
-closed and a reversal is what is left.
+A reversal concerns a settled collection. A
+[recall](@/docs/recalls.md) — `camt.055` — asks the bank to cancel a submitted
+payment. Availability, deadlines and fees depend on the bank and scheme.
+An `ARDT` refusal reports an existing return, not permission to send another one.
 
 Only `pain.007.001.09` is defined for SEPA, so there is no version to choose.
 
@@ -132,5 +132,5 @@ because ISO revises the list quarterly.
 
 ## See also
 
-- [Recalls](@/docs/recalls.md) — the earlier and cheaper option, before settlement
+- [Recalls](@/docs/recalls.md) — requesting cancellation of a submitted payment
 - [Direct debits](@/docs/direct-debits.md) — the collection this undoes

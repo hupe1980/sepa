@@ -100,8 +100,8 @@ pub enum DateError {
 
     /// The year lies outside 1–9999.
     ///
-    /// `xs:date` has no year zero, and ISO 20022 dates are four-digit years, so
-    /// the range is bounded on both sides.
+    /// This library supports four-digit positive years. XML Schema date syntax
+    /// has a broader year space; this error describes the library's range.
     #[error("year {year} is outside the supported range 1-9999")]
     YearOutOfRange {
         /// The rejected year.
@@ -110,8 +110,8 @@ pub enum DateError {
 
     /// A day count fell outside the range [`IsoDate::MIN`]–[`IsoDate::MAX`].
     ///
-    /// Produced by [`IsoDate::from_epoch_days`] and by date arithmetic that
-    /// walks off the end of the calendar.
+    /// Produced by [`IsoDate::from_epoch_days`], date arithmetic and checked
+    /// timestamp conversions that leave the supported calendar.
     #[error("{days} days from the epoch is outside 0001-01-01 - 9999-12-31")]
     OutOfRange {
         /// The rejected day count, relative to 1970-01-01.
@@ -224,8 +224,10 @@ impl IsoDate {
     /// assert!(IsoDate::new(2023, 2, 29).is_err());
     /// ```
     pub fn new(year: u16, month: u8, day: u8) -> Result<Self, DateError> {
-        if year == 0 {
-            return Err(DateError::YearOutOfRange { year: 0 });
+        if !(1..=9999).contains(&year) {
+            return Err(DateError::YearOutOfRange {
+                year: i64::from(year),
+            });
         }
         if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
             return Err(DateError::NotACalendarDate {
@@ -239,13 +241,16 @@ impl IsoDate {
 
     /// Parse a `YYYY-MM-DD` date.
     ///
-    /// The shape is exact: no other separator, no two-digit year, no trailing
-    /// time. This is deliberate — `ReqdColltnDt` is an `xs:date`, and a value a
-    /// bank would reject must not be constructible.
+    /// Supports positive four-digit years 0001–9999 and an optional XSD
+    /// timezone, which is validated and discarded without shifting the written
+    /// calendar day. Other separators, two-digit years and trailing times are
+    /// refused. This library range is narrower than the XSD year space;
+    /// successful construction does not establish bank acceptance.
     ///
     /// # Errors
     ///
-    /// [`DateError::Malformed`] for anything that is not `YYYY-MM-DD`, or
+    /// [`DateError::Malformed`] for an unsupported shape or timezone,
+    /// [`DateError::YearOutOfRange`] for year zero, or
     /// [`DateError::NotACalendarDate`] for an impossible day.
     ///
     /// # Examples
@@ -302,9 +307,9 @@ impl IsoDate {
     /// one bank and as a timestamp from the next, and a reconciliation routine
     /// posts by the day either way.
     ///
-    /// The accepted set is exactly `xs:date` ∪ `xs:dateTime` — the two members
-    /// of that choice — and nothing else, so a value with trailing junk is an
-    /// error rather than a confident date.
+    /// Accepts the two choice members within this library's supported year and
+    /// timestamp representation. It is not the complete XSD lexical space;
+    /// trailing junk remains an error rather than a confident date.
     ///
     /// # Errors
     ///
@@ -1000,24 +1005,27 @@ mod time_interop {
 
     impl TryFrom<time::OffsetDateTime> for IsoDateTime {
         type Error = DateError;
-        /// Keeps the offset, so the timestamp still names an instant.
+        /// Keeps whole-minute offsets within ±14:00. Other offsets are
+        /// re-expressed at UTC, preserving the whole-second instant.
+        ///
+        /// # Errors
+        ///
+        /// Refuses local dates outside 0001–9999. When UTC fallback is needed,
+        /// [`DateError::OutOfRange`] reports an unrepresentable UTC day before
+        /// calling the external offset conversion.
         fn try_from(t: time::OffsetDateTime) -> Result<Self, Self::Error> {
             let date = IsoDate::try_from(t.date())?;
             let mut out = Self::from(date).with_time(t.hour(), t.minute(), t.second());
-            // `time` bounds an offset at ±25:59:59 and ISO 20022 at ±14:00;
-            // beyond that there is no `xs:dateTime` to write, so the value is
-            // rendered at UTC rather than with an offset no schema accepts.
-            // `time` already types whole minutes as `i16`; ISO 20022 bounds an
-            // `xs:dateTime` offset at ±14:00, and beyond that there is no
-            // spelling to write — so re-express the same instant at UTC rather
-            // than emit an offset no schema accepts.
+            // XSD offsets use whole minutes within ±14:00. Truncating offset
+            // seconds would change the instant; use UTC when it cannot fit.
             let minutes = t.offset().whole_minutes();
-            if minutes.abs() <= 14 * 60 {
+            if t.offset().whole_seconds() % 60 == 0 && minutes.abs() <= 14 * 60 {
                 out.offset_minutes = Some(minutes);
                 Ok(out)
             } else {
+                let days = t.unix_timestamp().div_euclid(86_400);
+                let date = IsoDate::from_epoch_days(days)?;
                 let utc = t.to_offset(time::UtcOffset::UTC);
-                let date = IsoDate::try_from(utc.date())?;
                 Ok(Self::from(date)
                     .with_time(utc.hour(), utc.minute(), utc.second())
                     .in_utc())
@@ -1113,17 +1121,29 @@ mod chrono_interop {
 
     impl<Tz: chrono::TimeZone> TryFrom<chrono::DateTime<Tz>> for IsoDateTime {
         type Error = DateError;
-        /// Keeps the offset, so the timestamp still names an instant.
+        /// Keeps whole-minute offsets within ±14:00. Other offsets are
+        /// re-expressed at UTC, preserving the whole-second instant.
+        ///
+        /// # Errors
+        ///
+        /// Refuses local dates and required UTC dates outside 0001–9999.
+        /// [`DateError::OutOfRange`] reports a local day that cannot be
+        /// represented by chrono's checked offset arithmetic.
         fn try_from(t: chrono::DateTime<Tz>) -> Result<Self, Self::Error> {
             use chrono::Offset as _;
             let fixed = t.offset().fix();
-            let naive = t.naive_local();
+            let seconds = fixed.local_minus_utc();
+            let naive = t
+                .naive_utc()
+                .checked_add_offset(fixed)
+                .ok_or(DateError::OutOfRange {
+                    days: (t.timestamp() + i64::from(seconds)).div_euclid(86_400),
+                })?;
             let mut out = Self::try_from(naive)?;
-            // ISO 20022 bounds `xs:dateTime` offsets at ±14:00; a zone outside
-            // that has no spelling, so fall back to UTC rather than write one.
-            out.offset_minutes = i16::try_from(fixed.local_minus_utc() / 60)
+            // XSD offsets use whole minutes within ±14:00; otherwise use UTC.
+            out.offset_minutes = i16::try_from(seconds / 60)
                 .ok()
-                .filter(|m| m.abs() <= 14 * 60);
+                .filter(|minutes| seconds % 60 == 0 && minutes.abs() <= 14 * 60);
             if out.offset_minutes.is_none() {
                 out = Self::try_from(t.naive_utc())?.in_utc();
             }
@@ -1157,6 +1177,26 @@ mod chrono_interop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_dates_enforce_the_same_year_range_as_parsing() {
+        for year in 0..=u16::MAX {
+            let date = IsoDate::new(year, 1, 1);
+            if (1..=9999).contains(&year) {
+                let date = date.unwrap();
+                assert!((IsoDate::MIN..=IsoDate::MAX).contains(&date));
+                assert_eq!(IsoDate::parse(&date.to_string()), Ok(date));
+                assert_eq!(IsoDate::from_epoch_days(date.epoch_days()), Ok(date));
+            } else {
+                assert_eq!(
+                    date,
+                    Err(DateError::YearOutOfRange {
+                        year: i64::from(year)
+                    })
+                );
+            }
+        }
+    }
 
     #[cfg(feature = "time")]
     #[test]
@@ -1203,6 +1243,160 @@ mod tests {
             IsoDateTime::try_from(utc).unwrap().to_string(),
             "2026-07-20T13:00:00Z"
         );
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn time_subminute_offsets_preserve_the_instant_by_rendering_at_utc() {
+        let local =
+            time::PrimitiveDateTime::try_from(IsoDateTime::parse("2026-01-01T00:00:00").unwrap())
+                .unwrap();
+        for seconds in [
+            -50_460, -50_401, -50_400, -3631, -1, 0, 1, 3631, 50_400, 50_401, 50_460,
+        ] {
+            let external =
+                local.assume_offset(time::UtcOffset::from_whole_seconds(seconds).unwrap());
+            let converted = IsoDateTime::try_from(external).unwrap();
+            assert_eq!(
+                converted.unix_seconds(),
+                Some(external.unix_timestamp()),
+                "offset seconds {seconds}"
+            );
+            let expected = if seconds % 60 == 0 && seconds.abs() <= 50_400 {
+                i16::try_from(seconds / 60).unwrap()
+            } else {
+                0
+            };
+            assert_eq!(converted.offset_minutes(), Some(expected));
+            assert_eq!(IsoDateTime::parse(&converted.to_string()), Ok(converted));
+            assert_eq!(
+                time::OffsetDateTime::try_from(converted)
+                    .unwrap()
+                    .unix_timestamp(),
+                external.unix_timestamp()
+            );
+        }
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn chrono_subminute_offsets_preserve_the_instant_by_rendering_at_utc() {
+        let local =
+            chrono::NaiveDateTime::try_from(IsoDateTime::parse("2026-01-01T00:00:00").unwrap())
+                .unwrap();
+        for seconds in [
+            -50_460, -50_401, -50_400, -3631, -1, 0, 1, 3631, 50_400, 50_401, 50_460,
+        ] {
+            let external = local
+                .and_local_timezone(chrono::FixedOffset::east_opt(seconds).unwrap())
+                .single()
+                .unwrap();
+            let converted = IsoDateTime::try_from(external).unwrap();
+            assert_eq!(
+                converted.unix_seconds(),
+                Some(external.timestamp()),
+                "offset seconds {seconds}"
+            );
+            let expected = if seconds % 60 == 0 && seconds.abs() <= 50_400 {
+                i16::try_from(seconds / 60).unwrap()
+            } else {
+                0
+            };
+            assert_eq!(converted.offset_minutes(), Some(expected));
+            assert_eq!(IsoDateTime::parse(&converted.to_string()), Ok(converted));
+            assert_eq!(
+                chrono::DateTime::<chrono::FixedOffset>::try_from(converted)
+                    .unwrap()
+                    .timestamp(),
+                external.timestamp()
+            );
+        }
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn time_offset_fallback_refuses_out_of_range_utc_without_panicking() {
+        for (raw, offsets) in [
+            ("0001-01-01T00:00:00", [1, 50_401, 50_460, 50_400]),
+            ("9999-12-31T23:59:59", [-1, -50_401, -50_460, -50_400]),
+        ] {
+            let local =
+                time::PrimitiveDateTime::try_from(IsoDateTime::parse(raw).unwrap()).unwrap();
+            for seconds in offsets {
+                let external =
+                    local.assume_offset(time::UtcOffset::from_whole_seconds(seconds).unwrap());
+                let converted = IsoDateTime::try_from(external);
+                if seconds.abs() == 50_400 {
+                    let converted = converted.unwrap();
+                    assert_eq!(converted.unix_seconds(), Some(external.unix_timestamp()));
+                    assert_eq!(
+                        converted.offset_minutes(),
+                        Some(i16::try_from(seconds / 60).unwrap())
+                    );
+                    assert_eq!(IsoDateTime::parse(&converted.to_string()), Ok(converted));
+                } else {
+                    assert_eq!(
+                        converted,
+                        Err(DateError::OutOfRange {
+                            days: external.unix_timestamp().div_euclid(86_400)
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn chrono_offset_fallback_refuses_out_of_range_utc_without_panicking() {
+        for (raw, offsets, year) in [
+            ("0001-01-01T00:00:00", [1, 50_401, 50_460, 50_400], 0),
+            (
+                "9999-12-31T23:59:59",
+                [-1, -50_401, -50_460, -50_400],
+                10_000,
+            ),
+        ] {
+            let local = chrono::NaiveDateTime::try_from(IsoDateTime::parse(raw).unwrap()).unwrap();
+            for seconds in offsets {
+                let external = local
+                    .and_local_timezone(chrono::FixedOffset::east_opt(seconds).unwrap())
+                    .single()
+                    .unwrap();
+                let converted = IsoDateTime::try_from(external);
+                if seconds.abs() == 50_400 {
+                    let converted = converted.unwrap();
+                    assert_eq!(converted.unix_seconds(), Some(external.timestamp()));
+                    assert_eq!(
+                        converted.offset_minutes(),
+                        Some(i16::try_from(seconds / 60).unwrap())
+                    );
+                    assert_eq!(IsoDateTime::parse(&converted.to_string()), Ok(converted));
+                } else {
+                    assert_eq!(converted, Err(DateError::YearOutOfRange { year }));
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn chrono_calendar_endpoint_offsets_return_errors_without_panicking() {
+        for (utc, seconds) in [
+            (chrono::NaiveDateTime::MIN, -1),
+            (chrono::NaiveDateTime::MAX, 1),
+        ] {
+            let external = chrono::DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
+                utc,
+                chrono::FixedOffset::east_opt(seconds).unwrap(),
+            );
+            assert_eq!(
+                IsoDateTime::try_from(external),
+                Err(DateError::OutOfRange {
+                    days: (external.timestamp() + i64::from(seconds)).div_euclid(86_400)
+                })
+            );
+        }
     }
 
     #[test]
@@ -1530,6 +1724,28 @@ mod tests {
         let t: time::Date = d.try_into().unwrap();
         assert_eq!(t.year(), 2026);
         assert_eq!(IsoDate::try_from(t).unwrap(), d);
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn chrono_conversions_cannot_bypass_the_supported_year_range() {
+        for year in [-1, 0, 10_000, 65_535, 65_536] {
+            let date = chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+            let expected = DateError::YearOutOfRange {
+                year: i64::from(year),
+            };
+            assert_eq!(IsoDate::try_from(date), Err(expected.clone()));
+            assert_eq!(
+                IsoDateTime::try_from(date.and_hms_opt(0, 0, 0).unwrap()),
+                Err(expected)
+            );
+        }
+        for date in [IsoDate::MIN, IsoDate::MAX] {
+            let external = chrono::NaiveDate::try_from(date).unwrap();
+            assert_eq!(IsoDate::try_from(external), Ok(date));
+            let timestamp = IsoDateTime::try_from(external.and_hms_opt(0, 0, 0).unwrap()).unwrap();
+            assert_eq!(timestamp.date(), date);
+        }
     }
 
     #[cfg(feature = "chrono")]

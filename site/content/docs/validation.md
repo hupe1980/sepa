@@ -4,15 +4,16 @@ description = "The EPC rules that decide whether a bank accepts a SEPA file — 
 weight = 10
 +++
 
-Schema validation is necessary and not sufficient. All of the following pass
-the published ISO schemas and are rejected on ingestion:
+Schema validity does not establish scheme or bank acceptance. Generic ISO types
+can admit values outside the selected builder's policy, for example:
 
 - `<InstdAmt Ccy="EUR">0</InstdAmt>` — the generic type allows zero and five decimals
 - a 140-character name — the EPC limit is 70
 - `<BICFI>NOTPROVIDED</BICFI>` — the literal happens to satisfy the BIC pattern
 - a direct debit with no Creditor Identifier
 
-`build()` enforces the rules that actually decide acceptance.
+`build()` and `write_to()` enforce the library's selected constraints; successful
+output does not certify bank acceptance.
 
 | Field | Rule |
 |---|---|
@@ -28,6 +29,14 @@ the published ISO schemas and are rejected on ingestion:
 | `ReqdExctnDt/DtTm` | only with `LclInstrm = INST`, and only with a UTC offset |
 | Ultimate party | at group level or transaction level, never both |
 
+Serde restoration of mutable payment inputs does not certify them for output.
+Incomplete `Party` values are refused at use. For `Purpose::Other` and
+`CategoryPurpose::Other`, builders validate the exact emitted value: 1–4 uppercase
+ASCII letters/digits, without padding. Direct/restored lowercase or padded codes
+are refused, not rewritten. String parsing intentionally trims/uppercases when
+that conversion is desired. Well-shaped unknown codes remain supported; this is
+a representation policy, not current ISO code-list membership certification.
+
 Two of those are worth calling out because they are easy to get wrong and
 impossible for a schema to catch.
 
@@ -36,6 +45,19 @@ Transliteration can lengthen a string — `Müller` becomes `Mueller` — so a
 140-character German remittance line can cross the limit on its way out. The
 check runs after conversion and rejects; nothing is ever silently truncated,
 because the tail of a remittance line is where the invoice number sits.
+
+Bounds count the complete emitted text, including leading/trailing whitespace.
+The pinned `Max35Text` and `Max70Text` types derive from whitespace-preserving
+`xs:string`; a trimmed length is not the length written to XML. Blank-only refusal
+and identifier slash rules are explicit library policies, not universal XSD rules.
+
+Shared text validation rejects XML 1.0-forbidden characters with the located
+`ValidationError::InvalidXmlCharacter`. Ordinary text is checked after the selected
+transliteration policy; strict mode refuses unsupported SEPA characters, and
+identifiers are never transliterated. The XML escaper independently quotes markup
+and encodes carriage returns as `&#13;` wherever raw text reaches it. This is a
+syntax safeguard, not a new UTF-8 passthrough mode. Invalid builders leave an
+existing `write_to()` sink untouched; later I/O failure is not transactional.
 
 **`PmtInfId` must be unique within a message.** It is the key a bank echoes back
 in the `pain.002` and in the `NtryDtls/Btch` block of a camt statement, so two
@@ -81,6 +103,17 @@ Dates are absent from the rule table on purpose. An `IsoDate` is validated
 where it is constructed, so an impossible collection date never reaches a
 batch — there is nothing for `build()` to catch.
 
+The supported year range is **0001–9999**, including component construction,
+parsing, serde restoration and optional `time`/`chrono` conversions. Wider years
+are allowed by XSD, but are outside this library's representation. This is not
+a bank-acceptance guarantee. Timestamp conversions retain exact whole-minute
+offsets within ±14:00; offsets containing seconds or outside that bound are
+re-expressed at UTC without changing the whole-second instant. UTC conversion
+must also remain within the supported date range. An unrepresentable local date
+or required UTC date returns a typed date error rather than panicking or clamping.
+Exact whole-minute offsets within ±14:00 do not require UTC conversion: valid
+local endpoint dates remain accepted even if their UTC date is outside 0001–9999.
+
 ## Nothing is silently truncated
 
 A remittance line of exactly 140 German characters is 141 once the umlauts are
@@ -123,10 +156,9 @@ fn main() {
 Use it to pre-check your own data with the same numbers the builders apply,
 rather than copying them into your code where they can drift.
 
-The table is also what the test suite walks a generated document against: every
-element that carries text must either be in it or be on an explicit list of
-values bounded by their own type. An element added to a writer without a bound
-fails the build.
+Tests walk populated generated fixtures against this table and an explicit list
+of values bounded by their types. Keep those fixtures populated when adding a
+writer field; this is not proof for every possible document.
 
 ## The `Strd` block counts its own markup
 
@@ -155,8 +187,8 @@ fn main() {
 
 ## The character set
 
-SEPA messages may only carry a 73-character subset of Latin text. Anything else
-must be converted before sending, or the bank rejects the file.
+Writers use the 73-character SEPA Basic Latin set. The default policy converts
+unsupported text; strict mode refuses it. Bank acceptance remains separate.
 
 ```text
 a–z  A–Z  0–9  / - ? : ( ) . , ' +  and space
@@ -209,22 +241,17 @@ that nothing is silently changed.
 > `MND-Straße` to `MND-Strasse` would break your own reconciliation. Out-of-set
 > characters in an identifier are a hard error.
 
-## Reading is validated too, in the other direction
+## Reader Boundaries
 
-Everything above is about the write path: what this crate refuses to *emit*.
-The read path has the opposite obligation, and it is easy to get backwards.
+Readers support the namespaces, finite intake limits and retained fields in
+[reader contracts](@/docs/reader-contracts.md), not every lawful bank document
+or complete inbound XSD validation. Raw observations remain available when
+their typed value is unusable. Dates support optional timezones; money supports
+a leading `+` but refuses significant precision below a hundredth.
+`IsoDateTime` represents whole seconds, not fractional-second precision.
 
-A statement parser has two obligations, and neither is visible to a schema:
-accept **everything a bank may legally send**, and report **nothing the file did
-not carry**.
-
-The first is easy to get wrong invisibly — a refusal produces no document, so
-nothing catches it. `xs:date` carries an optional timezone, `xs:decimal` an
-optional leading `+`, `xs:dateTime` fractional seconds; all are schema-valid and
-all are accepted here.
-
-The second costs money. An unreadable `<CdtDbtInd>` is **not** a credit: money
-has a magnitude *and* a direction, and losing either means there is no figure.
+An unreadable `<CdtDbtInd>` is not a credit. Signing requires a usable magnitude,
+currency and direction:
 
 ```rust,no_run
 use sepa::parse_camt053;

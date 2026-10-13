@@ -11,11 +11,12 @@ works across all of them.
 | Message | Content | When |
 |---|---|---|
 | `camt.052` | Intraday report, **provisional** | During the day |
-| `camt.053` | End-of-day statement, booked and final | Overnight |
+| `camt.053` | Account statement; inspect each reported entry status | Commonly overnight |
 | `camt.054` | Notification of specific debits and credits | As events happen |
 
-Every ISO version from `.001.02` to `.001.13` is accepted, including the `.07`
-reshaping of `Ntry/Sts` into a code choice and of parties into a `Pty` wrapper.
+Accepted versions are camt.052/camt.053 001.02, 001.06 and 001.08, and camt.054
+001.08. Resolved identity is not full XSD validation. See
+[reader contracts](@/docs/reader-contracts.md) for finite limits and evidence boundaries.
 
 ## Reading a statement
 
@@ -48,19 +49,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Amounts are always positive in the file with a separate credit/debit indicator.
-`signed_ct()` gives the ledger amount: credit positive, debit negative.
+Amounts are reported as magnitudes with a separate credit/debit indicator.
+`signed_ct()` returns signed hundredths only when magnitude, currency, direction
+and raw/typed observations are usable and consistent. Negative magnitudes,
+unrepresentable amounts and missing or unknown currency/direction return `None`.
+Hundredths are not an ISO currency minor-unit policy.
 
-**It returns `Option`, and the `None` is load-bearing.** A statement can fail to
-give you a ledger figure two ways: an `Amt` this crate cannot represent — more
-than two significant decimals, or a magnitude past `i64` ct — or a `CdtDbtInd`
-that is absent or unrecognised. Neither is defaulted, because an unknown
-direction taken for a credit turns a EUR 1,000 debit into a EUR 1,000 credit.
-
-The entry is reported either way. `entry.amount` holds exactly what the bank
-sent, so you can log what you could not read, and **a booking is never dropped**
-for being unreadable — a missing booking looks identical to one that never
-happened.
+Supported entries retain decoded monetary text and observed currency/direction,
+including unreadable values. Protect payment data when escalating unresolved rows.
 
 `reference()` is the remittance information — the *Verwendungszweck*. ISO makes
 `RmtInf/Ustrd` repeatable, and German banks routinely split a long reference
@@ -101,8 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  {:?} {:?}", detail.end_to_end_id, detail.signed_ct());
             }
 
-            // False means the statement's parts do not add up to its whole.
-            // Escalate rather than post.
+            // Unresolved or inconsistent parts cannot be reconciled.
             if !entry.details_reconcile() {
                 eprintln!("batch does not reconcile — do not post");
             }
@@ -179,10 +174,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `ChrgInclInd` is optional, and "the bank did not say" is a third answer rather
 than a default. `included_in_amount` is therefore an `Option<bool>`, and
 `all_included_in_amount()` is `false` unless **every** record says so
-explicitly — so a caller that adds charges only when it is false cannot
-double-count against a bank that omits the flag. A charge with no `CdtDbtInd` is
-read as a debit: that is what a fee is, and it is the direction that cannot
-inflate a balance if the assumption is wrong.
+explicitly. **False does not authorize posting:** inspect each record's inclusion;
+`None` is unresolved. Missing direction is not assumed debit. Invalid aggregate
+totals survive as raw text; absent records, mixed currencies and conflicting totals
+cannot produce a trusted sum.
 
 ISO reshaped this block across versions — up to `.001.02` the charge sits
 directly under `Chrgs`, and from `.001.04` it moved into `Rcrd` blocks. Both are
@@ -210,8 +205,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Nothing is discarded because it did not fit the expected shape, so a
-non-conforming file stays readable rather than being rejected wholesale.
+Supported date observations remain available when typed conversion fails.
+XML, identity and limit violations still reject the input.
 
 ## Free text
 

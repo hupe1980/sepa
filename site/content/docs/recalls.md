@@ -17,9 +17,9 @@ interchangeable:
 | Give back a direct debit that settled | [`pain.007`](@/docs/reversals.md) | an **instruction** — the money moves |
 | Learn a payment came back | [`camt.054`](@/docs/bank-statements.md) | a **report** — after the fact |
 
-The distinction decides what you can still do. Once a payment settles, a recall
-is refused with `ARDT` and a reversal is the only route left — and a reversal
-exists only for direct debits. Asking for the wrong one spends the window.
+Cancellation availability depends on the payment's processing state and bank.
+`ARDT` reports that the transaction was already returned; it does not mean
+merely settled or authorize another reversal. Reconcile the existing return.
 
 Only `camt.055.001.05` and `camt.029.001.06` are named by the DFÜ-Abkommen, so
 unlike the payment messages there is no version to choose.
@@ -223,9 +223,8 @@ if !answer.is_final() {
     // Stopped.
 } else {
     for reason in answer.rejection_reasons() {
-        if reason.is_too_late() {
-            // ARDT — it settled. A pain.007 reversal is the remaining route,
-            // and only for a direct debit.
+        if reason.is_already_returned() {
+          println!("bank reports an existing return; reconcile before further action");
         }
     }
 }
@@ -273,16 +272,16 @@ assert_eq!(answer.rejection_reasons(), [&RejectionReason::Ardt]);
 
 | Code | Means | What is left |
 |---|---|---|
-| `ARDT` | Already settled and returned | A [`pain.007`](@/docs/reversals.md) reversal, for a direct debit |
+| `ARDT` | Transaction already returned | Reconcile the existing return; do not infer another reversal |
 | `AC04` | The account is closed | Nothing through the schemes |
 | `AM04` | Insufficient funds to return | Nothing through the schemes |
 | `CUST` | The beneficiary refused | Nothing through the schemes |
-| `NOAS` | No answer from the beneficiary | Ask again, or write off |
+| `NOAS` | No answer from the beneficiary | Follow up with the bank; no posting decision is implied |
 | `NOOR` | The bank cannot find the original | Check the `MsgId` and `PmtInfId` you sent |
 | `LEGL` · `AGNT` | Refused for legal reasons, or by an agent | Nothing through the schemes |
 
-`is_too_late()` is the one worth branching on: it separates "we could not" from
-"we would not", and only the first leaves a route open.
+`is_already_returned()` identifies `ARDT`. Other reasons describe the refusal,
+not a complete account of the available banking or legal remedies.
 
 ## What is checked before anything is written
 
@@ -293,6 +292,8 @@ assert_eq!(answer.rejection_reasons(), [&RejectionReason::Ardt]);
 | A group names a whole-group cancellation **or** transactions | Same argument, one level down |
 | `OrgnlPmtInfId` is unique across groups | Two blocks naming one submitted group leave the bank to guess |
 | `AddtlInf` ≤ 105 characters | `Max105Text` — the only such limit in the crate |
+| Original transaction count ≤ 15 digits | The pinned original-group count bound; zero remains accepted |
+| Original control sum ≤ 18 decimal digits | Schema precision in hundredths; signed and representable trailing-zero values remain accepted |
 | The assignee BIC fits the schema's pattern | camt.055 names its type `BICFI` but keeps the **pre-2019** pattern |
 
 That last one is worth knowing about: `camt.055.001.05` uses the element name

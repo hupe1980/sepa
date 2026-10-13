@@ -132,8 +132,8 @@ Four things to know:
 - **`pain.001.001.09` only.** `EOLO` on an older schema is a
   `ValidationError::UnsupportedBySchema`.
 
-Amounts stay integer minor units — the guidelines cap the fraction at two
-digits for every currency. Ultimate parties, purpose codes and structured
+Amounts use integer hundredths, not a general currency minor-unit scale; the
+supported profile caps fractions at two digits. Ultimate parties, purpose codes and structured
 references work unchanged; a transfer back carries `Purp` = `RRCT`, and one
 answering a Request-to-Pay `RRTP`.
 
@@ -207,9 +207,8 @@ assert_eq!(
 
 ## Structured references
 
-Free text is readable by humans and useless to machines. An ISO 11649 RF
-reference is self-checking and round-trips back to you on the statement, which
-is what makes automatic reconciliation possible.
+An ISO 11649 RF reference has check digits and can support automatic invoice
+matching when the bank returns it in the statement.
 
 ```rust
 use sepa::{CreditTransferEntry, RfReference, validate_iban};
@@ -257,6 +256,6 @@ both — the German DFÜ-Abkommen forbids it, and `build()` enforces it.
 
 ## See also
 
-- [Postal addresses](/docs/addresses/) — structured and hybrid, and the migration date that moved
+- [Postal addresses](/docs/addresses/) — supported structured and hybrid forms
 - [Status reports](/docs/status-reports/) — what the bank sends back
 - [Schema versions](/docs/schema-versions/) — targeting a specific bank

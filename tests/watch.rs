@@ -1,27 +1,11 @@
-//! The watch list, as a gate rather than as a note.
+//! Maintainer source-review, consumer-pin and vendored-integrity controls.
 //!
-//! Every other check here measures the crate against an artefact **inside**
-//! the repository, which cannot notice that its publisher issued a newer one
-//! — or that a regulator withdrew a deadline the crate's prose asserts. Two
-//! defects have reached a release through that gap with the whole suite green.
+//! [`WATCH`] records publication identities and review dates; [`CONSUMERS`]
+//! records downstream version pins. Freshness is not proof that a review was
+//! complete or that no newer publication exists.
 //!
-//! [`WATCH`] pins, per external source, the artefact in force and the date
-//! somebody last read it. When `last_verified + review_every` falls behind
-//! today the gate fails, naming the source, what to look for and the files a
-//! change would reach. [`CONSUMERS`] does the same for the downstream
-//! workspaces' pinned versions, checked against their manifests where present.
-//!
-//! The table is a Rust `const` rather than a parsed data file, so its shape is
-//! checked by the compiler and no parser stands between the record and the
-//! gate.
-//!
-//! ## Why the overdue check is `#[ignore]`d
-//!
-//! An overdue *reading* means a human must open a website — a different signal
-//! from a broken build, and not a reason to fail an unrelated pull request.
-//! It runs as `just watch` and as a CI job of its own. The file is excluded
-//! from the published package for the same reason: a consumer must not inherit
-//! a maintainer's review calendar.
+//! Time-dependent overdue checks run through `just watch` and the existing CI
+//! watch job. This file is excluded from the consumer package.
 
 #![allow(
     clippy::unwrap_used,
@@ -31,6 +15,72 @@
 )]
 
 use sepa::IsoDate;
+
+#[test]
+#[cfg(unix)]
+fn vendored_integrity_refuses_changed_missing_and_unrecorded_bytes() {
+    #[derive(Debug)]
+    struct TemporaryCopy(std::path::PathBuf);
+    impl Drop for TemporaryCopy {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temporary = TemporaryCopy(
+        std::env::temp_dir().join(format!("sepa-integrity-{}-{nonce}", std::process::id())),
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schemas = temporary.0.join("tests/xsd");
+    let scripts = temporary.0.join("scripts");
+    std::fs::create_dir_all(&schemas).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+    for entry in std::fs::read_dir(root.join("tests/xsd")).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "xsd")
+            || entry.file_name() == "README.md"
+        {
+            std::fs::copy(entry.path(), schemas.join(entry.file_name())).unwrap();
+        }
+    }
+    let script = scripts.join("check-vendored-data.sh");
+    std::fs::copy(root.join("scripts/check-vendored-data.sh"), &script).unwrap();
+    let run = || {
+        std::process::Command::new("bash")
+            .arg(&script)
+            .output()
+            .unwrap()
+    };
+    let good = run();
+    assert!(
+        good.status.success(),
+        "{}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    let target = schemas.join("pain.001.001.09.xsd");
+    let original = std::fs::read(&target).unwrap();
+    let mut changed = original.clone();
+    changed.extend_from_slice(b"\n");
+    std::fs::write(&target, changed).unwrap();
+    let altered = run();
+    assert!(!altered.status.success());
+    assert!(String::from_utf8_lossy(&altered.stderr).contains("MISMATCH pain.001.001.09.xsd"));
+    std::fs::remove_file(&target).unwrap();
+    let missing = run();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("MISSING  pain.001.001.09.xsd"));
+    std::fs::write(&target, original).unwrap();
+    std::fs::write(schemas.join("pain.999.001.01.xsd"), b"unreviewed bytes").unwrap();
+    let unrecorded = run();
+    assert!(!unrecorded.status.success());
+    assert!(String::from_utf8_lossy(&unrecorded.stderr).contains("UNRECORDED pain.999.001.01.xsd"));
+}
 
 /// One external publication this crate's correctness depends on.
 #[derive(Debug)]
@@ -71,28 +121,28 @@ const WATCH: &[Source] = &[
     },
     Source {
         id: "epc-address-end-date",
-        watch_for: "EPC153-22 v2.2 carrying a new unstructured-address end-date",
+        watch_for: "EPC153-22 revisions or an explicitly published replacement address end-date",
         url: "https://www.europeanpaymentscouncil.eu/document-library/guidance-documents",
-        pinned: "v2.1 (Oct 2025); no end-date in force",
-        last_verified: "2026-09-17",
+        pinned: "EPC153-22 v2.2, 30 Sep 2026; withdrawn end-date has no replacement",
+        last_verified: "2026-10-12",
         review_every_days: 30,
         reaches: &["src/address.rs", "site/content/docs/addresses.md"],
     },
     Source {
         id: "epc-2027-rulebooks",
-        watch_for: "the November 2026 publication — CR 4 (name 70→140), 17, 18, 22, 24, 36",
+        watch_for: "2028 rulebooks expected Q2 2027; future name limits require applicable C2PSP guidance",
         url: "https://www.europeanpaymentscouncil.eu/document-library/rulebooks",
-        pinned: "2025 rulebooks v1.1, in force since 5 Oct 2025",
-        last_verified: "2026-09-17",
+        pinned: "2025 SCT rulebook v1.2, 30 Sep 2026; current C2PSP names remain 70 characters",
+        last_verified: "2026-10-12",
         review_every_days: 30,
         reaches: &["src/validate.rs", "src/party.rs", "src/pain002.rs"],
     },
     Source {
         id: "epc-cr6-iso-migration",
-        watch_for: "whether the 2029 rulebooks migrate to a newer ISO 20022 version, and to which",
+        watch_for: "2030 ISO migration; technical guidance expected Q2 2029 and target ISO edition selection",
         url: "https://www.europeanpaymentscouncil.eu/what-we-do/epc-payment-scheme-management/evolution-schemes",
-        pinned: "recommended for Nov 2029, likely the 2027 ISO version; EPC decision due Sep 2026, none published",
-        last_verified: "2026-09-17",
+        pinned: "EPC 2030 migration planning; target ISO edition not fixed by the reviewed evidence",
+        last_verified: "2026-10-12",
         review_every_days: 30,
         reaches: &[
             "src/pain001.rs",
@@ -111,7 +161,7 @@ const WATCH: &[Source] = &[
     },
     Source {
         id: "epc-vop",
-        watch_for: "VoP v2.0 (EPC084-26), especially a customer-to-PSP pain.001/pain.002 pair",
+        watch_for: "EPC VoP inter-PSP revisions; DK pain-code authority is a separate C2PSP profile",
         url: "https://www.europeanpaymentscouncil.eu/what-we-do/epc-payment-schemes/verification-payee",
         pinned: "EPC218-23 v1.1, effective 20 Sep 2026; AT-R001 carries four outcomes",
         last_verified: "2026-09-17",

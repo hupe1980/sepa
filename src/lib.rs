@@ -6,7 +6,7 @@
 //! - **BIC validation** ([`bic`]) — ISO 9362:2022, including the country code
 //! - **Creditor Identifier validation** ([`creditor_id`]) — EPC AT-02
 //! - **Postal addresses** ([`address`]) — structured and hybrid `PstlAdr`
-//! - **pain.001 builder** ([`pain001`]) — SEPA Credit Transfer + SCT Instant
+//! - **pain.001 builder** ([`pain001`]) — SCT, SCT Instant and OCT Inst
 //! - **pain.008 builder** ([`pain008`]) — SEPA Direct Debit (CORE + B2B)
 //! - **pain.007 builder** ([`pain007`]) — SEPA Direct Debit reversal
 //! - **pain.002 parser** ([`pain002`]) — Payment Status Report, incl. Verification of Payee
@@ -20,8 +20,9 @@
 //! - **Typed dates** ([`date`]) — [`IsoDate`] / [`IsoDateTime`] for every date field
 //! - **Integer-safe money utilities** ([`ct_to_eur_str`], [`ct_from_eur_str`])
 //!
-//! All monetary amounts use `i64` cents (1 ct = 0.01 EUR) — **never `f64`**.
-//! Every date is an [`IsoDate`] — never a hand-formatted string.
+//! Monetary values use integer hundredths, never `f64` or an inferred minor-unit
+//! scale. Builder dates use [`IsoDate`] / [`IsoDateTime`]; readers also retain
+//! decoded raw observations.
 //!
 //! **Dependencies:** [`thiserror`](https://crates.io/crates/thiserror) and
 //! [`quick-xml`](https://crates.io/crates/quick-xml) (required);
@@ -53,22 +54,14 @@
 //! # Ok::<(), sepa::UnknownSchema>(())
 //! ```
 //!
-//! Every generated document is validated against the real ISO 20022 schema in
-//! CI, one test per version.
+//! CI validates generated fixtures against pinned ISO XSDs for each emitted
+//! schema version. Builders do not run an XSD validator for each output.
 //!
 //! ### These are deliberately not ISO's newest versions
 //!
-//! ISO advises using the most recent message definition available, and has
-//! published `pain.001.001.13`, `pain.008.001.12` and `pain.002.001.15`. That
-//! advice is aimed at communities free to choose their own version; a SEPA
-//! participant is not one, because the version is fixed by the scheme rulebook.
-//! Sending `pain.001.001.13` to a SEPA bank gets it rejected. The versions
-//! above are the ones the EPC rulebooks have mandated since 19 November 2023,
-//! The EPC's address migration is often mistaken for a message-version change
-//! and is not one: it is about structured *addresses*, and the versions above
-//! stay. A migration to a newer ISO 20022 version **is** now proposed, for
-//! November 2029; it is a recommendation under consultation, not a rule, and it
-//! does not change what to send today.
+//! Select the version required by the applicable scheme profile and your bank,
+//! not simply the newest ISO definition. Address requirements are independent
+//! of message-version selection.
 //!
 //! ## Regulatory references
 //!
@@ -78,13 +71,13 @@
 //! | EPC409-09 v8.0 | [`iban`] | SEPA scheme country list |
 //! | ISO 9362 | [`bic`] | BIC/SWIFT validation |
 //! | ISO 3166-1 alpha-2 | [`country`] | Country codes for BICs and addresses |
-//! | EPC153-22 v2.1 | [`address`] | Structured and hybrid addresses |
+//! | EPC153-22 v2.2 | [`address`] | Structured and hybrid addresses |
 //! | EPC262-08 | [`creditor_id`] | Creditor Identifier check digits |
 //! | ISO 20022 pain.001 | [`pain001`] | SEPA Credit Transfer (SCT + SCT Inst) |
 //! | ISO 20022 pain.008 | [`pain008`] | SEPA Direct Debit (CORE + B2B) |
 //! | ISO 20022 pain.007 | [`pain007`] | SEPA Direct Debit reversal |
 //! | ISO 20022 pain.002 | [`pain002`] | Payment Status Report |
-//! | EPC103-24 | [`pain002`] | Verification of Payee outcomes |
+//! | DK Anlage 3 V3.9 | [`pain002`] | DK-profile Verification of Payee outcomes |
 //! | ISO 20022 camt.052 | [`camt052`] | Bank-to-Customer Report (intraday) |
 //! | ISO 20022 camt.053 | [`camt053`] | Bank-to-Customer Statement |
 //! | ISO 20022 camt.054 | [`camt054`] | Payment notifications |
@@ -164,9 +157,10 @@
 //! Two classes of mistake are absent from that list because they cannot fail
 //! there — they are unrepresentable rather than caught late. [`IsoDate`]
 //! validates at construction, so an impossible `ReqdColltnDt` never reaches a
-//! batch; and [`PostalAddress`] requires a town and a country, so the
-//! free-text-only address form the EPC schemes are retiring is not a value this
-//! crate can be asked to emit.
+//! batch; and [`PostalAddress`] requires a town and a country for this library's
+//! structured/hybrid address scope. Other address fields are checked at use.
+//! This representation limit is not a claim that schemes universally refuse
+//! unstructured addresses.
 //!
 //! ## Nothing that matters is defaulted from a clock
 //!
@@ -225,8 +219,8 @@
 //! the `PmtInfId` of the group you submitted, which is what matches a booking
 //! back to your own file.
 //!
-//! Bank input is kept verbatim and typed alongside, never in place of, the raw
-//! value: [`CashEntry::booking_date`] returns an [`IsoDate`] and
+//! Decoded observations are retained alongside typed interpretations:
+//! [`CashEntry::booking_date`] returns an [`IsoDate`] and
 //! `booking_date_raw` the text that arrived, so a non-conforming file is
 //! readable rather than rejected.
 //!
@@ -329,13 +323,17 @@ pub use camt::{
 pub use camt029::{
     Camt029Document, Camt029ParseError, CancellationCount, CancellationStatus,
     GroupCancellationStatus, PaymentInfoCancellationStatus, RejectionReason, ResolutionOutcome,
-    TransactionCancellationStatus, parse_camt029,
+    TransactionCancellationStatus, parse_camt029, parse_camt029_with_limits,
 };
-pub use camt052::{Camt052Document, Camt052ParseError, Camt052Report, parse_camt052};
-pub use camt053::{Camt053Document, Camt053ParseError, Camt053Statement, parse_camt053};
+pub use camt052::{
+    Camt052Document, Camt052ParseError, Camt052Report, parse_camt052, parse_camt052_with_limits,
+};
+pub use camt053::{
+    Camt053Document, Camt053ParseError, Camt053Statement, parse_camt053, parse_camt053_with_limits,
+};
 pub use camt054::{
     Camt054Document, Camt054Notification, Camt054ParseError, CreditDebitIndicator,
-    UnknownIndicator, parse_camt054,
+    UnknownIndicator, parse_camt054, parse_camt054_with_limits,
 };
 pub use camt055::{
     Camt055Builder, CancellationEntry, CancellationGroup, CancellationReason, CaseParty,
@@ -361,6 +359,7 @@ pub use pain001::{
 pub use pain002::{
     OriginalMessageType, Pain002Document, Pain002ParseError, PaymentInfoStatus, PaymentStatus,
     ReasonCode, StatusCount, TransactionStatus, VerificationOutcome, parse_pain002,
+    parse_pain002_with_limits,
 };
 pub use pain007::{
     OriginalCollection, Pain007Builder, ReversalEntry, ReversalGroup, ReversalReason,
@@ -375,7 +374,7 @@ pub use reference::{RemittanceInfo, RfReference, RfReferenceError};
 pub use validate::{
     BuildError, CharsetPolicy, Location, UnknownSchema, ValidationError, WriteError,
 };
-pub use xml::XmlError;
+pub use xml::{ParseLimits, XmlError};
 
 /// Format `ct` (1/100 EUR) as `"1234.56"` — pure integer arithmetic, no f64.
 ///
@@ -496,21 +495,15 @@ pub fn ct_from_eur_str(s: &str) -> Result<i64, AmountError> {
     if trimmed.is_empty() {
         return Err(AmountError::Empty);
     }
-    // `xs:decimal` permits an explicit `+`, and banks send it. Rejecting a
-    // legal spelling is the same mistake as `validate_bic`'s six-letter
-    // prefix: it fails on valid input, at the caller, with nothing the caller
-    // can do. What stays rejected is a *repeated* sign.
+    // `xs:decimal` permits one leading sign, including `+`.
     let (negative, magnitude) = match trimmed.split_at_checked(1) {
         Some(("-", rest)) => (true, rest),
         Some(("+", rest)) => (false, rest),
         _ => (false, trimmed),
     };
 
-    // Split on the decimal point first, then require both halves to be bare
-    // ASCII digits. Deferring to `i64::from_str` instead would accept a second
-    // sign in either half: `"--5"` parsed as +5.00 EUR and `"1.-5"` turned
-    // 1.50 EUR into 0.95 EUR. Checking the *whole* fractional part — not just
-    // the two digits that survive truncation — also rejects `"1.50abc"`.
+    // Check both halves completely before parsing; numeric parsing alone
+    // would accept another sign inside the amount.
     let (euro_str, frac_str) = magnitude.split_once('.').unwrap_or((magnitude, ""));
     let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
     if (euro_str.is_empty() && frac_str.is_empty()) || !digits(euro_str) || !digits(frac_str) {
@@ -523,10 +516,7 @@ pub fn ct_from_eur_str(s: &str) -> Result<i64, AmountError> {
         // Every byte is an ASCII digit, so the only way to fail is overflow.
         euro_str.parse().map_err(|_| overflow())?
     };
-    // Anything below one cent has nowhere to go, so it is refused rather than
-    // dropped. Trailing zeros carry no value and are not significant, which is
-    // why `"1.500"` is 150 ct and `"1.999"` is an error. Every byte is an ASCII
-    // digit here, so `get(..2)` and the parses cannot fail on content.
+    // Refuse sub-hundredth precision while allowing insignificant trailing zeros.
     let significant = frac_str.trim_end_matches('0');
     if significant.len() > 2 {
         return Err(AmountError::SubCentPrecision {
@@ -540,12 +530,7 @@ pub fn ct_from_eur_str(s: &str) -> Result<i64, AmountError> {
         _ => significant.parse().map_err(|_| malformed())?,
     };
 
-    // Accumulate directly in the sign the input asked for. Building the
-    // magnitude first and negating it afterwards costs the one value that has
-    // no positive counterpart: `i64::MIN` is -92233720368547758.08 EUR, which
-    // `ct_to_eur_str` happily prints and the parser then rejected as overflow.
-    // A formatter and a parser that disagree about their own range is a bug
-    // waiting for the row that hits it.
+    // Accumulate in the requested sign so i64::MIN remains representable.
     if negative {
         euros
             .checked_mul(-100)

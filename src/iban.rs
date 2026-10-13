@@ -14,12 +14,9 @@
 //!
 //! ## Structure
 //!
-//! The checksum is necessary but not sufficient. It detects an altered
-//! character with probability 96/97 and never says *which* one — so an `O`
-//! typed for a `0` in a German account number gets through about 99% of the
-//! time it is the only error. The registry publishes each country's BBAN
-//! structure (`8!n10!n` for Germany, `4!a10!n` for the Netherlands), and
-//! [`validate_iban`] checks every character against it, naming the position
+//! The checksum does not establish national structure. For registered prefixes,
+//! [`validate_iban`] checks each BBAN character against the recorded pattern
+//! (`8!n10!n` for Germany, `4!a10!n` for the Netherlands), naming the position
 //! that failed. See [`iban_bban_format`] and [`BbanCharClass`].
 //!
 //! ## Examples
@@ -33,7 +30,7 @@
 //! let err = validate_iban("DE89370400440532013001").unwrap_err();
 //! assert!(matches!(err, IbanError::InvalidChecksum { .. }));
 //!
-//! // A capital O typed for a zero — caught by the structure, not the checksum.
+//! // A capital O in a digit-only BBAN position is reported as a structure error.
 //! let err = validate_iban("DE8937O400440532013000").unwrap_err();
 //! assert!(matches!(
 //!     err,
@@ -227,9 +224,8 @@ pub enum IbanError {
 
     /// A BBAN character does not match the country's registered structure.
     ///
-    /// Mod-97 is a checksum, not a format check: it accepts a letter where the
-    /// registry requires a digit roughly 96 times in 97. This catches the rest —
-    /// the `O`-for-`0` and `l`-for-`1` transcription errors that survive it.
+    /// The national structure is checked independently from the checksum,
+    /// so a letter in a digit-only position is reported with its location.
     #[error(
         "IBAN position {position} must be {expected} for country {country}, got {found:?} \
          (registry structure {structure})"
@@ -1079,8 +1075,7 @@ mod tests {
 
     #[test]
     fn a_letter_typed_for_a_digit_is_caught_and_located() {
-        // The classic transcription error mod-97 lets through 96 times in 97:
-        // a capital O for a zero. The German BBAN is 18 digits.
+        // A capital O occupies a digit-only position in the German BBAN.
         let err = validate_iban("DE8937O400440532013000").unwrap_err();
         assert_eq!(
             err,

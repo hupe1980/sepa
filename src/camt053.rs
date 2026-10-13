@@ -128,13 +128,11 @@ impl Camt053Statement {
     /// All-or-nothing on purpose. Skipping the entries that cannot be resolved
     /// produces a total that looks right and is not, which is the failure mode
     /// a net movement exists to rule out; `None` says "ask about this file"
-    /// where a partial sum says nothing at all. Overflow saturates rather than
-    /// panicking, because the input is a third party's file.
+    /// where a partial sum says nothing at all. Overflow or mixed currencies
+    /// return `None`; a saturated or incomparable sum is not a ledger figure.
     #[must_use]
     pub fn net_movement_ct(&self) -> Option<i64> {
-        self.entries
-            .iter()
-            .try_fold(0i64, |acc, e| Some(acc.saturating_add(e.signed_ct()?)))
+        crate::camt::net_movement_ct(&self.entries)
     }
 }
 
@@ -158,6 +156,23 @@ pub struct Camt053Document {
 }
 
 impl Camt053Document {
+    /// Located problems in current financial observations, not XSD validation.
+    /// Indices address retained records; transaction details are flattened.
+    #[must_use]
+    pub fn financial_diagnostics(&self) -> Vec<crate::camt::FinancialDiagnostic> {
+        self.statements
+            .iter()
+            .enumerate()
+            .flat_map(|(index, statement)| {
+                crate::camt::cash_diagnostics(
+                    &format!("Stmt[{index}]"),
+                    &statement.balances,
+                    &statement.entries,
+                )
+            })
+            .collect()
+    }
+
     /// When the bank generated this document, typed.
     ///
     /// `None` when it reported none, or one this crate cannot read;
@@ -192,19 +207,31 @@ pub enum Camt053ParseError {
 
 /// Parse a camt.053 Bank-to-Customer Statement XML string.
 ///
-/// Accepts every ISO version and both the default-namespace and prefixed
-/// document shapes.
+/// Accepts versions 001.02, 001.06 and 001.08, with either default or prefixed
+/// namespaces. Identity checks are not complete schema validation.
 ///
 /// # Errors
 ///
 /// Returns [`Camt053ParseError::NotCamt053`] when the root element is missing,
 /// or [`Camt053ParseError::Xml`] when the input is not well-formed.
 pub fn parse_camt053(xml: &str) -> Result<Camt053Document, Camt053ParseError> {
-    let doc = Document::parse(xml)?;
+    parse_camt053_with_limits(xml, crate::ParseLimits::default())
+}
+
+/// Parse a camt.053 document with explicit finite resource limits.
+///
+/// # Errors
+/// Returns an error for invalid XML, unsupported identity or an exhausted limit.
+pub fn parse_camt053_with_limits(
+    xml: &str,
+    limits: crate::ParseLimits,
+) -> Result<Camt053Document, Camt053ParseError> {
+    let doc = Document::parse_with_limits(xml, limits)?;
     let root = doc
         .root
         .child("BkToCstmrStmt")
         .ok_or(Camt053ParseError::NotCamt053)?;
+    doc.message("camt.053", "BkToCstmrStmt", &["001.02", "001.06", "001.08"])?;
 
     let grp_hdr = root.child("GrpHdr");
     let text = |tag: &str| {
@@ -387,7 +414,7 @@ mod tests {
         assert_eq!(acct.any_id(), Some("DE89370400440532013000"));
 
         // No Acct block at all is empty, not a panic or an invented value.
-        let bare = "<Document><BkToCstmrStmt><Stmt><Id>S</Id></Stmt></BkToCstmrStmt></Document>";
+        let bare = "<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:camt.053.001.08\"><BkToCstmrStmt><Stmt><Id>S</Id></Stmt></BkToCstmrStmt></Document>";
         let acct = &parse_camt053(bare).unwrap().statements[0].account;
         assert_eq!(acct.any_id(), None);
     }

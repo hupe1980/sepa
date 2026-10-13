@@ -5,7 +5,7 @@
 //! names and arbitrary Unicode — so a file can validate cleanly against the
 //! schema and still be rejected by the bank on ingestion. The rules here come
 //! from the EPC Implementation Guidelines and the DK DFÜ-Abkommen, and they are
-//! what actually determines whether a batch is accepted.
+//! additional restrictions, not a guarantee of bank acceptance.
 //!
 //! | Field | Rule | Source |
 //! |---|---|---|
@@ -13,7 +13,7 @@
 //! | `Nm` (any party) | 1–70 chars (XSD permits 140) | EPC IG |
 //! | `Ustrd` | 1–140 chars, one occurrence | EPC IG |
 //! | `InstdAmt` | 0.01 – 999,999,999.99 EUR, 2 decimals | EPC IG §2.95 |
-//! | `PstlAdr` | `TwnNm` + `Ctry` mandatory, ≤2 `AdrLine` | EPC153-22 v2.1 |
+//! | emitted structured/hybrid `PstlAdr` | `TwnNm` + `Ctry`, ≤2 `AdrLine` | EPC153-22 v2.2; library scope |
 //! | Batch | at least one transaction | `CdtTrfTxInf`/`DrctDbtTxInf` are `1..n` |
 //!
 //! Two kinds of rule are absent from that table because they are enforced by
@@ -22,8 +22,8 @@
 //! - **Dates** are [`IsoDate`] values, so a malformed `ReqdColltnDt` cannot
 //!   reach a builder in the first place.
 //! - **Unstructured addresses** are not representable: [`PostalAddress`]
-//!   requires a town and a country, which is the form the EPC schemes accept
-//!   and go on accepting.
+//!   requires town/country for library scope. Current EPC guidance still permits
+//!   unstructured addresses without a new cutoff.
 //!
 //! [`IsoDate`]: crate::IsoDate
 //! [`PostalAddress`]: crate::PostalAddress
@@ -168,6 +168,15 @@ pub fn max_text_len(parent: Option<&str>, element: &str) -> Option<usize> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ValidationError {
+    /// An address country is unknown or is not a normalized country code.
+    #[error("{field} contains an unknown or non-normalized country code {code:?}")]
+    UnknownCountry {
+        /// ISO 20022 element path of the offending field.
+        field: &'static str,
+        /// The rejected country spelling.
+        code: String,
+    },
+
     /// The batch contains no transactions.
     ///
     /// `CdtTrfTxInf` and `DrctDbtTxInf` are both `1..n`, so an empty batch is
@@ -210,10 +219,19 @@ pub enum ValidationError {
 
     /// A field contained a character outside the SEPA Basic Latin set.
     ///
-    /// Only produced under [`CharsetPolicy::Strict`]; the default policy
-    /// transliterates instead.
+    /// Produced under [`CharsetPolicy::Strict`] or for identifiers, which are
+    /// never transliterated. The default policy transliterates ordinary text.
     #[error("{field} contains {ch:?}, which is not in the SEPA character set")]
     InvalidCharacter {
+        /// ISO 20022 element path of the offending field.
+        field: &'static str,
+        /// The first offending character.
+        ch: char,
+    },
+
+    /// A field contained a character forbidden by XML 1.0.
+    #[error("{field} contains {ch:?}, which is not a legal XML 1.0 character")]
+    InvalidXmlCharacter {
         /// ISO 20022 element path of the offending field.
         field: &'static str,
         /// The first offending character.
@@ -623,8 +641,7 @@ pub fn check_id(field: &'static str, value: &str) -> Result<(), ValidationError>
     }
 
     // EPC230-15 applies the slash rules to references and identifiers only.
-    // Checked on the trimmed value, since XSD whitespace collapse would strip
-    // surrounding spaces and expose a leading or trailing slash.
+    // Inspecting trimmed identifiers is library policy, not XSD normalization.
     let trimmed = value.trim();
     if trimmed.starts_with('/') || trimmed.ends_with('/') || trimmed.contains("//") {
         return Err(ValidationError::SlashRule { field });
@@ -665,13 +682,16 @@ pub fn check_text(field: &'static str, value: &str, max: usize) -> Result<(), Va
 
 /// Non-empty and within `max` **characters** (not bytes).
 ///
-/// Measured on the trimmed value, because every ISO 20022 text type derives
-/// from `xs:string` with `whiteSpace="collapse"`: the bank's parser strips the
-/// padding before applying the length facet, so counting it here would reject a
-/// value the bank accepts.
+/// Counts the emitted value, including padding. ISO `Max*Text` types derived
+/// from `xs:string` preserve whitespace. Blank-only refusal is library policy.
 fn check_len(field: &'static str, value: &str, max: usize) -> Result<(), ValidationError> {
-    let value = value.trim();
-    if value.is_empty() {
+    if let Some(ch) = value
+        .chars()
+        .find(|character| !crate::xml::is_xml_character(*character))
+    {
+        return Err(ValidationError::InvalidXmlCharacter { field, ch });
+    }
+    if value.trim().is_empty() {
         return Err(ValidationError::Empty { field });
     }
     // Counted in chars: the ISO limits are character limits, and a byte-based
@@ -745,6 +765,51 @@ pub fn truncate_chars(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_length_counts_the_untrimmed_value_that_writers_emit() {
+        assert!(check_text("Text", " A ", 3).is_ok());
+        assert_eq!(
+            check_text("Text", " A ", 2),
+            Err(ValidationError::TooLong {
+                field: "Text",
+                max: 2,
+                actual: 3
+            })
+        );
+        assert!(check_text("Text", "\tA\n", 2).is_err());
+        assert!(check_text("Text", "   ", 3).is_err());
+    }
+
+    #[test]
+    fn text_refuses_xml_forbidden_characters_without_rewriting() {
+        for character in [
+            '\0', '\u{1}', '\u{b}', '\u{c}', '\u{1f}', '\u{fffe}', '\u{ffff}',
+        ] {
+            let text = format!("A{character}B");
+            assert_eq!(
+                check_text("Text", &text, 3),
+                Err(ValidationError::InvalidXmlCharacter {
+                    field: "Text",
+                    ch: character
+                })
+            );
+        }
+        for character in [
+            '\t',
+            '\n',
+            '\r',
+            '\u{20}',
+            '\u{d7ff}',
+            '\u{e000}',
+            '\u{fffd}',
+            '\u{10000}',
+            '\u{10ffff}',
+        ] {
+            let text = format!("A{character}B");
+            assert!(check_text("Text", &text, 3).is_ok(), "{character:?}");
+        }
+    }
 
     #[test]
     fn ids_respect_length_and_slash_rules() {

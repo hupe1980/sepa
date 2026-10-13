@@ -46,7 +46,7 @@
 //!
 //! `Dbtr/PstlAdr` sits on the group (it belongs to the account holder) and
 //! `Cdtr/PstlAdr` on each transfer. Both are optional, and both must be
-//! structured or hybrid — see [`PostalAddress`] for which forms SEPA accepts.
+//! structured or hybrid — see [`PostalAddress`] for the supported forms.
 //! The legacy DK schema cannot carry one and says so with
 //! [`ValidationError::UnsupportedBySchema`].
 //!
@@ -57,7 +57,7 @@
 //! - EPC SEPA Instant Credit Transfer Rulebook (SCT Inst), 2025 version
 //! - EPC158-22 One-Leg Out Instant Credit Transfer Scheme Rulebook, 2025 v1.1
 //! - EPC250-22 OCT Inst Customer-to-PSP Implementation Guidelines, 2025 v1.0
-//! - EPC153-22 v2.1, Provision of Addresses under the EPC Payment Schemes
+//! - EPC153-22 v2.2, Provision of Addresses under the EPC Payment Schemes
 //! - Deutsche Kreditwirtschaft DFÜ-Abkommen V2.7
 //!
 //! ## Example
@@ -597,7 +597,7 @@ pub struct CreditTransferEntry {
     pub creditor_bic: Option<Bic>,
     /// Beneficiary postal address (`Cdtr/PstlAdr`).
     pub creditor_address: Option<PostalAddress>,
-    /// Payment amount in **minor units** (1/100 of [`currency`](Self::currency)).
+    /// Payment amount in **hundredths** of [`currency`](Self::currency).
     /// Must be positive.
     pub amount_ct: i64,
     /// Currency of [`amount_ct`](Self::amount_ct) — `None` means euro.
@@ -606,7 +606,8 @@ pub struct CreditTransferEntry {
     /// but the euro; under the four SEPA schemes a non-euro value is a
     /// [`ValidationError::Requires`] at `build()`. The OCT Inst guidelines cap
     /// the fractional part at two digits whatever the currency, which is what
-    /// lets one `i64` of minor units serve every case.
+    /// lets one `i64` of hundredths serve every case, independently of the
+    /// currency's ISO minor-unit scale.
     pub currency: Option<Currency>,
     /// The currency the payee is to receive on the non-euro leg (AT-T020).
     ///
@@ -653,7 +654,8 @@ impl CreditTransferEntry {
 
     /// Order the amount in a currency other than the euro (OCT Inst only).
     ///
-    /// `amount_ct` is then that currency's minor units rather than euro cents.
+    /// `amount_ct` remains hundredths of the selected currency, not its ISO
+    /// minor-unit scale.
     /// EPC250-22 caps the fractional part of `InstdAmt` at two digits for
     /// every currency, so the representation does not change.
     ///
@@ -2123,7 +2125,7 @@ mod tests {
                 .write_to(&mut empty)
                 .is_err()
         );
-        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
     }
 
     // ── OCT Inst (EOLO) ───────────────────────────────────────────────────

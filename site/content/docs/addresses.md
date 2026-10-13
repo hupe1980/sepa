@@ -1,33 +1,26 @@
 +++
 title = "Postal addresses"
-description = "Structured and hybrid PstlAdr postal addresses for SEPA payments in Rust — the two forms the schemes accept, whatever the migration date turns out to be."
+description = "The library's structured and hybrid postal-address scope and applicable EPC guidance."
 weight = 9
 +++
 
-An address is optional in the SEPA schemes and most domestic batches carry
-none. When one *is* present, its form is on a clock.
+Address presence depends on scheme, participants and legal case. Schema
+optionality alone does not permit omission of required information.
 
-## The 2026 deadline
+## Current EPC Guidance
 
-ISO 20022 allows three address forms. The European Payments Council is retiring
-one of them:
+EPC153-22 v2.2, dated 30 September 2026, describes three address forms:
 
 | Form | Shape | Status |
 |---|---|---|
 | **Structured** | Dedicated elements only — street, building number, post code, town, country | Preferred |
 | **Hybrid** | Town and country in their own elements, plus up to two free-text lines | Permitted |
-| **Unstructured** | Free-text lines only, nothing machine-readable | Being retired — no end-date in force |
+| **Unstructured** | Free-text address lines | Still permitted; no replacement cutoff set |
 
-## The migration date
+No unstructured-address replacement cutoff is set by this guidance.
+Town/country are required for structured/hybrid, not every EPC-permitted format.
 
-There is currently **no end-date in force** for unstructured addresses. The EPC
-set 22 November 2026, moved it to 15 November 2026, then withdrew that on
-9 September 2026 with a replacement due. A lot of published guidance still
-quotes one of the old dates.
-
-Migrate anyway — the direction has never changed, only the deadline. And build
-against the rule rather than the date: an address is optional, but town and
-country are mandatory **whenever one is present**. That has held throughout.
+[Primary EPC guidance](https://www.europeanpaymentscouncil.eu/document-library/guidance-documents/epc-guidance-document-provision-addresses-under-epc-payment).
 
 ## Unstructured addresses are unrepresentable
 
@@ -56,9 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-This is the same approach the crate takes to IBANs and dates: rather than
-accepting a value and reporting the problem later, the invalid state has no
-representation.
+Serde restoration uses the same town/country checks. Optional lengths, line count
+and charset are checked at message validation, not all at initial construction.
 
 ## Attaching an address
 
@@ -90,8 +82,8 @@ Direct debits mirror this: `DirectDebitGroup::creditor_address` and
 
 Only the elements common to both generations of the ISO address type are
 exposed — department, sub-department, street, building number, post code, town,
-country subdivision, country and address lines. One address value therefore
-validates against every schema version the crate emits.
+country subdivision, country and address lines. Message validation checks these
+fields against the selected schema and charset policy.
 
 At most two address lines are permitted; a third is an error rather than being
 silently dropped. Lengths are checked *after* transliteration, because
@@ -103,6 +95,6 @@ address is rejected rather than emitting something that schema forbids.
 
 ## If all you have is free text
 
-Then you have no address to build here. Omit it — the element is optional in
-every SEPA schema. Do not invent a town to get past the constructor: it reaches
-the bank as though your counterparty had supplied it.
+It is outside this library's emitted scope. Obtain required structured information
+or use an implementation supporting the applicable permitted format. Omit only
+when the applicable obligations permit it; never invent a town to pass construction.

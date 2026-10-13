@@ -7,16 +7,19 @@ weight = 1
 ## Install
 
 ```sh
-cargo add sepa
+cargo add sepa@0.9
 ```
+
+These guides target 0.9. For an unpublished checkout, use
+`cargo add sepa --path /path/to/sepa` instead.
 
 The crate needs Rust **1.88** or newer. Two dependencies are mandatory —
 `thiserror` and `quick-xml` — and three features are opt-in:
 
 ```sh
-cargo add sepa --features serde   # Serialize/Deserialize on all public types
-cargo add sepa --features time    # IsoDate <-> time::Date
-cargo add sepa --features chrono  # IsoDate <-> chrono::NaiveDate
+cargo add sepa@0.9 --features serde   # Supported values, payment inputs and reports
+cargo add sepa@0.9 --features time    # IsoDate <-> time::Date
+cargo add sepa@0.9 --features chrono  # IsoDate <-> chrono::NaiveDate
 ```
 
 `time` and `chrono` are conversion-only. The crate's own calendar arithmetic is
@@ -48,9 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `as_str` gives the normalised value for the wire; `to_string` groups it in
 fours for display.
 
-Validation goes past the checksum. Mod-97 detects an altered character about 96
-times in 97 and never says which one, so IBANs are also checked against the
-country's registered BBAN structure:
+IBAN validation also checks the registered BBAN structure. A checksum alone
+does not establish that each character belongs in its national position:
 
 ```rust
 use sepa::iban::{BbanCharClass, IbanError};
@@ -98,28 +100,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Three things to notice. `12_000` is **cents** — every amount in the crate is an
-`i64` in the currency's minor unit, so no `f64` rounding can reach a payment.
-`IsoDate::new` returns a `Result`: an impossible date is rejected where it is
-written rather than by the bank days later.
+`12_000` is **120.00 EUR**. Monetary values use integer hundredths, not floating
+point or a general currency minor-unit scale. `IsoDate::new` rejects impossible
+dates at construction.
 
-And the message id and the execution date are **arguments, not defaults**.
-Earlier versions filled both in from the system clock, and both defaults were
-wrong in a way you only find out about in production:
-
-- `MsgId` is the key a bank de-duplicates submissions by. A generated one does
-  not survive a restart — which is the only property duplicate detection needs —
-  and two files built in the same second shared it. Take it from your own
-  persistent sequence.
-- `ReqdExctnDt` and `ReqdColltnDt` are the day money moves. The old direct debit
-  default was "today plus five", the SDD Core pre-notification floor; which day
-  that should actually be depends on the scheme, the sequence type, TARGET2 and
-  your bank's cut-off. `IsoDate::plus_days` is calendar arithmetic and says so —
-  the banking calendar is yours.
-
-The one value still taken from the clock is `GrpHdr/CreDtTm`. Pin it with
-`.created_at(…)` and the same input regenerates the same bytes, which is what an
-audit of a submitted file needs.
+Message IDs and payment dates are required caller inputs. Supply durable IDs and
+choose dates using your banking calendar. `IsoDate::plus_days` performs calendar
+arithmetic, not banking-day scheduling. Pin `.created_at(...)` for reproducible
+output; otherwise the builder obtains the message creation timestamp from the clock.
 
 ## Writing large files
 
@@ -130,14 +118,19 @@ untouched rather than writing a truncated document.
 ```rust
 use sepa::Pain008Builder;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 
 fn write_batch(builder: &Pain008Builder) -> Result<(), Box<dyn std::error::Error>> {
-    let file = File::create("collections.xml")?;
-    builder.write_to(&mut BufWriter::new(file))?;
+    builder.validate()?;
+    let mut writer = BufWriter::new(File::create("collections.xml")?);
+    builder.write_to(&mut writer)?;
+    writer.flush()?;
     Ok(())
 }
 ```
+
+Later I/O failure can leave a partial file. For atomic replacement, write a
+temporary file and rename it only after successful writing and flushing.
 
 ## Next
 

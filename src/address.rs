@@ -1,43 +1,32 @@
 //! Postal addresses — ISO 20022 `PstlAdr`.
 //!
-//! A payer's or payee's address is optional in the SEPA schemes, and most
-//! domestic batches never carry one. It becomes unavoidable when a bank asks
-//! for it: sanction screening, payments touching a non-EEA party, and any
-//! channel that has already moved to the 2025 rulebooks.
+//! Address presence depends on scheme, participants and legal case; schema
+//! optionality alone does not authorize omission of required information.
 //!
 //! ## Structured, hybrid, unstructured
 //!
-//! ISO 20022 lets an address be written three ways, and the EPC is retiring
-//! one of them:
+//! EPC153-22 v2.2 (30 September 2026) describes three address forms:
 //!
 //! | Form | Shape | Status |
 //! |---|---|---|
 //! | **Structured** | dedicated elements only — `StrtNm`, `BldgNb`, `PstCd`, `TwnNm`, `Ctry` | preferred |
 //! | **Hybrid** | `TwnNm` + `Ctry` plus up to two free-text `AdrLine`s | permitted |
-//! | **Unstructured** | `AdrLine` only, nothing parsable | being retired — no end-date currently in force |
+//! | **Unstructured** | free-text `AdrLine` | still permitted; no replacement cutoff set |
 //!
 //! ## Which form to send
 //!
-//! Send structured, or hybrid where you must. Both are accepted today and stay
-//! accepted: the EPC is retiring only the free-text-only form, and **no
-//! end-date is currently in force** — 22 November 2026 was moved to 15 November
-//! 2026, and that was withdrawn on 9 September 2026 with a replacement due.
-//! Migrate anyway; the direction of travel has never changed.
+//! The September update removed the November cutoff across all five schemes.
+//! Library structured/hybrid scope is not a universal EPC prohibition.
 //!
-//! What binds regardless of the date: an address is optional, but `TwnNm` and
-//! `Ctry` are mandatory *whenever one is present*. That is what
-//! [`PostalAddress::new`] takes.
+//! `TwnNm` and `Ctry` are mandatory for structured/hybrid forms. Constructor and
+//! serde enforce these required fields; optional limits/charset are checked at use.
 //!
-//! If all you have is free-text lines, you have no address to build here —
-//! **omit it**, which every SEPA schema permits. Do not invent a town to get
-//! past the constructor: it travels to the bank as though the counterparty had
-//! supplied it.
+//! Free-text-only input is outside this type's scope. Obtain required data or use
+//! a suitable implementation; omit only if applicable obligations permit it.
+//! Never invent a town to pass construction.
 //!
 //! This type therefore **cannot represent an unstructured address**: [`new`]
-//! takes the town and the country, so the only reachable forms are the two that
-//! are durably accepted. That is the same treatment [`Iban`](crate::Iban) and
-//! [`IsoDate`](crate::IsoDate) get — the invalid state is unconstructible
-//! rather than caught late.
+//! takes town/country. It does not completely validate all later optional inputs.
 //!
 //! [`new`]: PostalAddress::new
 //!
@@ -47,7 +36,8 @@
 //! use `PostalAddress6`, while `pain.001.001.09` and `pain.008.001.08` use
 //! `PostalAddress24`, which adds `BldgNm`, `Flr`, `PstBx`, `Room`, `TwnLctnNm`
 //! and `DstrctNm`. Only the elements common to both are exposed here, so one
-//! address value is valid against every schema this crate emits — and those
+//! address value has a shared element vocabulary; build-time validation still
+//! applies to its contents for the selected schema. Those
 //! extras are outside the EPC's own address guidance anyway.
 //!
 //! The legacy Deutsche Kreditwirtschaft schemas are the exception: their
@@ -144,8 +134,8 @@ pub enum AddressError {
 /// Which of the ISO 20022 address forms an address is written in.
 ///
 /// There is deliberately no `Unstructured` variant: [`PostalAddress`] requires
-/// a town and a country, so the free-text-only form the EPC is retiring is not
-/// constructible. See the [module docs](self).
+/// a town and a country, so free-text-only addresses are outside this library's
+/// scope. EPC153-22 v2.2 still permits them; see the [module docs](self).
 ///
 /// This set is closed on purpose — a `match` over it needs no wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -163,7 +153,8 @@ pub enum AddressFormat {
 ///
 /// Build one with [`PostalAddress::new`] and chain the optional elements. Only
 /// the elements common to `PostalAddress6` and `PostalAddress24` are exposed,
-/// so the same value is valid against every ISO schema this crate emits.
+/// giving a shared vocabulary, not proof that arbitrary optional values are valid.
+/// Selected-schema content limits and character rules are checked when building.
 ///
 /// # Examples
 ///
@@ -181,7 +172,7 @@ pub enum AddressFormat {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct PostalAddress {
     department: Option<String>,
     sub_department: Option<String>,
@@ -194,12 +185,44 @@ pub struct PostalAddress {
     lines: Vec<String>,
 }
 
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for PostalAddress {
+    fn deserialize<Deserializer: serde::Deserializer<'de>>(
+        deserializer: Deserializer,
+    ) -> Result<Self, Deserializer::Error> {
+        #[derive(serde::Deserialize)]
+        struct Fields {
+            department: Option<String>,
+            sub_department: Option<String>,
+            street: Option<String>,
+            building_number: Option<String>,
+            post_code: Option<String>,
+            town_name: String,
+            country_subdivision: Option<String>,
+            country: String,
+            lines: Vec<String>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        let mut address =
+            Self::new(fields.town_name, &fields.country).map_err(serde::de::Error::custom)?;
+        address.department = fields.department;
+        address.sub_department = fields.sub_department;
+        address.street = fields.street;
+        address.building_number = fields.building_number;
+        address.post_code = fields.post_code;
+        address.country_subdivision = fields.country_subdivision;
+        address.lines = fields.lines;
+        Ok(address)
+    }
+}
+
 impl PostalAddress {
     /// An address in `town`, in `country`.
     ///
-    /// Both are required. `TwnNm` and `Ctry` are mandatory whenever a SEPA
-    /// address is present at all, so an address carrying neither is not a form
-    /// this crate will emit — see the [module docs](self). `country` is an
+    /// Both are required for this library's structured/hybrid address model.
+    /// This does not prohibit transitional unstructured EPC addresses, which
+    /// the library does not represent. `country` is an
     /// ISO 3166-1 alpha-2 code and is upper-cased.
     ///
     /// # Errors
@@ -354,6 +377,14 @@ impl PostalAddress {
     /// [`ValidationError::InvalidCharacter`] under
     /// [`CharsetPolicy::Strict`].
     pub fn validate(&self, charset: CharsetPolicy) -> Result<(), ValidationError> {
+        if !is_country_code(&self.country)
+            || !self.country.bytes().all(|byte| byte.is_ascii_uppercase())
+        {
+            return Err(ValidationError::UnknownCountry {
+                field: "PstlAdr/Ctry",
+                code: self.country.clone(),
+            });
+        }
         // Lengths are checked after transliteration, since `Straße` grows a
         // character on its way to `Strasse`, and the bound comes from
         // `max_text_len` rather than from a constant repeated here — one table,
@@ -433,9 +464,9 @@ impl PostalAddress {
         if let Some(subdivision) = &self.country_subdivision {
             element(w, "CtrySubDvsn", subdivision, charset)?;
         }
-        // `Ctry` is validated at construction and is two ASCII letters, so it
-        // needs neither escaping nor transliteration.
-        write!(w, "<Ctry>{}</Ctry>", self.country)?;
+        w.write_str("<Ctry>")?;
+        write_escaped(w, &self.country)?;
+        w.write_str("</Ctry>")?;
         for line in &self.lines {
             element(w, "AdrLine", line, charset)?;
         }
@@ -642,6 +673,34 @@ mod tests {
                 ch: 'ü'
             })
         ));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn restoration_enforces_required_address_invariants() {
+        let address = PostalAddress::new("Berlin", "DE").unwrap();
+        for country in ["ZZ", "DE</Ctry><AuditMarker/><Ctry>DE"] {
+            let mut value = serde_json::to_value(&address).unwrap();
+            value["country"] = serde_json::json!(country);
+            assert!(serde_json::from_value::<PostalAddress>(value).is_err());
+        }
+        let mut value = serde_json::to_value(&address).unwrap();
+        value["town_name"] = serde_json::json!("   ");
+        assert!(serde_json::from_value::<PostalAddress>(value).is_err());
+        let mut value = serde_json::to_value(&address).unwrap();
+        value["country"] = serde_json::json!("de");
+        assert_eq!(
+            serde_json::from_value::<PostalAddress>(value).unwrap(),
+            address
+        );
+    }
+
+    #[test]
+    fn country_is_validated_and_escaped_independently() {
+        let mut address = PostalAddress::new("Berlin", "DE").unwrap();
+        address.country = "DE</Ctry><AuditMarker/><Ctry>DE".to_owned();
+        assert!(address.validate(CharsetPolicy::Strict).is_err());
+        assert!(!render(&address).contains("<AuditMarker/>"));
     }
 
     #[cfg(feature = "serde")]

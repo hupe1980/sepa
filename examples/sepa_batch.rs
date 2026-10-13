@@ -8,7 +8,7 @@
 //! - A camt.055 recall of one collection, *before* it settles
 //! - A pain.007 reversal of one of those collections, *after* it settles
 //! - Structured ISO 11649 references and ultimate parties
-//! - Structured postal addresses — the form SEPA accepts durably
+//! - Structured postal addresses with checked town and country
 //! - Typed `IsoDate` values, so no date is ever hand-formatted
 //! - Integer-safe money formatting — no f64
 //! - Build errors that name the group and transaction that failed
@@ -41,9 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor_a = validate_iban("NL91ABNA0417164300").expect("debtor A IBAN is valid");
     let debtor_b = validate_iban("GB29NWBK60161331926819").expect("debtor B IBAN is valid");
 
-    // A SEPA address must carry a town and a country whenever it is present at
-    // all, so `PostalAddress` takes both up front — the free-text-only form is
-    // simply not constructible.
+    // This library's address type requires town and country.
     let creditor_address = PostalAddress::new("Musterstadt", "DE")?
         .street("Rathausplatz")
         .building_number("1")
@@ -66,6 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &creditor_id,
         IsoDate::new(2026, 7, 20)?,
     )
+    .payment_info_id("DD-2026-07-001")
     .sequence_type(SequenceType::Frst)
     .creditor_bic(creditor_bic.clone())
     .creditor_address(creditor_address.clone());
@@ -79,35 +78,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_description("Abschlag Juli 2026");
 
+    let recurring_group = DirectDebitGroup::new(
+        "Stadtwerke Muster GmbH",
+        &creditor_iban,
+        &creditor_id,
+        IsoDate::new(2026, 7, 18)?,
+    )
+    .payment_info_id("DD-2026-07-002")
+    .sequence_type(SequenceType::Rcur)
+    .creditor_bic(creditor_bic);
+    let recurring_entry = DirectDebitEntry::new(
+        "MND-00099",
+        "2023-11-15".parse()?,
+        "Erika Mustermann",
+        debtor_b,
+        12_300,
+        "ABSCHLAG-2026-07-B",
+    )
+    .with_ultimate_creditor(Party::new("Netzbetreiber AG"))
+    .with_purpose(Purpose::Elec)
+    .with_description("Abschlag Juli 2026");
+
     let pain008 = Pain008Builder::new("Stadtwerke Muster GmbH", "DD-2026-07-001")
         // Pinned, so the file regenerates byte-for-byte — and so a camt.055
         // recall can quote the `OrgnlCreDtTm` the bank actually received.
         .created_at("2026-07-15T09:00:00".parse()?)
         .add_group(first_group.clone().add_entry(first_entry.clone()))
-        .add_group(
-            DirectDebitGroup::new(
-                "Stadtwerke Muster GmbH",
-                &creditor_iban,
-                &creditor_id,
-                IsoDate::new(2026, 7, 18)?,
-            )
-            .sequence_type(SequenceType::Rcur)
-            .creditor_bic(creditor_bic)
-            .add_entry(
-                DirectDebitEntry::new(
-                    "MND-00099",
-                    "2023-11-15".parse()?,
-                    "Erika Mustermann",
-                    debtor_b,
-                    12_300, // 123.00 EUR
-                    "ABSCHLAG-2026-07-B",
-                )
-                // Collecting on behalf of the network operator.
-                .with_ultimate_creditor(Party::new("Netzbetreiber AG"))
-                .with_purpose(Purpose::Elec)
-                .with_description("Abschlag Juli 2026"),
-            ),
-        );
+        .add_group(recurring_group.clone().add_entry(recurring_entry.clone()));
     let pain008_xml = pain008.build()?;
 
     println!("\n── pain.008 Direct Debit run ──");
@@ -117,13 +114,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(pain008_xml.contains("<SeqTp>RCUR</SeqTp>"));
     assert!(pain008_xml.contains("<CtrlSum>208.00</CtrlSum>"));
     assert!(pain008_xml.contains("<TwnNm>Musterstadt</TwnNm><Ctry>DE</Ctry>"));
-    println!("XML valid: ok");
+    println!("Builder checks: ok");
 
     // ── camt.055 — recall one collection before it settles ────────────────────
     //
-    // The cheap correction. A recall is a *request*: the bank may refuse it, and
-    // nothing is cancelled until the camt.029 answer says so. Once the
-    // collection settles this route closes and only pain.007 is left.
+    // A recall is a request, not confirmation that the payment was cancelled.
 
     let recall_xml = Camt055Builder::new(
         "CXL-2026-07-001",
@@ -148,13 +143,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(recall_xml.contains("<CstmrPmtCxlReq>"));
     assert!(recall_xml.contains("<OrgnlEndToEndId>ABSCHLAG-2026-07-A</OrgnlEndToEndId>"));
     assert!(recall_xml.contains("<Cd>DUPL</Cd>"));
-    println!("XML valid: ok");
+    println!("Builder checks: ok");
 
-    // ── camt.029 — and the answer, which may be "too late" ────────────────────
+    // ── camt.029 — the bank reports an existing return ────────────────────────
     //
-    // `PDCR` is neither outcome: the case is open. Only `ARDT` — already
-    // settled — says the recall window has closed and a reversal is what is
-    // left. That is the branch the next section takes.
+    // ARDT does not authorize another reversal of the recalled collection.
 
     let answer = parse_camt029(
         r#"<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.029.001.06">
@@ -179,15 +172,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // reader that walks only TxInfAndSts sees an empty document.
     assert_eq!(answer.transactions().count(), 0);
     assert_eq!(answer.rejection_reasons(), [&RejectionReason::Ardt]);
-    let too_late = answer.rejection_reasons().iter().any(|r| r.is_too_late());
-    println!("Too late: {too_late} — a pain.007 reversal is the remaining route");
+    let already_returned = answer
+        .rejection_reasons()
+        .iter()
+        .any(|reason| reason.is_already_returned());
+    println!("Already returned: {already_returned} — reconcile the existing return");
 
     // ── pain.007 — reverse one of those collections ───────────────────────────
     //
-    // The collection settled, then turned out to be wrong. `reverse` copies the
-    // mandate, creditor identifier, scheme, sequence type, collection date and
-    // both parties from the objects that produced it, so the reversal cannot
-    // disagree with what was actually sent.
+    // Independent scenario: the other collection settled and has not been returned.
 
     let pain007_xml = Pain007Builder::new(
         "Stadtwerke Muster GmbH",
@@ -196,21 +189,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .creditor_agent(validate_bic("COBADEFFXXX")?)
     .add_group(
-        ReversalGroup::new("DD-2026-07-001").add_entry(ReversalEntry::reverse(
-            &first_group,
-            &first_entry,
+        ReversalGroup::new("DD-2026-07-002").add_entry(ReversalEntry::reverse(
+            &recurring_group,
+            &recurring_entry,
             ReversalReason::Ms02,
         )),
     )
     .build()?;
 
     println!("\n── pain.007 Reversal ──");
-    println!("Reversing: {}", sepa::ct_to_eur_str(8_500));
+    println!("Reversing: {}", sepa::ct_to_eur_str(12_300));
     assert!(pain007_xml.contains("<CstmrPmtRvsl>"));
-    assert!(pain007_xml.contains("<OrgnlEndToEndId>ABSCHLAG-2026-07-A</OrgnlEndToEndId>"));
-    assert!(pain007_xml.contains("<RvsdInstdAmt Ccy=\"EUR\">85.00</RvsdInstdAmt>"));
-    assert!(pain007_xml.contains("<MndtId>MND-00042</MndtId>"));
-    println!("XML valid: ok");
+    assert!(pain007_xml.contains("<OrgnlEndToEndId>ABSCHLAG-2026-07-B</OrgnlEndToEndId>"));
+    assert!(pain007_xml.contains("<RvsdInstdAmt Ccy=\"EUR\">123.00</RvsdInstdAmt>"));
+    assert!(pain007_xml.contains("<MndtId>MND-00099</MndtId>"));
+    println!("Builder checks: ok");
 
     // ── pain.001 — credit transfer with a structured reference ────────────────
 
@@ -248,7 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pain.001.001.09 wraps the execution date in a <Dt> choice child.
     assert!(pain001_xml.contains("<ReqdExctnDt><Dt>2026-07-22</Dt></ReqdExctnDt>"));
     assert!(pain001_xml.contains("<Cd>SCOR</Cd>"));
-    println!("XML valid: ok");
+    println!("Builder checks: ok");
 
     // ── Validation and transliteration ────────────────────────────────────────
 

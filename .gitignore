@@ -48,3 +48,9 @@ target
 # rustdoc the API contract; `concepts/` is none of the three, and nothing in
 # the build reads it.
 /concepts/
+
+# Local Spec Kit planning, matching billing, en16931 and agentplane.
+/specs/
+/.specify/
+/.claude/
+/.github/skills/speckit-*/

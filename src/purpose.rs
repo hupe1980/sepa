@@ -108,11 +108,13 @@ macro_rules! code_enum {
             $($(#[$vmeta])* $variant,)*
             /// A code not listed here — these are external code sets that ISO
             /// revises quarterly, so unknown codes are carried through.
+            /// Direct construction and serde restoration defer validation to
+            /// use; provide 1–4 uppercase ASCII letters/digits without padding.
             Other(String),
         }
 
         impl $name {
-            /// The four-letter ISO 20022 code.
+            /// The code spelling, unchanged for an `Other` payload.
             #[must_use]
             pub fn as_code(&self) -> &str {
                 match self {
@@ -121,35 +123,20 @@ macro_rules! code_enum {
                 }
             }
 
-            /// Validate this code against the ISO 20022 shape rules.
+            /// Validate the emitted 1–4 uppercase ASCII letters/digits.
             ///
             /// # Errors
             ///
-            /// Returns [`ValidationError::Empty`],
-            /// [`ValidationError::InvalidCharacter`] or
-            /// [`ValidationError::TooLong`] for a malformed `Other` code.
+            /// Returns a text or character error for a malformed `Other` code.
+            /// Validates its exact emitted spelling without normalization;
+            /// use string parsing when trimming/uppercasing is intended.
             pub fn validate(&self, field: &'static str) -> Result<(), ValidationError> {
                 let code = self.as_code();
-                match check_code(code) {
-                    Ok(_) => Ok(()),
-                    // `check_code` folds "too short" and "too long" into one
-                    // variant; an empty code is not a length overrun, and
-                    // saying so would read as nonsense in an operator's log.
-                    Err(PurposeCodeError::InvalidLength { .. }) if code.trim().is_empty() => {
-                        Err(ValidationError::Empty { field })
-                    }
-                    Err(PurposeCodeError::InvalidLength { .. }) => {
-                        Err(ValidationError::TooLong {
-                            field,
-                            max: 4,
-                            actual: code.chars().count(),
-                        })
-                    }
-                    Err(PurposeCodeError::InvalidCharacter { .. }) => {
-                        let ch = code.chars().find(|c| !c.is_ascii_alphanumeric()).unwrap_or('?');
-                        Err(ValidationError::InvalidCharacter { field, ch })
-                    }
+                crate::validate::check_text(field, code, crate::validate::MAX_CODE_LEN)?;
+                if let Some(ch) = code.chars().find(|ch| !ch.is_ascii_uppercase() && !ch.is_ascii_digit()) {
+                    return Err(ValidationError::InvalidCharacter { field, ch });
                 }
+                Ok(())
             }
         }
 
@@ -392,6 +379,37 @@ mod tests {
         assert!("A".parse::<Purpose>().is_ok());
         assert!("ABCD".parse::<Purpose>().is_ok());
         assert!("ABCDE".parse::<Purpose>().is_err());
+    }
+
+    #[test]
+    fn raw_other_codes_validate_the_emitted_spelling() {
+        for code in [
+            " SALA ", " ABCDE ", "a", "sala", " A ", "\tA", "A\n", "", " ", "A\0",
+        ] {
+            assert!(
+                Purpose::Other(code.to_owned()).validate("Purp/Cd").is_err(),
+                "purpose {code:?} must be refused without rewriting"
+            );
+            assert!(
+                CategoryPurpose::Other(code.to_owned())
+                    .validate("CtgyPurp/Cd")
+                    .is_err(),
+                "category purpose {code:?} must be refused without rewriting"
+            );
+        }
+        for code in ["A", "A1", "ZZZZ", "SALA"] {
+            assert!(Purpose::Other(code.to_owned()).validate("Purp/Cd").is_ok());
+            assert!(
+                CategoryPurpose::Other(code.to_owned())
+                    .validate("CtgyPurp/Cd")
+                    .is_ok()
+            );
+        }
+        assert_eq!(" sala ".parse::<Purpose>().unwrap(), Purpose::Sala);
+        assert_eq!(
+            " sala ".parse::<CategoryPurpose>().unwrap(),
+            CategoryPurpose::Sala
+        );
     }
 
     #[test]

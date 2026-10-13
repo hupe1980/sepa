@@ -8,7 +8,7 @@
 
 /// Write `s` into `w` with XML character escaping — no heap allocation.
 ///
-/// Scans for `&`, `<`, `>`, `"`, `'` and emits the corresponding entity between
+/// Scans for `&`, `<`, `>`, `"`, `'`, CR and emits the corresponding reference between
 /// runs of unescaped bytes, so typical SEPA names ("Max Mustermann `GmbH`") produce
 /// a single `write_str` call with no branching overhead.
 pub(crate) fn write_escaped<W: std::fmt::Write>(w: &mut W, s: &str) -> std::fmt::Result {
@@ -20,6 +20,7 @@ pub(crate) fn write_escaped<W: std::fmt::Write>(w: &mut W, s: &str) -> std::fmt:
             b'>' => "&gt;",
             b'"' => "&quot;",
             b'\'' => "&apos;",
+            b'\r' => "&#13;",
             _ => continue,
         };
         if last < i {
@@ -95,6 +96,13 @@ mod tests {
         let mut out = String::new();
         write_escaped(&mut out, "").unwrap();
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn escaped_carriage_returns_preserve_text_through_xml_normalization() {
+        let mut out = String::new();
+        write_escaped(&mut out, "A\r\nB\rC\tD\nE &#13;").unwrap();
+        assert_eq!(out, "A&#13;\nB&#13;C\tD\nE &amp;#13;");
     }
 
     // ── write_eur ─────────────────────────────────────────────────────────────

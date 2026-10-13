@@ -5,7 +5,7 @@ generates. They are **test fixtures only** — nothing in `src/` reads them.
 
 | File | Used for |
 |---|---|
-| `pain.001.001.09.xsd` | SCT + SCT Instant (current default) |
+| `pain.001.001.09.xsd` | SCT, SCT Instant + OCT Inst (current default) |
 | `pain.001.001.03.xsd` | SCT, EPC version until Nov 2023 |
 | `pain.001.003.03.xsd` | SCT, legacy DK V2.7 |
 | `pain.008.001.08.xsd` | SDD CORE + B2B (current default) |
@@ -42,9 +42,9 @@ older versions, so the archive is the right source. Pick the payments-initiation
 maintenance release containing `pain.001.001.09`; it carries `pain.008.001.08`,
 `pain.002.001.10` and `pain.007.001.09` too.
 
-Copies obtained from the archive are authoritative and need no corroboration.
-The entries below that cite third-party mirrors predate that route and were
-cross-checked byte-for-byte between two independent sources instead.
+Archive downloads still require recorded provenance, digests and integrity checks.
+The mirror-sourced entries below were cross-checked between independent copies;
+their sourcing is distinct from a verified primary download.
 
 [archive]: https://www.iso20022.org/catalogue-messages/iso-20022-messages-archive?search=pain
 

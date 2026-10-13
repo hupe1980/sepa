@@ -53,6 +53,66 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+#[test]
+fn published_german_status_report_preserves_independent_facts() {
+    let fixture_path = manifest_dir().join(
+        "schemas/Anlage3_V3.7-3.8_Beispiele_Schemadateien_GBIC4/pain.002.001.10_PSR_SCT-Sammler_positiv_und-rejects.xml",
+    );
+    let xml = std::fs::read_to_string(&fixture_path).unwrap();
+    let schema = manifest_dir().join("tests/xsd/pain.002.001.10.xsd");
+    let validated = Command::new("xmllint")
+        .arg("--noout")
+        .arg("--schema")
+        .arg(schema)
+        .arg(fixture_path)
+        .output()
+        .expect("xmllint is required for publisher-fixture schema evidence");
+    assert!(
+        validated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    let document = sepa::parse_pain002(&xml).unwrap();
+    assert_eq!(document.original_msg_id, "471164564");
+    assert_eq!(document.original_control_sum_raw, None);
+    assert_eq!(document.original_control_sum_ct, None);
+    assert_eq!(document.original_number_of_transactions_raw, None);
+    assert_eq!(document.original_number_of_transactions, None);
+    assert_eq!(document.payment_info_statuses.len(), 4);
+    for (info, (identifier, raw, cents, count_raw, count, status)) in
+        document.payment_info_statuses.iter().zip([
+            ("Sammler 1", "9341.25", 934_125, "10", 10, "ACSP"),
+            ("Sammler 2", "1425.00", 142_500, "5", 5, "ACWC"),
+            ("Sammler 3", "1250.00", 125_000, "37", 37, "RJCT"),
+            ("Sammler 4", "37425.00", 3_742_500, "113", 113, "PART"),
+        ])
+    {
+        assert_eq!(info.original_payment_info_id.as_deref(), Some(identifier));
+        assert_eq!(info.original_control_sum_raw.as_deref(), Some(raw));
+        assert_eq!(info.original_control_sum_ct, Some(cents));
+        assert_eq!(
+            info.original_number_of_transactions_raw.as_deref(),
+            Some(count_raw)
+        );
+        assert_eq!(info.original_number_of_transactions, Some(count));
+        assert_eq!(
+            info.status.as_ref().map(sepa::PaymentStatus::as_code),
+            Some(status)
+        );
+    }
+    let partial = &document.payment_info_statuses[3];
+    assert_eq!(partial.status_counts.len(), 2);
+    assert_eq!(partial.status_counts[0].count, Some(112));
+    assert_eq!(partial.status_counts[1].count, Some(1));
+    assert_eq!(partial.transactions.len(), 1);
+    assert_eq!(
+        partial.transactions[0].original_end_to_end_id.as_deref(),
+        Some("4656384")
+    );
+    assert!(partial.transactions[0].is_rejected());
+    assert_eq!(document.financial_diagnostics().len(), 0);
+}
+
 /// Pull every `r#"..."#` literal that looks like a whole ISO 20022 document.
 fn fixtures_in(path: &Path) -> Vec<Fixture> {
     let src = std::fs::read_to_string(path).expect("source file is readable");

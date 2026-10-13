@@ -104,13 +104,11 @@ impl Camt052Report {
     /// All-or-nothing on purpose. Skipping the entries that cannot be resolved
     /// produces a total that looks right and is not, which is the failure mode
     /// a net movement exists to rule out; `None` says "ask about this file"
-    /// where a partial sum says nothing at all. Overflow saturates rather than
-    /// panicking, because the input is a third party's file.
+    /// where a partial sum says nothing at all. Overflow or mixed currencies
+    /// return `None`; a saturated or incomparable sum is not a ledger figure.
     #[must_use]
     pub fn net_movement_ct(&self) -> Option<i64> {
-        self.entries
-            .iter()
-            .try_fold(0i64, |acc, e| Some(acc.saturating_add(e.signed_ct()?)))
+        crate::camt::net_movement_ct(&self.entries)
     }
 
     /// Entries that are not yet booked (`PDNG`).
@@ -141,6 +139,23 @@ pub struct Camt052Document {
 }
 
 impl Camt052Document {
+    /// Located problems in current financial observations, not XSD validation.
+    /// Indices address retained records; transaction details are flattened.
+    #[must_use]
+    pub fn financial_diagnostics(&self) -> Vec<crate::camt::FinancialDiagnostic> {
+        self.reports
+            .iter()
+            .enumerate()
+            .flat_map(|(index, report)| {
+                crate::camt::cash_diagnostics(
+                    &format!("Rpt[{index}]"),
+                    &report.balances,
+                    &report.entries,
+                )
+            })
+            .collect()
+    }
+
     /// When the bank generated this document, typed.
     ///
     /// `None` when it reported none, or one this crate cannot read;
@@ -168,7 +183,7 @@ pub enum Camt052ParseError {
 
 /// Parse a camt.052 Bank-to-Customer Account Report XML string.
 ///
-/// Accepts every ISO version and both the default-namespace and prefixed
+/// Accepts versions 001.02, 001.06 and 001.08 with default or prefixed
 /// document shapes.
 ///
 /// # Errors
@@ -176,11 +191,27 @@ pub enum Camt052ParseError {
 /// Returns [`Camt052ParseError::NotCamt052`] when the root element is missing,
 /// or [`Camt052ParseError::Xml`] when the input is not well-formed.
 pub fn parse_camt052(xml: &str) -> Result<Camt052Document, Camt052ParseError> {
-    let doc = Document::parse(xml)?;
+    parse_camt052_with_limits(xml, crate::ParseLimits::default())
+}
+
+/// Parse a camt.052 document with explicit finite resource limits.
+///
+/// # Errors
+/// Returns an error for invalid XML, unsupported identity or an exhausted limit.
+pub fn parse_camt052_with_limits(
+    xml: &str,
+    limits: crate::ParseLimits,
+) -> Result<Camt052Document, Camt052ParseError> {
+    let doc = Document::parse_with_limits(xml, limits)?;
     let root = doc
         .root
         .child("BkToCstmrAcctRpt")
         .ok_or(Camt052ParseError::NotCamt052)?;
+    doc.message(
+        "camt.052",
+        "BkToCstmrAcctRpt",
+        &["001.02", "001.06", "001.08"],
+    )?;
 
     let grp_hdr = root.child("GrpHdr");
     let text = |tag: &str| {

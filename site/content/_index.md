@@ -1,27 +1,26 @@
 +++
 title = "sepa — SEPA payment files for Rust"
-description = "Rust crate for the five EPC payment schemes: SCT, SCT Inst, SDD Core, SDD B2B and OCT Inst. IBAN and BIC validation, pain.001/008/007/002, camt.05x and camt.055 recalls. Integer money, no I/O, XSD-validated output."
+description = "SEPA payment messages for Rust: checked identifiers, XML builders, bank-report parsers and integer money."
 template = "index.html"
 +++
 
 ## Why another SEPA crate
 
-A SEPA file is rejected for reasons an XML schema never sees. The published ISO
-20022 schemas accept a zero amount, a 141-character name and a `NOTPROVIDED`
-BIC; the banks do not. And the rules move — Verification of Payee has been
-mandatory since **9 October 2025**.
+XSD validity does not establish SEPA profile compliance or bank acceptance.
+For example, an ISO name field may allow 140 characters while the applicable
+current customer-to-PSP SEPA profile limits it to 70. Verification of Payee
+obligations depend on the applicable jurisdiction, PSP and implementation date.
 
-This crate encodes the rules that actually decide acceptance, and makes the
-mistakes that cost money hard to express in the first place.
+This crate validates supported message rules and preserves unresolved reported
+facts. It does not execute payments or certify a bank's acceptance.
 
 <ul class="feature-grid">
-<li><strong>Invalid states don't compile</strong><p>An <code>Iban</code> has passed mod-97 <em>and</em> the registered national BBAN structure. An <code>IsoDate</code> is a real calendar day. Addresses carry the town and country the EPC schemes require whenever an address is present at all.</p></li>
-<li><strong>Integer money only</strong><p>Amounts are <code>i64</code> cents everywhere. No <code>f64</code> touches a monetary value, so 10 000 transactions of one cent total exactly 100.00 EUR.</p></li>
-<li><strong>Parsers never invent a number</strong><p>Money has a magnitude <em>and</em> a direction. An unreadable <code>CdtDbtInd</code> is not a credit &mdash; <code>signed_ct()</code> answers <code>None</code> and keeps what the bank sent. No booking is ever dropped for being unreadable.</p></li>
+<li><strong>Checked value types</strong><p>An <code>Iban</code> has passed mod-97 <em>and</em> the recorded national BBAN structure. An <code>IsoDate</code> is a real calendar day. Structured/hybrid addresses require town and country; optional content is validated when building.</p></li>
+<li><strong>Integer money</strong><p>Monetary values use integer hundredths. Currency and direction remain explicit; no floating-point rounding.</p></li>
+<li><strong>Faithful observations</strong><p>Unreadable amounts and directions remain visible. Signing returns <code>None</code> when the reported facts do not support a figure.</p></li>
 <li><strong>Errors name the row</strong><p>A failure reports the ISO element <em>and</em> the group and transaction index — actionable in a collection run of ten thousand.</p></li>
-<li><strong>Validated twice over</strong><p>Every generated document is checked in CI against the real ISO schemas and against the stricter German GBIC 5 validation subsets.</p></li>
-<li><strong>No I/O, no async, one clock read</strong><p>The crate builds and parses strings. Transport, retries and storage stay yours; nothing is hidden behind a runtime. The message id and the payment date are arguments, never defaulted from a clock &mdash; only <code>CreDtTm</code> reads one, and <code>created_at()</code> replaces it.</p></li>
-<li><strong>Staleness is a build failure</strong><p>Every external publication the crate depends on &mdash; registry release, rulebook version, guideline &mdash; is pinned with the date it was last read. When one falls due, CI fails and says which.</p></li>
+<li><strong>Independent schema fixtures</strong><p>The generated fixture matrix is checked in CI against pinned ISO schemas and German GBIC 5 subsets. This is test evidence, not certification of every possible document.</p></li>
+<li><strong>No transport or runtime</strong><p>Build strings or stream to your own writer. Storage and transport stay yours. Supply message IDs and payment dates; pin <code>created_at()</code> for reproducible output.</p></li>
 <li><strong>Two required dependencies</strong><p><code>thiserror</code> and <code>quick-xml</code>. Serde, <code>time</code> and <code>chrono</code> are opt-in features.</p></li>
 </ul>
 
@@ -101,7 +100,7 @@ travel as JSON — so they are out of scope for a library that builds XML.
 | 📤 Send | `pain.001` | Credit transfer — SCT, SCT Instant, **OCT Inst**, scheduled instant |
 | 📤 Send | `pain.008` | Direct debit — CORE and B2B |
 | 📤 Send | `pain.007` | Direct debit reversal — after settlement |
-| 📤 Send | `camt.055` | Payment cancellation request — a **recall**, before settlement |
+| 📤 Send | `camt.055` | Payment cancellation request; not proof of cancellation or return |
 | 📥 Receive | `pain.002` | Status report, including Verification of Payee |
 | 📥 Receive | `camt.029` | Resolution of investigation — the answer to a recall |
 | 📥 Receive | `camt.052` | Intraday account report |

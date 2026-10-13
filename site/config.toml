@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/sepa"
 title = "sepa — SEPA payments for Rust"
-description = "Build and parse SEPA payment files in Rust: IBAN and BIC validation, pain.001, pain.008, pain.007, pain.002 and camt.05x. No f64, XSD-validated."
+description = "SEPA payment messages for Rust: checked identifiers, XML builders, bank-report parsers and integer money."
 
 default_language = "en"
 compile_sass = false
@@ -19,8 +19,7 @@ insert_anchor_links = "right"
 external_links_target_blank = true
 external_links_no_referrer = true
 
-# Giallo renders both themes into one CSS light-dark() value, so code follows
-# the reader's colour scheme with no extra stylesheet and no JavaScript.
+# Code highlighting follows the reader's colour scheme.
 [markdown.highlighting]
 light_theme = "github-light"
 dark_theme = "github-dark-default"

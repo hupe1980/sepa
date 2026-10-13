@@ -7,38 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Versioning policy
 
-This crate tracks a moving regulatory target — SEPA rulebooks and ISO 20022
-message versions change on scheduled cutovers — so a version bump can change
-what a bank receives, not only what the compiler accepts. Every release entry
-therefore calls out, explicitly and near the top:
+While `0.x`, minor releases may break APIs, stored forms or emitted output.
+Patch releases preserve public signatures and valid output; security fixes may
+tighten input checks.
+Default schema or minimum Rust version changes require a minor release.
+Review the migration notes before upgrading.
 
-- **Emitted output** — any change to the schema version, element shape or
-  default of generated XML. These are the changes that need a re-test against
-  your bank, even when your code still compiles.
-- **API** — any change to a public signature or error type.
+## [Unreleased]
 
-While the crate is `0.x`:
+## [0.9.0] - 2026-10-13
 
-- A **minor** bump (`0.4 → 0.5`) may contain breaking API changes and changes to
-  emitted output. Read this file before taking one.
-- A **patch** bump (`0.5.0 → 0.5.1`) never changes a public signature and never
-  changes emitted output for an input that was previously accepted. It is
-  reserved for fixes to input that was previously *rejected* or *mis-parsed*,
-  and for documentation.
-- A change to a **default schema version** is always a minor bump with a
-  migration note, never a patch.
-- A rise in the **minimum supported Rust version** is a minor bump, called out
-  under its own heading.
+Default wire versions and Rust 1.88 remain unchanged.
 
-Pin `sepa = "0.8"` and treat a move to `0.9` as a deliberate migration.
+**Output:** carriage returns reaching the XML escaper are encoded as `&#13;`.
+**API/read contracts:** stricter construction/intake validation and financial
+observation changes below intentionally break compatibility with 0.8.
+
+### Added
+
+- All five readers expose located `financial_diagnostics()` for missing,
+  invalid, unrepresentable or inconsistent facts, choice conflicts and totals.
+- pain.002/camt.029 retain instructed-amount source routes, historical
+  `legacy_referenced_amount` and independent `original_settlement_amount`.
+  Empty/equivalent-only containers do not hide historical observations, and
+  equal alternatives do not hide ambiguity or invent diagnostic locations.
+- pain.002 retains original group/payment-info counts and control sums as raw
+  text and optional typed observations. Counts receive independent `InvalidCount`,
+  overflow and consistency diagnostics; absence is not zero.
+- Cash details retain `DetailAmountSource` and nested transaction amounts.
+  Charge records retain `ChargeRecordSource` and historical flat observations;
+  mixed shapes and conflicting amount routes cannot supply a trusted total.
+- Equivalent transfer currencies receive independent diagnostics. Charge-total
+  comparisons require usable, consistent magnitudes and comparable currencies.
+- A release-mode `scalability` example separates synthetic reader, buffered writer
+  and existing streaming writer measurements, including explicit budget refusals.
+
+### Breaking Contracts
+
+- `RejectionReason::is_too_late()` is renamed to `is_already_returned()`.
+  `ARDT` means the transaction was already returned, not merely settled.
+  Reconcile that return; the code does not authorize another pain.007 reversal.
+- Recall writers refuse original transaction counts longer than 15 digits and
+  original control sums exceeding the pinned schema's 18-digit decimal precision,
+  before output. Correct invalid stored totals rather than truncating them.
+  Zero counts, signed sums and representable trailing-zero values remain accepted.
+- Directly constructed or serde-restored `Purpose::Other` and
+  `CategoryPurpose::Other` codes validate their exact emitted spelling. Lowercase
+  or padded payloads previously checked via a normalized copy are now refused
+  at use, before writing. The enum serde format is unchanged. Migrate such raw
+  stored values by explicitly parsing their strings (which trims/uppercases),
+  or storing canonical 1–4 uppercase ASCII letters/digits. Existing lawful
+  unknown codes remain accepted; this is not an external-code membership check.
+- `IsoDate::new` refuses years 10000–65535 through the existing
+  `DateError::YearOutOfRange`, closing a bypass of the declared 0001–9999 range.
+  Optional `chrono` conversions share that refusal; XSD itself permits wider years.
+- `time`/`chrono` timestamp conversions use UTC for offsets containing seconds
+  rather than truncating them and shifting the represented instant. Exact
+  whole-minute offsets through ±14:00 retain their existing representation.
+- `time` timestamp UTC fallback checks the resulting epoch day before offset
+  conversion; dates outside 0001–9999 return `DateError::OutOfRange` instead of
+  reaching a dependency panic. `chrono` conversion likewise returns that error
+  when its local-offset arithmetic exceeds chrono's calendar. Existing valid
+  whole-minute ±14:00 endpoint timestamps are still accepted without forced UTC.
+- Text length checks include the complete emitted value, including padding,
+  rather than measuring a trimmed value. Previously accepted padded overlength
+  inputs are refused. Blank-only refusal remains an explicit library policy.
+- Shared text validation adds `ValidationError::InvalidXmlCharacter` for XML 1.0
+  forbidden characters. Existing transliteration/strict policies are unchanged;
+  ordinary text is checked after policy conversion, identifiers without conversion.
+- The shared XML escaper emits carriage returns as `&#13;` to prevent XML
+  end-of-line normalization from changing raw text that reaches it. This does not
+  introduce a UTF-8 passthrough mode or change default wire versions.
+- Readers require a resolved supported ISO namespace, `Document` and exactly one
+  matching body. Missing/unknown namespaces and foreign lookalikes are refused;
+  prefixed metadata reports the same URI as default namespaces. Wire defaults are unchanged.
+- All readers enforce shared finite `ParseLimits` and expose `parse_*_with_limits`.
+  Zero limits and depth above 256 are invalid; failure returns no partial report.
+- Address serde uses checked construction; invalid countries and empty towns are
+  refused. Use-time country validation and XML escaping are independent.
+- Financial helpers no longer normalize negative magnitudes, default EUR or infer
+  debit on charges. Missing/unusable currency, direction or contradictory facts
+  make signing unavailable. Aggregate-only charges are not zero; mixed-currency
+  or conflicting totals cannot produce a trusted sum.
+- Charge totals, control sums and original amounts retain raw text and observed
+  currency. Cancellation reports retain the independent `referenced_amount`.
+  Raw money is decoded XML text, not source bytes; padding/empty values survive.
+- `EntryDetail::signed_amount_ct` is private and cannot be deserialized as a trusted
+  cache. Its getter rechecks itemized facts; restored detail signing is unavailable.
+- ISO/DK status/direction case is exact. Lowercase/malformed spellings are no
+  longer promoted to acceptance or credit/debit; unknown spellings survive.
+- Status-count rows retain money/counts even without a status. Their status is
+  optional, with raw spelling; cancellation buckets no longer invent an empty code.
+- Cash-report net totals now refuse mixed currencies or an unrepresentable final
+  total instead of saturating. Checked wider accumulation preserves lawful
+  cancellation. Malformed currency case and mutated detail-direction conflicts
+  cannot supply trusted signed figures.
+- Derived detail caches retain their parsed denomination; mutating a parent or
+  itemized currency cannot manufacture reconciliation in another currency.
+- `EntryDetail` adds `amount_source` and `transaction_amount`; `ChargeRecord` adds
+  `source`. Update manual struct literals/stored forms. Readable direct/nested
+  currency or amount disagreements and mixed charge shapes no longer yield a sum.
+- Cancellation group control-sum diagnostic paths include the actual
+  `OrgnlGrpInfAndSts` header; logical paths are not a frozen XPath interface.
+- `Pain002Document` and `PaymentInfoStatus` add `original_control_sum_raw` and
+  `original_control_sum_ct`; update stored-form consumers. Control sums do not
+  supply an inferred currency, direction or posting decision.
+- `TransactionStatus` and `TransactionCancellationStatus` add `legacy_referenced_amount`.
+  Both also add `original_settlement_amount`. `Pain002Document` and `PaymentInfoStatus`
+  add `original_number_of_transactions_raw` and `original_number_of_transactions`.
+  Update stored-form consumers; selected original fields do not grant posting permission.
+  `FinancialIssue` adds `InvalidCount`; numeric enum discriminants are not a stable contract.
+
+### Documentation
+
+- EPC153-22 v2.2 (30 September 2026) permits unstructured addresses without a new
+  cutoff. Library structured/hybrid scope is not a universal EPC prohibition.
+- VoP pain.002 codes are DK Anlage 3 V3.9 section 2.2.6 conventions, separate from
+  the EPC inter-PSP API. Codes do not establish legal liability or settlement.
 
 ## [0.8.0]
 
-**Three themes, and they rhyme: every one is something the suite could not
-see.** The read path stopped guessing; a fifth EPC payment scheme turned out to
-be missing; and the artefacts outside this repository became checkable.
-
-> **Migration, in three parts.**
+> **Migration.**
 >
 > 1. The money fields on every camt type move into one `amount:
 >    ReportedAmount`, and `signed_ct()` returns `Option<i64>`:
@@ -51,7 +140,8 @@ be missing; and the artefacts outside this repository became checkable.
 >    `LocalInstrument::None` → `CreditTransferKind::Standard`,
 >    `LocalInstrument::Inst` → `CreditTransferKind::Instant`. The compiler
 >    finds every site; emitted output for both is unchanged.
-> 3. Nothing else. The value layer is untouched.
+>
+> The value layer is unchanged.
 
 ### Emitted output
 
@@ -59,28 +149,14 @@ be missing; and the artefacts outside this repository became checkable.
   `CreditTransferKind::OneLegOutInstant` emits `SvcLvl/Cd=EOLO`, a mandatory
   `LclInstrm/Cd=INST`, a non-`SLEV` `ChrgBr`, optionally a non-euro
   `InstdAmt/@Ccy`, and optionally `InstrForCdtrAgt/InstrInf`.
-- **Otherwise unchanged.** Every document 0.7 produced, 0.8 produces
-  byte-for-byte. `ChrgBr` still renders `SLEV` for all four SEPA schemes — it
-  is a value now rather than a literal, and `build()` refuses any other under a
-  SEPA service level.
-
-- **New: OCT Inst documents.** A group with
-  `CreditTransferKind::OneLegOutInstant` emits `SvcLvl/Cd=EOLO`, a mandatory
-  `LclInstrm/Cd=INST`, a non-`SLEV` `ChrgBr`, optionally a non-euro
-  `InstdAmt/@Ccy`, and optionally `InstrForCdtrAgt/InstrInf`. Nothing else
-  changes shape.
-- **Unchanged for SCT, SCT Inst, SDD Core, SDD B2B and every reversal, recall
-  or existing document.** `ChrgBr` still renders `SLEV` for all of them —
-  it is now a value rather than a literal, and `build()` refuses any other
-  under a SEPA service level.
+- **Otherwise unchanged for valid input.** `ChrgBr` remains `SLEV` for the four
+  SEPA schemes; `build()` refuses another value under a SEPA service level.
 
 ### Added — One-Leg Out Instant Credit Transfer (OCT Inst)
 
-The fifth EPC payment scheme, in force since 5 October 2025 (rulebook
-EPC158-22, customer-to-PSP guidelines EPC250-22 2025 v1.0). It covers the euro
-leg of an instant payment whose other leg leaves SEPA, and it adds no message:
-EPC250-22 specifies `pain.001.001.09`, `pain.002.001.10` and
-`camt.054.001.08`, all already implemented. What it adds is rules.
+OCT Inst covers the euro leg of an instant payment whose other leg leaves SEPA
+(EPC158-22 and EPC250-22 2025 v1.0). It uses the existing pain.001, pain.002 and
+camt.054 message versions.
 
 - **`CreditTransferKind`** replaces `LocalInstrument` and names the scheme
   rather than one of its elements: `Standard`, `Instant`, `OneLegOutInstant`.
@@ -102,10 +178,6 @@ EPC250-22 specifies `pain.001.001.09`, `pain.002.001.10` and
   the local instrument, so OCT Inst can carry one.
 
 ### Added — the regulatory watch list, as a gate
-
-Every other check here measures the crate against an artefact *inside* the
-repository, which cannot notice a publisher issuing a newer one. Two defects
-reached a release through that gap with the whole suite green.
 
 - **`tests/watch.rs`** pins each external publication — IBAN Registry release,
   rulebook version, guideline, code list — with the artefact in force, when it
@@ -169,59 +241,21 @@ reached a release through that gap with the whole suite green.
 
 ### Fixed — money
 
-- **An unreadable `ChrgInclInd` is no longer indistinguishable from an absent
-  one.** `included_in_amount` is `Option<bool>` and `None` was documented as
-  "the bank did not say", but it also swallowed values outside the four
-  `xs:boolean` forms — `TRUE`, `yes`. That field decides whether a ledger
-  posts a charge or treats it as already inside the entry amount, so losing
-  the distinction is a double-count waiting for a bank that spells it
-  differently. `ChargeRecord::included_in_amount_raw` keeps what arrived.
-- **An unreadable `CdtDbtInd` is no longer read as a credit.** `indicator_of`
-  ended in `.unwrap_or(CreditDebitIndicator::Credit)`, so an entry whose
-  credit/debit indicator was absent, empty or misspelled — `DBTI` for `DBIT` —
-  was reported as a **credit of the same magnitude**. In a ledger that is a
-  two-for-one error: a EUR 1,000 debit became a EUR 1,000 credit, a EUR 2,000
-  swing, from one mistyped character in a third party's file. It applied to
-  entries, to balances (an overdraft read as funds) and to transaction details.
-  `CreditDebitIndicator` has also lost its `Default` derive — a money direction
-  has no default.
-- **An entry is no longer dropped when its amount cannot be read.**
-  `parse_entry` and `parse_balance` returned `Option` and were collected with
-  `filter_map`, so a booking whose `Amt` this crate could not represent
-  **vanished from the statement** with no error. That is the one parse failure
-  an importer cannot detect: a missing booking is indistinguishable from one
-  that never happened. Entries, balances and charge records are now always
-  reported, carrying `None` amounts and the verbatim text.
-- **Sub-cent amounts are refused instead of truncated.** `ct_from_eur_str`
-  truncated below two decimals, so `0.001` parsed as `0` and `1.999` as `199`.
-  `ActiveOrHistoricCurrencyAndAmount` permits five fraction digits, so both are
-  reachable from a bank file. New `AmountError::SubCentPrecision`. Trailing
-  zeros remain insignificant: `"1.500"` is still `150`.
-- **A leading `+` is accepted.** `+1000.00` is legal `xs:decimal` and banks send
-  it; it was rejected, and — via the bug above — took its whole entry out of the
-  statement with it. A repeated sign is still rejected.
-- **`net_movement_ct()` is all-or-nothing.** It summed with `saturating_add`
-  over entries that silently resolved to zero or the wrong sign. A total that
-  skips the rows it could not read looks right and is not.
-- **`details_reconcile()` no longer reports agreement with an unreadable
-  entry.** It compared against a fabricated entry total; with no total to
-  compare against, it now answers `false`.
-- **An absent `Amt/@Ccy` is no longer read as `EUR`.** camt statements are not
-  EUR-only, and the fabricated currency propagated: a detail is excluded from
-  its entry's sum when the two differ, so guessing here silently changed which
-  transactions were counted.
-- **A `Bal` with no `Tp` is `BalanceType::Unspecified`**, not `Other("")` —
-  which is what a bank sending an empty code produces. Two different facts had
-  been collapsed into one value.
-- **A `NbOfTxsPerSts` row survives a count it cannot read.** The whole row was
-  dropped, losing the bank's assertion that the status bucket exists;
-  `StatusCount::count` is now `Option<u64>` with `count_raw` beside it.
+- `ChargeRecord::included_in_amount_raw` distinguishes unreadable `ChrgInclInd`
+  from absence; `included_in_amount` remains an optional typed observation.
+- Missing/malformed directions no longer become credit. `CreditDebitIndicator`
+  loses `Default`; an absent `Amt/@Ccy` no longer becomes EUR.
+- Entries, balances and charge records retain unreadable amounts as `None`
+  beside raw text rather than disappearing.
+- Significant sub-cent precision returns `AmountError::SubCentPrecision`
+  instead of truncating; `"1.500"` still represents 150 hundredths.
+- One leading `+` is accepted as legal decimal syntax; repeated signs are refused.
+- `net_movement_ct()` no longer skips unreadable rows;
+  `details_reconcile()` cannot report agreement without a usable entry total.
+- A balance without `Tp` is `BalanceType::Unspecified`, not `Other("")`.
+- Status-count rows survive unreadable counts, with optional `count` and `count_raw`.
 
 ### Fixed — lexical conformance
-
-Two places where the crate was **stricter than the standard it names**, which is
-the direction where nothing fails visibly: the caller is refused, at the call
-site, with nothing they can do.
 
 - **`IsoDate` rejected a legal `xs:date` timezone.** `xs:date` is
   `'-'? yyyy '-' mm '-' dd zzzzzz?` — the zone is optional but legal, so
@@ -268,48 +302,13 @@ Breaking, with no deprecation path, and the compiler finds every site:
 | `Camt029Document::created_at: String` | `created_at_raw: String`, plus `created_at() -> Option<IsoDateTime>` |
 | — | `AmountError::SubCentPrecision { value, digits }` (`#[non_exhaustive]`, so no `match` breaks) |
 
-The shape is not new: `EntryDetail::signed_ct()` has returned `Option<i64>`
-since 0.5, for exactly this reason. What 0.8 does is apply it one level up,
-where the same question was being answered with a guess. The `created_at`
-rename is the same correction applied to the other direction — camt.05x gained
-"verbatim *and* typed" in 0.7 and pain.002/camt.029 did not.
+### Testing
 
-### Testing — why none of this was caught
-
-Three separate mechanisms, and the new gates target each one.
-
-- **Two of the defects were asserted as correct.** The truncation and the
-  dropped entry both had tests pinning them down — written to lock in a *panic*
-  fix in 0.6, recording whatever the non-crashing behaviour happened to be
-  without asking whether it was right. A regression test for a crash encodes the
-  recovery as the specification.
-- **The sign flip was never exercised.** All 25 `CdtDbtInd` occurrences in the
-  entire fixture corpus were a correctly spelled `CRDT` or `DBIT`. The invalid
-  branch of a two-branch enum had no coverage at all, because every fixture was
-  hand-written by somebody who knew the right codes.
-- **The fuzzer could not see any of them.** The `parse` target's whole invariant
-  was "does not panic" — every accessor result was discarded with `let _ =`. A
-  fabricated value is a perfectly ordinary `Ok`.
-
-The gates added in response:
-
-- **`tests/conformance.rs`** — 22 tests over the three classes the rest of the
-  suite is blind to: input the crate wrongly **refuses** (oracle: the XML
-  Schema lexical spaces for `xs:decimal`, `xs:date`, `xs:dateTime` and
-  `xs:boolean`), values it **invents** (oracle: the input bytes), and elements
-  it **drops** (oracle: the input element count). Each gate was verified by
-  reintroducing the defect it targets and confirming it fails.
-- **The `parse` fuzz target asserts the money invariants**, not just absence of
-  panics: a ledger figure exists exactly when its magnitude and its direction
-  both do, signing changes only the sign, and a resolved direction must
-  round-trip to the text it was read from.
-- **`fuzz/seeds/`, checked in** — and load-bearing rather than an optimisation.
-  Random bytes are never a well-formed ISO 20022 document, so an unseeded
-  `parse` run explores only the XML rejection path: **315,449 unseeded
-  executions did not rediscover the sign-flip defect, and a seeded run finds it
-  in seconds.** `just fuzz-seeds` regenerates them from the shared fixtures, and
-  CI fails if the committed seeds no longer match — a generated artefact that is
-  committed and never re-derived is a comment.
+- Conformance tests cover legal lexical forms, preservation of unreadable
+  observations and retained element counts.
+- The parser fuzzer checks financial observations and signing invariants.
+- Committed parser seeds are generated from fixtures by `just fuzz-seeds`;
+  CI checks for drift.
 
 ### Internal
 
@@ -338,17 +337,6 @@ The gates added in response:
   They referenced a directory that is not published.
 
 ## [0.7.0]
-
-The largest revision since 0.4, and two bodies of work in one release.
-
-**Correctness and determinism.** One text field escaped the SEPA character set
-entirely, one comparison was chronologically wrong, one acceptance check
-accepted silence, one validator was **rejecting real BICs**, and the builders
-defaulted the two values that must never be defaulted.
-
-**The message set closed.** `camt.055` recalls and `camt.029` resolutions are
-the last message-level gap, and vendoring the camt schemas to gate them found a
-parser fixture that was not a valid document.
 
 **Breaking API changes with no deprecation path.**
 
@@ -416,8 +404,8 @@ all**, so `is_accepted()` treats an empty document as *not* an acceptance and
 `rejection_reasons()` gathers all three levels. `PDCR` — pending — is neither
 outcome, and `is_final()` exists for that one code: posting it as accepted
 writes off money that is coming back, posting it as rejected collects twice.
-`RejectionReason::is_too_late` separates `ARDT` ("we could not — it settled,
-use pain.007") from `LEGL`/`CUST` ("we would not").
+The original `RejectionReason::is_too_late` helper was added here; its misleading
+name and settlement interpretation are corrected in 0.9.
 
 Two builder accessors came with it, and are useful on their own:
 `Pain001Builder`/`Pain008Builder` now expose `message_id()`, `schema_version()`
@@ -623,10 +611,9 @@ malformed input into a valid timestamp. It is now rejected.
   transliterated under the default `CharsetPolicy`, where they were previously
   emitted verbatim. For input the crate already accepted and that was already
   inside the SEPA character set, nothing changes.
-- Length limits are measured on the trimmed value. Every ISO 20022 text type is
-  an `xs:string` with `whiteSpace="collapse"`, so the bank's parser strips
-  padding before applying the length facet; counting it here rejected values the
-  bank accepts.
+- Length limits were measured on the trimmed value. The whitespace-collapse
+  assumption behind that change was incorrect for the pinned text types;
+  complete emitted lengths are checked again in 0.9.
 
 ### Added — tests
 
@@ -723,12 +710,6 @@ New `validate::MAX_CODE_LEN` (4) and `validate::MAX_BUILDING_LEN` (16).
   locally and it is part of `just ci`; `just verify-tables` adds the
   reference-data conformance tests.
 
-### Internal
-
-- The four camt types that carry money now embed a single `ReportedAmount`
-  instead of repeating five fields and an accessor with identical semantics.
-  The invariant has one definition, so a new money-bearing type inherits it.
-
 ### Documentation
 
 - The Extended Remittance Information option (EPC092-19) is named in the scope
@@ -760,20 +741,9 @@ New `validate::MAX_CODE_LEN` (4) and `validate::MAX_BUILDING_LEN` (16).
 
 ## [0.6.0]
 
-A correctness and standards release. Two reachable panics, three silent
-mis-parses and a document-substitution hole in the XML reader are fixed;
-`PstlAdr` support lands ahead of the EPC's **15 November 2026** cut-over to
-structured addresses; three rules the XSD cannot express are now enforced; and a
-non-standard JSON import format is removed outright. **Breaking API changes with
-no deprecation path.**
-
-> **On the cut-over date.** Version 1.0 of the 2025 SEPA rulebooks set the end
-> of unstructured addresses at 22 November 2026. Version 1.1, in force since
-> 5 October 2025, moved it to **15 November 2026**, to land with that year's
-> Swift Standards MX release. If your notes still say the 22nd, they are a
-> rulebook version behind. It is an *address* deadline and not a message-version
-> one: `pain.001.001.09` and `pain.008.001.08` have been mandatory since
-> 19 November 2023, and nothing on the EPC roadmap moves SEPA past them.
+Reader correctness, postal addresses, direct-debit reversals and VoP results.
+**Breaking API changes with no deprecation path.** The address-deadline claims
+originally published with this release were superseded; see 0.9 documentation notes.
 
 ### Fixed — a second root element could displace the first
 
@@ -917,11 +887,9 @@ report.
   `StrtNm`, `BldgNb`, `PstCd`, `TwnNm`, `CtrySubDvsn`, `Ctry` and `AdrLine`.
   One address value therefore validates against every ISO schema this crate
   emits — checked against all four XSDs in CI.
-- **The unstructured form is unrepresentable.** From 15 November 2026 the EPC
-  schemes reject an address without `TwnNm` and `Ctry`.
-  `PostalAddress::new` takes both, so only the structured and hybrid forms are
-  constructible — the same treatment `Iban` and `IsoDate` already get.
-  `AddressFormat` reports which of the two an address is.
+- `PostalAddress::new` requires `TwnNm` and `Ctry`, so only structured and hybrid
+  forms are constructible. This is library scope, not a universal EPC ban on
+  unstructured addresses. `AddressFormat` reports which supported form is present.
 - `Ctry` is checked against the ISO 3166 table rather than the XSD's `[A-Z]{2}`,
   so `ZZ` is refused at construction.
 - Wired into both builders: `CreditTransferGroup::debtor_address`,
@@ -1061,12 +1029,6 @@ removed code did.
 - New address elements appear only when an address is set. Nothing else changes
   the bytes emitted for an input that 0.5 accepted.
 
-### Internal
-
-- The four camt types that carry money now embed a single `ReportedAmount`
-  instead of repeating five fields and an accessor with identical semantics.
-  The invariant has one definition, so a new money-bearing type inherits it.
-
 ### Documentation
 
 - SWIFT IBAN Registry citation moved to release 102 (June 2026). The 89
@@ -1103,10 +1065,7 @@ schema-correctness defects and several smaller ones are fixed along the way.
 
 ### Added — validation
 
-- **IBAN structure is checked, not just the checksum.** Mod-97 detects an
-  altered character with probability 96/97 and never says which one, so an `O`
-  typed for a `0` in a German account number passes it about 99% of the time it
-  is the only error. The SWIFT IBAN Registry's BBAN structure for all 89
+- **IBAN structure is checked, not just the checksum.** The SWIFT IBAN Registry's BBAN structure for all 89
   countries is now enforced per character, reporting the position, the class the
   registry requires and the country's structure string — see
   [`iban_bban_format`] and [`BbanCharClass`]. The registry table is now the

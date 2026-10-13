@@ -4,10 +4,9 @@ description = "Validate IBANs, BICs, SEPA Creditor Identifiers and ISO 11649 RF 
 weight = 2
 +++
 
-Four identifiers, four different check-digit schemes, and one rule they share:
-each is a **type whose constructor is the only way in**. A validated identifier
-is a proof you carry through the rest of your code, not a `String` somebody
-remembers to check.
+Constructors, string parsing and optional serde restoration share the checks
+for these identifier types. Validity establishes the recorded format and
+checksum rules, not allocation, account existence or reachability.
 
 | Type | Standard | What is checked |
 |---|---|---|
@@ -18,15 +17,9 @@ remembers to check.
 
 ## IBAN: the checksum is the easy half
 
-Mod-97 catches an altered character about 96 times in 97, and it never says
-*which* one. So a capital `O` typed for a zero in a German account number gets
-through roughly 99 % of the time it is the only mistake: the operator sees "IBAN
-valid", the bank sees an account that does not exist, and the payment comes back
-days later with a return charge.
-
-The SWIFT IBAN Registry publishes each country's BBAN structure — `8!n10!n` for
-Germany, `4!a10!n` for the Netherlands — and every character is checked against
-it:
+A checksum alone does not establish national structure. The SWIFT IBAN Registry
+records `8!n10!n` for Germany and `4!a10!n` for the Netherlands; each BBAN
+character is checked against the recorded pattern:
 
 ```rust
 use sepa::iban::{BbanCharClass, IbanError};
@@ -249,10 +242,8 @@ and `Issr` must be `ISO` when `Ref` carries an RF reference.
 | SEPA scheme countries | EPC409-09 v8.0 | 42 codes |
 | Country codes | ISO 3166-1 alpha-2, plus `XK` | 250 codes |
 
-All three are vendored, and all three are checked in CI against the examples
-their publishers ship. One table answers "is this two letters or a country" for
-BIC characters 5–6, `PstlAdr/Ctry` and a Creditor Identifier alike, so they
-cannot drift apart.
+The tables are vendored; tests cover consistency and SWIFT's example IBANs.
+BICs, postal countries and Creditor Identifiers share the country-code table.
 
 ## Next
 

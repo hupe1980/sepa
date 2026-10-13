@@ -33,7 +33,7 @@
 //! ## Version
 //!
 //! `camt.029.001.06`, the answer to `camt.055.001.05` under the DFÜ-Abkommen.
-//! The parser is namespace-agnostic like the others, so a bank that sends a
+//! The parser requires supported resolved camt.029 identity; a bank that sends a
 //! neighbouring version is read rather than refused.
 //!
 //! ## Example
@@ -71,7 +71,7 @@
 //! # Ok::<(), sepa::Camt029ParseError>(())
 //! ```
 
-use crate::camt::amount_of;
+use crate::camt::ReportedAmount;
 use crate::date::IsoDate;
 use crate::xml::{Document, Node, XmlError};
 
@@ -117,7 +117,7 @@ impl CancellationStatus {
     }
 
     pub(crate) fn from_code(s: &str) -> Self {
-        match s.trim().to_ascii_uppercase().as_str() {
+        match s.trim() {
             "ACCR" => Self::Accepted,
             "RJCR" => Self::Rejected,
             "PDCR" => Self::Pending,
@@ -208,7 +208,7 @@ impl ResolutionOutcome {
     }
 
     fn from_code(s: &str) -> Self {
-        match s.trim().to_ascii_uppercase().as_str() {
+        match s.trim() {
             "CNCL" => Self::Cancelled,
             "PECR" => Self::PartiallyCancelled,
             "RJCR" => Self::RejectedCancellation,
@@ -252,11 +252,9 @@ impl std::fmt::Display for ResolutionOutcome {
 
 /// Why a cancellation was refused (`CxlStsRsnInf/Rsn`).
 ///
-/// `PaymentCancellationRejection2Code`, plus whatever else a bank sends. The
-/// distinction that matters operationally is between "we could not" (`ARDT`,
-/// the payment already settled) and "we would not" (`LEGL`, `CUST`): the first
-/// means a [`pain.007`](crate::pain007) reversal is the remaining route, the
-/// second means nothing is.
+/// `PaymentCancellationRejection2Code`, plus whatever else a bank sends.
+/// Reasons describe the bank's refusal; they do not authorize another return
+/// or establish the original payment's settlement state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -267,8 +265,7 @@ pub enum RejectionReason {
     Agnt,
     /// `CUST` — the beneficiary refused to return the funds.
     Cust,
-    /// `ARDT` — **already returned**: the transaction settled and has been
-    /// returned, so there is nothing left to cancel.
+    /// `ARDT` — cancellation refused because the transaction was already returned.
     Ardt,
     /// `NOAS` — no answer from the beneficiary.
     Noas,
@@ -300,7 +297,7 @@ impl RejectionReason {
     }
 
     fn from_code(s: &str) -> Self {
-        match s.trim().to_ascii_uppercase().as_str() {
+        match s.trim() {
             "LEGL" => Self::Legl,
             "AGNT" => Self::Agnt,
             "CUST" => Self::Cust,
@@ -313,13 +310,11 @@ impl RejectionReason {
         }
     }
 
-    /// Whether the payment had already settled, so a cancellation was never
-    /// going to be possible.
+    /// Whether the bank reports that the transaction was already returned (`ARDT`).
     ///
-    /// For a direct debit this is the point at which a
-    /// [`pain.007`](crate::pain007) reversal takes over.
+    /// This is not a settlement test or permission to send another reversal.
     #[must_use]
-    pub const fn is_too_late(&self) -> bool {
+    pub const fn is_already_returned(&self) -> bool {
         matches!(self, Self::Ardt)
     }
 }
@@ -338,11 +333,17 @@ impl std::fmt::Display for RejectionReason {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CancellationCount {
     /// The status these transactions carry.
-    pub status: CancellationStatus,
+    pub status: Option<CancellationStatus>,
+    /// Decoded status spelling, including an empty reported element.
+    pub status_raw: Option<String>,
     /// How many of them there are (`DtldNbOfTxs`).
     pub count: Option<u64>,
     /// Their total, in ct (`DtldCtrlSum`).
     pub control_sum_ct: Option<i64>,
+    /// Decoded `DtldCtrlSum`, including unreadable or empty reported values.
+    pub control_sum_raw: Option<String>,
+    /// Decoded transaction-count text, including unreadable reported values.
+    pub count_raw: Option<String>,
 }
 
 // ── TransactionCancellationStatus ─────────────────────────────────────────────
@@ -375,6 +376,26 @@ pub struct TransactionCancellationStatus {
     pub original_amount_ct: Option<i64>,
     /// ISO 4217 currency of `original_amount_ct`.
     pub original_currency: Option<String>,
+    /// Decoded original amount, retained without rounding or currency inference.
+    pub original_amount_raw: Option<String>,
+    /// Observed source route of the selected original field.
+    pub original_amount_source: Option<crate::camt::OriginalAmountSource>,
+    /// Alternative original amount from `OrgnlTxRef`, retained independently.
+    /// Both observations are exposed when a bank supplies conflicting values.
+    pub referenced_amount: Option<ReportedAmount>,
+    /// Observed source route of the independent reference amount.
+    pub referenced_amount_source: Option<crate::camt::OriginalAmountSource>,
+    /// Historical `OrgnlTxRef/InstdAmt` when canonical `Amt/InstdAmt` is also present.
+    /// Simultaneous routes are ambiguous even if values agree. Otherwise the
+    /// historical route is exposed through `referenced_amount`.
+    pub legacy_referenced_amount: Option<ReportedAmount>,
+    /// Independent original interbank `OrgnlTxRef/IntrBkSttlmAmt` observation.
+    /// This is not an alternative to, or fallback for, instructed money.
+    pub original_settlement_amount: Option<ReportedAmount>,
+    /// Independent equivalent amount from `OrgnlTxRef/Amt/EqvtAmt`.
+    pub referenced_equivalent_amount: Option<ReportedAmount>,
+    /// Equivalent amount's `CcyOfTrf`, not the amount denomination.
+    pub referenced_transfer_currency: Option<String>,
     /// `OrgnlReqdExctnDt` exactly as the bank reported it.
     pub original_execution_date_raw: Option<String>,
     /// `OrgnlReqdColltnDt` exactly as the bank reported it.
@@ -382,6 +403,70 @@ pub struct TransactionCancellationStatus {
 }
 
 impl TransactionCancellationStatus {
+    fn financial_diagnostics(&self, path: &str) -> Vec<crate::camt::FinancialDiagnostic> {
+        let source = self
+            .original_amount_source
+            .map_or("original_amount", crate::camt::OriginalAmountSource::path);
+        let mut result = crate::camt::optional_amount_diagnostics(
+            &format!("{path}/{source}"),
+            self.original_amount_raw.as_deref(),
+            self.original_amount_ct,
+            self.original_currency.as_deref(),
+        );
+        let reference_path = format!("{path}/OrgnlTxRef/Amt");
+        if let Some(settlement) = &self.original_settlement_amount {
+            result
+                .extend(settlement.diagnostics(&format!("{path}/OrgnlTxRef/IntrBkSttlmAmt"), None));
+        }
+        if let Some(legacy) = &self.legacy_referenced_amount {
+            result.extend(legacy.diagnostics(&format!("{path}/OrgnlTxRef/InstdAmt"), None));
+            result.push(crate::camt::FinancialDiagnostic {
+                path: format!("{path}/OrgnlTxRef"),
+                issue: crate::camt::FinancialIssue::ConflictingAlternatives,
+                raw: None,
+            });
+        }
+        if let Some(reference) = &self.referenced_amount {
+            if self.original_amount_source != self.referenced_amount_source {
+                let source = self
+                    .referenced_amount_source
+                    .map_or("referenced_amount", crate::camt::OriginalAmountSource::path);
+                result.extend(reference.diagnostics(&format!("{path}/{source}"), None));
+            }
+            if self
+                .original_amount_ct
+                .zip(reference.ct)
+                .is_some_and(|(primary, reference)| primary != reference)
+                || self
+                    .original_currency
+                    .as_deref()
+                    .zip(reference.currency.as_deref())
+                    .is_some_and(|(primary, reference)| primary != reference)
+            {
+                result.push(crate::camt::FinancialDiagnostic {
+                    path: path.to_owned(),
+                    issue: crate::camt::FinancialIssue::ConflictingAlternatives,
+                    raw: None,
+                });
+            }
+        }
+        if let Some(equivalent) = &self.referenced_equivalent_amount {
+            result.extend(equivalent.diagnostics(&format!("{reference_path}/EqvtAmt/Amt"), None));
+            result.extend(crate::camt::currency_diagnostics(
+                &format!("{reference_path}/EqvtAmt/CcyOfTrf"),
+                self.referenced_transfer_currency.as_deref(),
+            ));
+            if self.referenced_amount.is_some() {
+                result.push(crate::camt::FinancialDiagnostic {
+                    path: reference_path,
+                    issue: crate::camt::FinancialIssue::ConflictingAlternatives,
+                    raw: None,
+                });
+            }
+        }
+        result
+    }
+
     /// Whether this transaction's cancellation was accepted.
     ///
     /// A transaction the bank listed without a status is **not** an acceptance.
@@ -479,6 +564,10 @@ pub struct GroupCancellationStatus {
     pub original_number_of_transactions: Option<u64>,
     /// `OrgnlCtrlSum`, in ct.
     pub original_control_sum_ct: Option<i64>,
+    /// Decoded original control sum, including unrepresentable reported values.
+    pub original_control_sum_raw: Option<String>,
+    /// Decoded original transaction count, including unreadable values.
+    pub original_number_of_transactions_raw: Option<String>,
     /// `GrpCxlSts` — the status of cancelling the whole submission.
     pub status: Option<CancellationStatus>,
     /// `CxlStsRsnInf/Rsn` at message level.
@@ -545,6 +634,64 @@ pub struct Camt029Document {
 }
 
 impl Camt029Document {
+    /// Located problems in current monetary observations, not XSD validation.
+    /// Optional amounts are not postings; control sums need no currency/sign.
+    #[must_use]
+    pub fn financial_diagnostics(&self) -> Vec<crate::camt::FinancialDiagnostic> {
+        let mut result = Vec::new();
+        for (index, group) in self.groups.iter().enumerate() {
+            let path = format!("CxlDtls[{index}]");
+            result.extend(crate::camt::optional_count_diagnostics(
+                &format!("{path}/OrgnlGrpInfAndSts/OrgnlNbOfTxs"),
+                group.original_number_of_transactions_raw.as_deref(),
+                group.original_number_of_transactions,
+            ));
+            result.extend(crate::camt::optional_decimal_diagnostics(
+                &format!("{path}/OrgnlGrpInfAndSts/OrgnlCtrlSum"),
+                group.original_control_sum_raw.as_deref(),
+                group.original_control_sum_ct,
+            ));
+            for (index, count) in group.status_counts.iter().enumerate() {
+                result.extend(crate::camt::optional_count_diagnostics(
+                    &format!("{path}/OrgnlGrpInfAndSts/NbOfTxsPerCxlSts[{index}]/DtldNbOfTxs"),
+                    count.count_raw.as_deref(),
+                    count.count,
+                ));
+                result.extend(crate::camt::optional_decimal_diagnostics(
+                    &format!("{path}/OrgnlGrpInfAndSts/NbOfTxsPerCxlSts[{index}]/DtldCtrlSum"),
+                    count.control_sum_raw.as_deref(),
+                    count.control_sum_ct,
+                ));
+            }
+            for (index, transaction) in group.transactions.iter().enumerate() {
+                result.extend(
+                    transaction.financial_diagnostics(&format!("{path}/TxInfAndSts[{index}]")),
+                );
+            }
+            for (index, info) in group.payment_infos.iter().enumerate() {
+                let path = format!("{path}/OrgnlPmtInfAndSts[{index}]");
+                for (index, count) in info.status_counts.iter().enumerate() {
+                    result.extend(crate::camt::optional_count_diagnostics(
+                        &format!("{path}/NbOfTxsPerCxlSts[{index}]/DtldNbOfTxs"),
+                        count.count_raw.as_deref(),
+                        count.count,
+                    ));
+                    result.extend(crate::camt::optional_decimal_diagnostics(
+                        &format!("{path}/NbOfTxsPerCxlSts[{index}]/DtldCtrlSum"),
+                        count.control_sum_raw.as_deref(),
+                        count.control_sum_ct,
+                    ));
+                }
+                for (index, transaction) in info.transactions.iter().enumerate() {
+                    result.extend(
+                        transaction.financial_diagnostics(&format!("{path}/TxInfAndSts[{index}]")),
+                    );
+                }
+            }
+        }
+        result
+    }
+
     /// When the bank generated this answer, typed.
     ///
     /// `None` when it reported none, or one this crate cannot read;
@@ -682,12 +829,24 @@ pub enum Camt029ParseError {
 /// [`Camt029ParseError::MissingElement`] for an absent `Assgnmt`/`Id`, or
 /// [`Camt029ParseError::Xml`] when the input is not well-formed.
 pub fn parse_camt029(xml: &str) -> Result<Camt029Document, Camt029ParseError> {
-    let doc = Document::parse(xml)?;
-    let namespace = doc.namespace;
+    parse_camt029_with_limits(xml, crate::ParseLimits::default())
+}
+
+/// Parse a camt.029 document with explicit finite resource limits.
+///
+/// # Errors
+/// Returns an error for invalid XML, unsupported identity or an exhausted limit.
+pub fn parse_camt029_with_limits(
+    xml: &str,
+    limits: crate::ParseLimits,
+) -> Result<Camt029Document, Camt029ParseError> {
+    let doc = Document::parse_with_limits(xml, limits)?;
+    let namespace = doc.namespace.clone();
     let root = doc
         .root
         .child("RsltnOfInvstgtn")
         .ok_or(Camt029ParseError::NotCamt029)?;
+    doc.message("camt.029", "RsltnOfInvstgtn", &["001.06"])?;
 
     let assignment = root
         .child("Assgnmt")
@@ -747,11 +906,11 @@ fn parse_counts(block: &Node) -> Vec<CancellationCount> {
     block
         .children_named("NbOfTxsPerCxlSts")
         .map(|n| CancellationCount {
-            status: n.text_of("DtldSts").map_or_else(
-                || CancellationStatus::Other(String::new()),
-                CancellationStatus::from_code,
-            ),
+            status: n.text_of("DtldSts").map(CancellationStatus::from_code),
+            status_raw: n.raw_text_of("DtldSts").map(str::to_owned),
             count: n.text_of("DtldNbOfTxs").and_then(|v| v.parse().ok()),
+            count_raw: n.raw_text_of("DtldNbOfTxs").map(str::to_owned),
+            control_sum_raw: n.raw_text_of("DtldCtrlSum").map(str::to_owned),
             control_sum_ct: n
                 .text_of("DtldCtrlSum")
                 .and_then(|v| crate::ct_from_eur_str(v).ok()),
@@ -762,7 +921,7 @@ fn parse_counts(block: &Node) -> Vec<CancellationCount> {
 fn parse_group(block: &Node) -> GroupCancellationStatus {
     let header = block.child("OrgnlGrpInfAndSts");
     let (reason_codes, additional_info) = header.map_or_else(Default::default, parse_reasons);
-    let control_sum = header.and_then(|h| h.text_of("OrgnlCtrlSum"));
+    let control_sum = header.and_then(|h| h.raw_text_of("OrgnlCtrlSum"));
     GroupCancellationStatus {
         original_cancellation_id: header
             .and_then(|h| h.text_of("OrgnlGrpCxlId"))
@@ -780,6 +939,10 @@ fn parse_group(block: &Node) -> GroupCancellationStatus {
             .and_then(|h| h.text_of("OrgnlNbOfTxs"))
             .and_then(|v| v.parse().ok()),
         original_control_sum_ct: control_sum.and_then(|v| crate::ct_from_eur_str(v).ok()),
+        original_control_sum_raw: control_sum.map(str::to_owned),
+        original_number_of_transactions_raw: header
+            .and_then(|node| node.raw_text_of("OrgnlNbOfTxs"))
+            .map(str::to_owned),
         status: header
             .and_then(|h| h.text_of("GrpCxlSts"))
             .map(CancellationStatus::from_code),
@@ -819,13 +982,37 @@ fn parse_transaction(tx: &Node) -> TransactionCancellationStatus {
     let (reason_codes, additional_info) = parse_reasons(tx);
     // `OrgnlInstdAmt` sits on the transaction; `OrgnlTxRef/Amt/InstdAmt` is
     // where some banks put the same figure instead.
-    let amount = amount_of(tx, "OrgnlInstdAmt").or_else(|| {
-        tx.child("OrgnlTxRef").and_then(|r| {
-            r.child("Amt")
-                .map_or_else(|| amount_of(r, "InstdAmt"), |a| amount_of(a, "InstdAmt"))
-        })
-    });
     let orig_ref = tx.child("OrgnlTxRef");
+    let canonical_parent = orig_ref
+        .and_then(|reference| reference.child("Amt"))
+        .filter(|parent| parent.child("InstdAmt").is_some());
+    let referenced_amount = orig_ref.and_then(|reference| {
+        let parent = canonical_parent.unwrap_or(reference);
+        parent
+            .child("InstdAmt")
+            .map(|_| ReportedAmount::parse(parent, "InstdAmt"))
+    });
+    let referenced_amount_source = referenced_amount.as_ref().map(|_| {
+        if canonical_parent.is_some() {
+            crate::camt::OriginalAmountSource::TransactionReference
+        } else {
+            crate::camt::OriginalAmountSource::LegacyTransactionReference
+        }
+    });
+    let legacy_referenced_amount = orig_ref
+        .filter(|reference| canonical_parent.is_some() && reference.child("InstdAmt").is_some())
+        .map(|reference| ReportedAmount::parse(reference, "InstdAmt"));
+    let original_amount_source = if tx.child("OrgnlInstdAmt").is_some() {
+        Some(crate::camt::OriginalAmountSource::OriginalInstructed)
+    } else {
+        referenced_amount_source
+    };
+    let amount = if tx.child("OrgnlInstdAmt").is_some() {
+        ReportedAmount::parse(tx, "OrgnlInstdAmt")
+    } else {
+        referenced_amount.clone().unwrap_or_default()
+    };
+    let equivalent = orig_ref.and_then(|reference| reference.path(&["Amt", "EqvtAmt"]));
     let date_of = |tag: &str| {
         tx.text_of(tag)
             .or_else(|| orig_ref.and_then(|r| r.text_of(tag.trim_start_matches("Orgnl"))))
@@ -838,8 +1025,20 @@ fn parse_transaction(tx: &Node) -> TransactionCancellationStatus {
         status: tx.text_of("TxCxlSts").map(CancellationStatus::from_code),
         reason_codes,
         additional_info,
-        original_amount_ct: amount.as_ref().map(|(ct, _)| *ct),
-        original_currency: amount.map(|(_, ccy)| ccy),
+        original_amount_ct: amount.ct,
+        original_currency: amount.currency,
+        original_amount_raw: amount.amount_raw,
+        original_amount_source,
+        referenced_amount,
+        referenced_amount_source,
+        legacy_referenced_amount,
+        original_settlement_amount: orig_ref
+            .filter(|reference| reference.child("IntrBkSttlmAmt").is_some())
+            .map(|reference| ReportedAmount::parse(reference, "IntrBkSttlmAmt")),
+        referenced_equivalent_amount: equivalent.map(|node| ReportedAmount::parse(node, "Amt")),
+        referenced_transfer_currency: equivalent
+            .and_then(|node| node.raw_text_of("CcyOfTrf"))
+            .map(str::to_owned),
         original_execution_date_raw: date_of("OrgnlReqdExctnDt"),
         original_collection_date_raw: date_of("OrgnlReqdColltnDt"),
     }
@@ -919,7 +1118,7 @@ mod tests {
         assert!(doc.is_accepted());
         assert!(doc.is_final());
         assert!(!doc.has_rejections());
-        assert!(doc.rejection_reasons().is_empty());
+        assert_eq!(doc.rejection_reasons().len(), 0);
 
         let g = &doc.groups[0];
         assert_eq!(g.original_message_id.as_deref(), Some("DD-2026-07-001"));
@@ -929,7 +1128,10 @@ mod tests {
         let p = &g.payment_infos[0];
         assert_eq!(p.original_payment_info_id.as_deref(), Some("PMT-A"));
         assert_eq!(p.original_cancellation_id.as_deref(), Some("PC-1"));
-        assert_eq!(p.status_counts[0].status, CancellationStatus::Accepted);
+        assert_eq!(
+            p.status_counts[0].status,
+            Some(CancellationStatus::Accepted)
+        );
         assert_eq!(p.status_counts[0].count, Some(1));
         assert_eq!(p.status_counts[0].control_sum_ct, Some(7_500));
 
@@ -958,7 +1160,7 @@ mod tests {
 
         let reasons = doc.rejection_reasons();
         assert_eq!(reasons, [&RejectionReason::Ardt]);
-        assert!(reasons[0].is_too_late(), "ARDT means pain.007 is the route");
+        assert!(reasons[0].is_already_returned());
         assert_eq!(
             doc.groups[0].additional_info,
             [
@@ -966,6 +1168,29 @@ mod tests {
                 "Bitte pain.007 verwenden"
             ]
         );
+    }
+
+    #[test]
+    fn already_returned_reason_matches_the_pinned_schema() {
+        let schema = include_str!("../tests/xsd/camt.029.001.06.xsd");
+        assert!(
+            schema.contains(
+                "Cancellation not accepted as the transaction has already been returned."
+            )
+        );
+        assert!(RejectionReason::from_code("ARDT").is_already_returned());
+        for reason in [
+            RejectionReason::Legl,
+            RejectionReason::Agnt,
+            RejectionReason::Cust,
+            RejectionReason::Noas,
+            RejectionReason::Noor,
+            RejectionReason::Ac04,
+            RejectionReason::Am04,
+            RejectionReason::Other("UNKNOWN".into()),
+        ] {
+            assert!(!reason.is_already_returned(), "{reason}");
+        }
     }
 
     #[test]
@@ -1001,7 +1226,7 @@ mod tests {
         let doc = parse_camt029(xml).unwrap();
         assert_eq!(doc.outcome, None);
         assert!(!doc.is_accepted());
-        assert!(doc.groups.is_empty());
+        assert_eq!(doc.groups.len(), 0);
     }
 
     #[test]
@@ -1071,7 +1296,9 @@ mod tests {
             Err(Camt029ParseError::NotCamt029)
         ));
         assert!(matches!(
-            parse_camt029("<Document><RsltnOfInvstgtn/></Document>"),
+            parse_camt029(
+                "<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:camt.029.001.06\"><RsltnOfInvstgtn/></Document>"
+            ),
             Err(Camt029ParseError::MissingElement { tag: "Assgnmt" })
         ));
     }
@@ -1092,8 +1319,11 @@ mod tests {
         assert!(!CancellationStatus::Other("XX".to_owned()).is_final());
         assert_eq!(
             ResolutionOutcome::from_code("cncl"),
-            ResolutionOutcome::Cancelled
+            ResolutionOutcome::Other("cncl".to_owned())
         );
-        assert_eq!(RejectionReason::from_code("ardt"), RejectionReason::Ardt);
+        assert_eq!(
+            RejectionReason::from_code("ardt"),
+            RejectionReason::Other("ardt".to_owned())
+        );
     }
 }

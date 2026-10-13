@@ -37,7 +37,7 @@
 //!
 //! `Cdtr/PstlAdr` sits on the group (it belongs to the account holder) and
 //! `Dbtr/PstlAdr` on each collection. Both are optional, and both must be
-//! structured or hybrid — see [`PostalAddress`] for which forms SEPA accepts.
+//! structured or hybrid — see [`PostalAddress`] for the supported forms.
 //! The legacy DK schema cannot carry one and says so with
 //! [`ValidationError::UnsupportedBySchema`].
 //!
@@ -46,7 +46,7 @@
 //! - ISO 20022 pain.008.001.08 / pain.008.001.02 / pain.008.003.02 schemas
 //! - EPC130-08 SDD Core Customer-to-PSP Implementation Guidelines, 2025 version
 //! - EPC131-08 SDD B2B Customer-to-PSP Implementation Guidelines, 2025 version
-//! - EPC153-22 v2.1, Provision of Addresses under the EPC Payment Schemes
+//! - EPC153-22 v2.2, Provision of Addresses under the EPC Payment Schemes
 //! - Deutsche Bundesbank pain.008 implementation guide (DFÜ-Abkommen V2.7)
 //!
 //! ## Example
@@ -509,8 +509,7 @@ impl MandateAmendment {
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError::Empty`] when nothing actually changed — an
-    /// amendment carrying no detail is rejected by the debtor's bank —
+    /// Returns [`ValidationError::Empty`] when no change details are supplied,
     /// [`ValidationError::MutuallyExclusive`] when the previous debtor account
     /// is both stated and marked `SMNDA`, or a length/character error on the
     /// individual fields.

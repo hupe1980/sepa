@@ -19,6 +19,14 @@ env:
   RUSTDOCFLAGS: "-D warnings"
 
 jobs:
+  planning-boundary:
+    name: Internal documentation boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/test-concepts-check.sh
+      - run: bash scripts/concepts-check.sh
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -96,23 +104,25 @@ jobs:
         run: cargo test --all-targets --no-default-features
 
   features:
-    name: Feature combinations
+    name: MSRV feature combinations (Rust 1.88)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         features:
           - "--no-default-features"
-          - ""
-          - "--features serde"
-          - "--features time"
-          - "--features chrono"
-          - "--features serde,time,chrono"
-          - "--features time,chrono"
-          - "--all-features"
+          - "--no-default-features --features serde"
+          - "--no-default-features --features time"
+          - "--no-default-features --features chrono"
+          - "--no-default-features --features serde,time"
+          - "--no-default-features --features serde,chrono"
+          - "--no-default-features --features time,chrono"
+          - "--no-default-features --features serde,time,chrono"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
       - name: Install xmllint
         run: sudo apt-get update && sudo apt-get install -y libxml2-utils

@@ -49,8 +49,13 @@ watch:
     cargo test --all-features --test watch -- --include-ignored
 
 # Full CI gate — run before every commit.
-ci: fmt-check lint verify-data fuzz-seeds-check test-all test-no-features
+ci: fmt-check lint concepts-check verify-data fuzz-seeds-check test-all test-no-features
     @echo "CI gate passed."
+
+# Check local roadmap/spec ownership and prevent public internal-path leaks.
+concepts-check:
+    bash scripts/test-concepts-check.sh
+    bash scripts/concepts-check.sh
 
 # ── Examples ──────────────────────────────────────────────────────────────────
 

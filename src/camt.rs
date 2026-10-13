@@ -8,8 +8,9 @@
 //!
 //! ## Version handling
 //!
-//! ISO reshaped several elements across the v02 → v13 range. The parsers here
-//! accept every generation:
+//! ISO reshaped several elements across the v02 → v13 range. This shared model
+//! handles the shapes below; each public reader enforces its own exact supported
+//! namespace/version list, not every ISO generation:
 //!
 //! | Change | Introduced | Handled by |
 //! |---|---|---|
@@ -31,6 +32,381 @@
 
 use crate::camt054::CreditDebitIndicator;
 use crate::xml::Node;
+
+/// Why a financial observation cannot be used as an exact financial fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum FinancialIssue {
+    /// A required magnitude is absent.
+    MissingAmount,
+    /// The reported text is not a decimal amount.
+    InvalidAmount,
+    /// The reported transaction-count text is not a readable unsigned integer.
+    InvalidCount,
+    /// An amount magnitude is negative.
+    NegativeAmount,
+    /// Significant digits below one hundredth cannot be represented.
+    SubCentPrecision,
+    /// The exact amount or count cannot fit its integer representation.
+    Overflow,
+    /// The amount has no reported currency.
+    MissingCurrency,
+    /// Currency spelling is malformed or reserved, not a registry lookup.
+    InvalidCurrency,
+    /// A required ledger direction is absent.
+    MissingDirection,
+    /// A reported direction is not an exact supported wire code.
+    InvalidDirection,
+    /// Raw and interpreted facts disagree.
+    InconsistentValue,
+    /// Independently reported alternatives disagree or violate a choice.
+    ConflictingAlternatives,
+    /// Denominations are not comparable for the requested aggregate.
+    CurrencyMismatch,
+    /// Independently reported aggregate and record magnitudes disagree.
+    TotalMismatch,
+}
+
+/// Observed source of an original instructed amount, never inferred from value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum OriginalAmountSource {
+    /// Transaction-level `OrgnlInstdAmt`.
+    OriginalInstructed,
+    /// `OrgnlTxRef/Amt/InstdAmt`.
+    TransactionReference,
+    /// Historical direct `OrgnlTxRef/InstdAmt` observation.
+    LegacyTransactionReference,
+}
+
+impl OriginalAmountSource {
+    pub(crate) const fn path(self) -> &'static str {
+        match self {
+            Self::OriginalInstructed => "OrgnlInstdAmt",
+            Self::TransactionReference => "OrgnlTxRef/Amt/InstdAmt",
+            Self::LegacyTransactionReference => "OrgnlTxRef/InstdAmt",
+        }
+    }
+}
+
+/// Observed route of a cash transaction's itemized amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum DetailAmountSource {
+    /// Direct `TxDtls/Amt`.
+    Direct,
+    /// Nested `TxDtls/AmtDtls/TxAmt/Amt`.
+    TransactionAmount,
+}
+
+impl DetailAmountSource {
+    pub(crate) const fn path(self) -> &'static str {
+        match self {
+            Self::Direct => "Amt",
+            Self::TransactionAmount => "AmtDtls/TxAmt/Amt",
+        }
+    }
+}
+
+/// A located observation problem, not an XSD verdict or payment decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FinancialDiagnostic {
+    /// Logical ISO field location; retained-record indices are zero-based.
+    /// Detail indices address flattened observations, not executable `XPath`.
+    pub path: String,
+    /// Machine-readable reason.
+    pub issue: FinancialIssue,
+    /// Decoded reported text, including empty/padded text.
+    /// `None` indicates no scalar text, including derived/container problems.
+    pub raw: Option<String>,
+}
+
+pub(crate) fn currency_diagnostics(path: &str, raw: Option<&str>) -> Vec<FinancialDiagnostic> {
+    let issue = match raw {
+        None => Some(FinancialIssue::MissingCurrency),
+        Some(raw)
+            if crate::Currency::new(raw)
+                .ok()
+                .is_none_or(|currency| currency.code() != raw) =>
+        {
+            Some(FinancialIssue::InvalidCurrency)
+        }
+        Some(_) => None,
+    };
+    issue
+        .into_iter()
+        .map(|issue| FinancialDiagnostic {
+            path: path.to_owned(),
+            issue,
+            raw: raw.map(str::to_owned),
+        })
+        .collect()
+}
+
+pub(crate) fn decimal_diagnostics(
+    path: &str,
+    raw: Option<&str>,
+    interpreted: Option<i64>,
+    nonnegative: bool,
+) -> Vec<FinancialDiagnostic> {
+    let issue = match raw.map(crate::ct_from_eur_str) {
+        None if interpreted.is_none() => Some(FinancialIssue::MissingAmount),
+        None => interpreted
+            .filter(|value| nonnegative && *value < 0)
+            .map(|_| FinancialIssue::NegativeAmount),
+        Some(Err(crate::AmountError::SubCentPrecision { .. })) => {
+            Some(FinancialIssue::SubCentPrecision)
+        }
+        Some(Err(crate::AmountError::Overflow { .. })) => Some(FinancialIssue::Overflow),
+        Some(Err(_)) => Some(FinancialIssue::InvalidAmount),
+        Some(Ok(value)) if nonnegative && value < 0 => Some(FinancialIssue::NegativeAmount),
+        Some(Ok(value)) if Some(value) != interpreted => Some(FinancialIssue::InconsistentValue),
+        Some(Ok(_)) => None,
+    };
+    issue
+        .into_iter()
+        .map(|issue| FinancialDiagnostic {
+            path: path.to_owned(),
+            issue,
+            raw: raw.map(str::to_owned),
+        })
+        .collect()
+}
+
+pub(crate) fn optional_amount_diagnostics(
+    path: &str,
+    raw: Option<&str>,
+    ct: Option<i64>,
+    currency: Option<&str>,
+) -> Vec<FinancialDiagnostic> {
+    if raw.is_none() && ct.is_none() && currency.is_none() {
+        return Vec::new();
+    }
+    ReportedAmount {
+        ct,
+        amount_raw: raw.map(str::to_owned),
+        currency: currency.map(str::to_owned),
+        ..Default::default()
+    }
+    .diagnostics(path, None)
+}
+
+pub(crate) fn optional_count_diagnostics(
+    path: &str,
+    raw: Option<&str>,
+    count: Option<u64>,
+) -> Vec<FinancialDiagnostic> {
+    let issue = match raw {
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(value) if Some(value) == count => None,
+            Ok(_) => Some(FinancialIssue::InconsistentValue),
+            Err(error) if matches!(error.kind(), std::num::IntErrorKind::PosOverflow) => {
+                Some(FinancialIssue::Overflow)
+            }
+            Err(_) => Some(FinancialIssue::InvalidCount),
+        },
+        None => count.map(|_| FinancialIssue::InconsistentValue),
+    };
+    issue.map_or_else(Vec::new, |issue| {
+        vec![FinancialDiagnostic {
+            path: path.to_owned(),
+            issue,
+            raw: raw.map(str::to_owned),
+        }]
+    })
+}
+
+pub(crate) fn optional_decimal_diagnostics(
+    path: &str,
+    raw: Option<&str>,
+    ct: Option<i64>,
+) -> Vec<FinancialDiagnostic> {
+    if raw.is_none() && ct.is_none() {
+        Vec::new()
+    } else {
+        decimal_diagnostics(path, raw, ct, false)
+    }
+}
+
+fn charge_diagnostics(path: &str, charges: &Charges, result: &mut Vec<FinancialDiagnostic>) {
+    if charges.has_mixed_sources() {
+        result.push(FinancialDiagnostic {
+            path: path.to_owned(),
+            issue: FinancialIssue::ConflictingAlternatives,
+            raw: None,
+        });
+    }
+    let aggregate = format!("{path}/TtlChrgsAndTaxAmt");
+    result.extend(optional_amount_diagnostics(
+        &aggregate,
+        charges.total_amount_raw.as_deref(),
+        charges.total_ct,
+        charges.total_currency.as_deref(),
+    ));
+    let currency = charges
+        .records
+        .first()
+        .and_then(|record| record.amount.currency.as_deref());
+    for (index, record) in charges.records.iter().enumerate() {
+        let record_path = if record.source == Some(ChargeRecordSource::LegacyFlat) {
+            path.to_owned()
+        } else {
+            format!("{path}/Rcrd[{index}]")
+        };
+        result.extend(record.amount.diagnostics(
+            &format!("{record_path}/Amt"),
+            Some(&format!("{record_path}/CdtDbtInd")),
+        ));
+        if let (Some(expected), Some(actual)) = (currency, record.amount.currency.as_deref())
+            && expected != actual
+        {
+            result.push(FinancialDiagnostic {
+                path: format!("{record_path}/Amt/@Ccy"),
+                issue: FinancialIssue::CurrencyMismatch,
+                raw: Some(actual.to_owned()),
+            });
+        }
+    }
+    if let (Some(expected), Some(actual)) = (currency, charges.total_currency.as_deref())
+        && charges.total_amount_raw.is_some()
+        && expected != actual
+    {
+        result.push(FinancialDiagnostic {
+            path: format!("{aggregate}/@Ccy"),
+            issue: FinancialIssue::CurrencyMismatch,
+            raw: Some(actual.to_owned()),
+        });
+    }
+    if let Some(total) = charges.total_ct {
+        let comparable = charges.total_currency.as_deref().is_some_and(|currency| {
+            charges.records.iter().all(|record| {
+                record.amount.currency.as_deref() == Some(currency)
+                    && record.amount.diagnostics("", None).is_empty()
+            })
+        }) && optional_amount_diagnostics(
+            "",
+            charges.total_amount_raw.as_deref(),
+            charges.total_ct,
+            charges.total_currency.as_deref(),
+        )
+        .is_empty();
+        let sum = charges.records.iter().try_fold(0_i128, |sum, record| {
+            sum.checked_add(i128::from(record.amount.ct?))
+        });
+        if comparable
+            && !charges.has_mixed_sources()
+            && !charges.records.is_empty()
+            && sum.is_some_and(|sum| sum != i128::from(total))
+        {
+            result.push(FinancialDiagnostic {
+                path: aggregate,
+                issue: FinancialIssue::TotalMismatch,
+                raw: charges.total_amount_raw.clone(),
+            });
+        }
+    }
+}
+
+pub(crate) fn cash_diagnostics(
+    path: &str,
+    balances: &[StatementBalance],
+    entries: &[CashEntry],
+) -> Vec<FinancialDiagnostic> {
+    let mut result = Vec::new();
+    for (index, balance) in balances.iter().enumerate() {
+        let location = format!("{path}/Bal[{index}]");
+        result.extend(balance.amount.diagnostics(
+            &format!("{location}/Amt"),
+            Some(&format!("{location}/CdtDbtInd")),
+        ));
+    }
+    let currency = entries
+        .first()
+        .and_then(|entry| entry.amount.currency.as_deref());
+    for (index, entry) in entries.iter().enumerate() {
+        let location = format!("{path}/Ntry[{index}]");
+        result.extend(entry.amount.diagnostics(
+            &format!("{location}/Amt"),
+            Some(&format!("{location}/CdtDbtInd")),
+        ));
+        if let (Some(expected), Some(actual)) = (currency, entry.amount.currency.as_deref())
+            && expected != actual
+        {
+            result.push(FinancialDiagnostic {
+                path: format!("{location}/Amt/@Ccy"),
+                issue: FinancialIssue::CurrencyMismatch,
+                raw: Some(actual.to_owned()),
+            });
+        }
+        if let Some(charges) = &entry.charges {
+            charge_diagnostics(&format!("{location}/Chrgs"), charges, &mut result);
+        }
+        for (index, detail) in entry.details.iter().enumerate() {
+            let detail_path = format!("{location}/NtryDtls/TxDtls[{index}]");
+            let source = detail
+                .amount_source
+                .map_or("amount", DetailAmountSource::path);
+            if detail.amount_source.is_some()
+                || detail.amount.amount_raw.is_some()
+                || detail.amount.ct.is_some()
+                || detail.amount.currency.is_some()
+            {
+                result.extend(detail.amount.diagnostics(
+                    &format!("{detail_path}/{source}"),
+                    Some(&format!("{detail_path}/CdtDbtInd")),
+                ));
+            }
+            if let Some(transaction) = &detail.transaction_amount {
+                if detail.amount_source != Some(DetailAmountSource::TransactionAmount) {
+                    result.extend(
+                        transaction.diagnostics(&format!("{detail_path}/AmtDtls/TxAmt/Amt"), None),
+                    );
+                }
+                if detail
+                    .amount
+                    .ct
+                    .zip(transaction.ct)
+                    .is_some_and(|(direct, nested)| direct != nested)
+                    || detail
+                        .amount
+                        .currency
+                        .as_deref()
+                        .zip(transaction.currency.as_deref())
+                        .is_some_and(|(direct, nested)| direct != nested)
+                {
+                    result.push(FinancialDiagnostic {
+                        path: detail_path.clone(),
+                        issue: FinancialIssue::ConflictingAlternatives,
+                        raw: None,
+                    });
+                }
+            }
+            if detail
+                .amount
+                .currency
+                .as_deref()
+                .or(detail.signed_currency.as_deref())
+                .zip(entry.amount.currency.as_deref())
+                .is_some_and(|(own, parent)| own != parent)
+            {
+                result.push(FinancialDiagnostic {
+                    path: format!("{detail_path}/{source}/@Ccy"),
+                    issue: FinancialIssue::CurrencyMismatch,
+                    raw: detail.amount.currency.clone(),
+                });
+            }
+            if let Some(charges) = &detail.charges {
+                charge_diagnostics(&format!("{detail_path}/Chrgs"), charges, &mut result);
+            }
+        }
+    }
+    result
+}
 
 // ── BalanceType ───────────────────────────────────────────────────────────────
 
@@ -81,7 +457,7 @@ impl BalanceType {
     }
 
     pub(crate) fn from_code(s: &str) -> Self {
-        match s.trim().to_ascii_uppercase().as_str() {
+        match s.trim() {
             "OPBD" => Self::OpeningBooked,
             "CLBD" => Self::ClosingBooked,
             "ITBD" => Self::IntradayBooked,
@@ -100,7 +476,7 @@ impl BalanceType {
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EntryStatus {
-    /// `BOOK` — Booked / settled.
+    /// `BOOK` — booked on the account, not proof of irrevocable settlement.
     Booked,
     /// `PDNG` — Pending (not yet settled).
     Pending,
@@ -114,7 +490,7 @@ pub enum EntryStatus {
 
 impl EntryStatus {
     pub(crate) fn from_code(s: &str) -> Self {
-        match s.trim().to_ascii_uppercase().as_str() {
+        match s.trim() {
             "BOOK" => Self::Booked,
             "PDNG" => Self::Pending,
             "INFO" => Self::Info,
@@ -199,8 +575,8 @@ impl StatementBalance {
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReportedAmount {
-    /// Magnitude in **ct** — 1/100 of [`currency`](Self::currency) — always
-    /// non-negative.
+    /// Parsed magnitude in **ct** — 1/100 of [`currency`](Self::currency).
+    /// Signing rechecks public/restored observations before trusting them.
     ///
     /// `None` when `Amt` was absent, or carried a value this type cannot hold:
     /// a magnitude outside `i64` ct, or significant digits below one cent.
@@ -212,7 +588,7 @@ pub struct ReportedAmount {
     /// a detail in a different currency is excluded from its entry's sum, so
     /// guessing here silently changes which transactions are counted.
     pub currency: Option<String>,
-    /// `Amt` exactly as the bank wrote it.
+    /// Decoded `Amt` text, preserving padding/empty values but not source bytes.
     pub amount_raw: Option<String>,
     /// Credit (into the account) or debit (out of it).
     ///
@@ -224,24 +600,93 @@ pub struct ReportedAmount {
     pub direction_raw: Option<String>,
 }
 
+pub(crate) fn net_movement_ct(entries: &[CashEntry]) -> Option<i64> {
+    let mut currency = None;
+    let total = entries.iter().try_fold(0_i128, |total, entry| {
+        let denomination = entry.amount.currency.as_deref()?;
+        if currency.is_some_and(|previous| previous != denomination) {
+            return None;
+        }
+        currency = Some(denomination);
+        total.checked_add(i128::from(entry.signed_ct()?))
+    })?;
+    i64::try_from(total).ok()
+}
+
 impl ReportedAmount {
+    /// Inspect current facts without mutating them or guessing missing values.
+    ///
+    /// `amount_path` locates the amount element. Supply `direction_path` only
+    /// when a ledger sign is required; instructed amounts need no such sign.
+    /// Currency checks cover spelling/reserved codes, not registry membership.
+    #[must_use]
+    pub fn diagnostics(
+        &self,
+        amount_path: &str,
+        direction_path: Option<&str>,
+    ) -> Vec<FinancialDiagnostic> {
+        let mut result =
+            decimal_diagnostics(amount_path, self.amount_raw.as_deref(), self.ct, true);
+        result.extend(currency_diagnostics(
+            &format!("{amount_path}/@Ccy"),
+            self.currency.as_deref(),
+        ));
+        if let Some(path) = direction_path {
+            let issue = match (self.direction_raw.as_deref(), self.direction) {
+                (None, None) => Some(FinancialIssue::MissingDirection),
+                (Some(raw), _) if raw.parse::<CreditDebitIndicator>().is_err() => {
+                    Some(FinancialIssue::InvalidDirection)
+                }
+                (Some(raw), direction) if raw.parse::<CreditDebitIndicator>().ok() != direction => {
+                    Some(FinancialIssue::InconsistentValue)
+                }
+                _ => None,
+            };
+            if let Some(issue) = issue {
+                result.push(FinancialDiagnostic {
+                    path: path.to_owned(),
+                    issue,
+                    raw: self.direction_raw.clone(),
+                });
+            }
+        }
+        result
+    }
+
     /// The ledger figure: positive for a credit, negative for a debit.
     ///
     /// `None` when the statement did not determine it — either the magnitude or
-    /// the direction is missing. There is no safe substitute for either, and
+    /// the direction/currency is missing or facts conflict. There is no safe substitute, and
     /// the raw fields hold whatever arrived so an importer can log *what* it
     /// could not read and escalate the row rather than post a guess.
     #[inline]
     #[must_use]
     pub fn signed_ct(&self) -> Option<i64> {
-        Some(signed(self.direction?, self.ct?))
+        let currency = self.currency.as_deref()?;
+        if crate::Currency::new(currency).ok()?.code() != currency {
+            return None;
+        }
+        let direction = self.direction?;
+        let magnitude = self.ct?;
+        if self
+            .amount_raw
+            .as_deref()
+            .is_some_and(|raw| crate::ct_from_eur_str(raw).ok() != Some(magnitude))
+            || self
+                .direction_raw
+                .as_deref()
+                .is_some_and(|raw| raw.parse::<CreditDebitIndicator>().ok() != Some(direction))
+        {
+            return None;
+        }
+        signed(direction, magnitude)
     }
 
     /// Whether a ledger figure could be established at all.
     #[inline]
     #[must_use]
     pub fn is_resolved(&self) -> bool {
-        self.ct.is_some() && self.direction.is_some()
+        self.signed_ct().is_some()
     }
 
     /// Whether this amount is denominated in `currency`, case-insensitively.
@@ -258,18 +703,18 @@ impl ReportedAmount {
     }
 
     /// Read `Amt` and `CdtDbtInd` from a node, inventing nothing.
-    fn parse(node: &Node, tag: &str) -> Self {
+    pub(crate) fn parse(node: &Node, tag: &str) -> Self {
         let (ct, currency, amount_raw) = match node.child(tag) {
             None => (None, None, None),
             Some(amt) => (
                 crate::ct_from_eur_str(&amt.text)
                     .ok()
-                    .and_then(i64::checked_abs),
+                    .filter(|value| *value >= 0),
                 amt.attr("Ccy").map(str::to_owned),
                 Some(amt.text.clone()),
             ),
         };
-        let (direction, direction_raw) = match node.text_of("CdtDbtInd") {
+        let (direction, direction_raw) = match node.raw_text_of("CdtDbtInd") {
             None => (None, None),
             Some(raw) => (raw.parse().ok(), Some(raw.to_owned())),
         };
@@ -308,15 +753,24 @@ pub struct EntryDetail {
     /// What **this transaction** stated about its own amount (`TxDtls/Amt`, or
     /// `TxDtls/AmtDtls/TxAmt/Amt` in the versions that omit it).
     ///
-    /// Distinct from [`signed_amount_ct`](Self::signed_amount_ct), which is the
+    /// Distinct from [`signed_ct()`](Self::signed_ct), which is the
     /// *resolved* figure and may have been inherited from the entry. A detail
     /// in a different currency from its entry is real but is not the amount
     /// that hit the account, so it is not summable against the entry total.
     pub amount: ReportedAmount,
+    /// Observed itemized amount route; `None` when no amount was reported.
+    /// This metadata is not inferred from value equality or inherited money.
+    pub amount_source: Option<DetailAmountSource>,
+    /// Independent `AmtDtls/TxAmt/Amt` observation, even when direct `Amt` exists.
+    /// The detail/entry direction applies; disagreement makes signing unavailable.
+    pub transaction_amount: Option<ReportedAmount>,
     /// The resolved ledger amount in **ct**: positive for a credit, negative
     /// for a debit. `None` when it could not be established — see
     /// [`signed_ct`](Self::signed_ct).
-    pub signed_amount_ct: Option<i64>,
+    #[cfg_attr(feature = "serde", serde(skip_deserializing))]
+    signed_amount_ct: Option<i64>,
+    #[cfg_attr(feature = "serde", serde(skip_deserializing))]
+    signed_currency: Option<String>,
     /// End-to-end reference from the original payment instruction.
     pub end_to_end_id: Option<String>,
     /// Mandate reference (direct debits, `MndtId`).
@@ -369,8 +823,38 @@ impl EntryDetail {
     /// multiplies a batch booking by its transaction count.
     #[inline]
     #[must_use]
-    pub const fn signed_ct(&self) -> Option<i64> {
-        self.signed_amount_ct
+    pub fn signed_ct(&self) -> Option<i64> {
+        if let Some(transaction) = &self.transaction_amount {
+            let nested = transaction.signed_ct()?;
+            if self.amount.currency != transaction.currency
+                || self.amount.signed_ct() != Some(nested)
+            {
+                return None;
+            }
+        }
+        let cached = self.signed_amount_ct?;
+        let currency = self.signed_currency.as_deref()?;
+        if self.amount.amount_raw.is_some() {
+            if self.amount.currency.as_deref() != Some(currency)
+                || self.amount.signed_ct() != Some(cached)
+            {
+                return None;
+            }
+        } else {
+            let direction = self.amount.direction?;
+            if self.amount.ct.is_some()
+                || self.amount.currency.is_some()
+                || signed(direction, cached.checked_abs()?) != Some(cached)
+                || self
+                    .amount
+                    .direction_raw
+                    .as_deref()
+                    .is_some_and(|raw| raw.parse::<CreditDebitIndicator>().ok() != Some(direction))
+            {
+                return None;
+            }
+        }
+        Some(cached)
     }
 
     /// Whether this transaction is a return (Rückläufer).
@@ -383,6 +867,17 @@ impl EntryDetail {
 
 // ── Charges ───────────────────────────────────────────────────────────────────
 
+/// Observed shape of an itemized charge, not inferred from amount equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ChargeRecordSource {
+    /// Modern `Chrgs/Rcrd` record.
+    Record,
+    /// Historical fields directly under `Chrgs`.
+    LegacyFlat,
+}
+
 /// One charge a bank levied on an entry or a transaction (`Chrgs/Rcrd`).
 ///
 /// For SEPA the case that matters is a **returned direct debit**: the debtor's
@@ -393,12 +888,12 @@ impl EntryDetail {
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChargeRecord {
+    /// Observed charge shape; absent for records without retained provenance.
+    pub source: Option<ChargeRecordSource>,
     /// The charge, as far as the statement determined it.
     ///
-    /// An *absent* `CdtDbtInd` on a charge is taken as a debit — that is what a
-    /// fee is, and the one direction that cannot inflate a balance if the
-    /// assumption is wrong. An *unrecognised* code is left unresolved, because
-    /// that is a different thing.
+    /// Missing and unrecognised directions remain unresolved. A fee is not
+    /// evidence of a reported debit direction.
     pub amount: ReportedAmount,
     /// `ChrgInclInd` — whether this charge is **already included** in the
     /// entry's own amount.
@@ -455,6 +950,8 @@ pub struct Charges {
     pub total_ct: Option<i64>,
     /// ISO 4217 currency of `total_ct`.
     pub total_currency: Option<String>,
+    /// Decoded `TtlChrgsAndTaxAmt` text, retained even when not representable.
+    pub total_amount_raw: Option<String>,
     /// The individual charges.
     pub records: Vec<ChargeRecord>,
 }
@@ -470,16 +967,38 @@ impl Charges {
     /// them, and a fee understated is a fee somebody eats.
     #[must_use]
     pub fn total_signed_ct(&self) -> Option<i64> {
-        self.records
-            .iter()
-            .try_fold(0i64, |acc, r| acc.checked_add(r.signed_ct()?))
+        if self.has_mixed_sources() {
+            return None;
+        }
+        let currency = self.records.first()?.amount.currency.as_deref()?;
+        if self.total_amount_raw.is_some() {
+            if !self
+                .total_currency
+                .as_deref()?
+                .eq_ignore_ascii_case(currency)
+            {
+                return None;
+            }
+            let magnitude = self.records.iter().try_fold(0i64, |sum, record| {
+                let magnitude = record.amount.ct.filter(|value| *value >= 0)?;
+                sum.checked_add(magnitude)
+            })?;
+            if self.total_ct? != magnitude {
+                return None;
+            }
+        }
+        self.records.iter().try_fold(0i64, |acc, record| {
+            if !record.amount.is_currency(Some(currency)) {
+                return None;
+            }
+            acc.checked_add(record.signed_ct()?)
+        })
     }
 
     /// Whether every record says it is already inside the entry amount.
     ///
-    /// `false` when any record is separate **or** when any record does not say,
-    /// so a caller that adds charges only when this is `false` cannot
-    /// double-count on a bank that omits `ChrgInclInd`.
+    /// `false` means not every record explicitly says included. It is **not**
+    /// permission to post: inspect each record's inclusion, and escalate `None`.
     #[must_use]
     pub fn all_included_in_amount(&self) -> bool {
         !self.records.is_empty()
@@ -489,20 +1008,26 @@ impl Charges {
                 .all(|r| r.included_in_amount == Some(true))
     }
 
+    fn has_mixed_sources(&self) -> bool {
+        self.records
+            .iter()
+            .any(|record| record.source == Some(ChargeRecordSource::LegacyFlat))
+            && self
+                .records
+                .iter()
+                .any(|record| record.source != Some(ChargeRecordSource::LegacyFlat))
+    }
+
     fn parse(node: &Node) -> Option<Self> {
         let chrgs = node.child("Chrgs")?;
         // A charge record is never dropped for being unreadable: a lost fee is
         // a fee somebody eats, and `total_signed_ct` would then sum what is
         // left and report a confident, understated total.
-        let record_of = |n: &Node| {
-            let mut amount = ReportedAmount::parse(n, "Amt");
-            // `Chrgs/Rcrd/CdtDbtInd` is optional, and an absent one on a charge
-            // means a debit: that is what a fee is.
-            if amount.direction_raw.is_none() {
-                amount.direction = Some(CreditDebitIndicator::Debit);
-            }
-            let incl_raw = n.text_of("ChrgInclInd");
+        let record_of = |n: &Node, source| {
+            let amount = ReportedAmount::parse(n, "Amt");
+            let incl_raw = n.raw_text_of("ChrgInclInd");
             ChargeRecord {
+                source: Some(source),
                 amount,
                 // The whole `xs:boolean` lexical space, and nothing else.
                 included_in_amount: incl_raw.and_then(|v| match v.trim() {
@@ -515,22 +1040,24 @@ impl Charges {
             }
         };
 
-        let mut records: Vec<ChargeRecord> = chrgs.children_named("Rcrd").map(&record_of).collect();
+        let mut records: Vec<ChargeRecord> = chrgs
+            .children_named("Rcrd")
+            .map(|node| record_of(node, ChargeRecordSource::Record))
+            .collect();
         // The pre-.001.04 shape puts the charge directly under `Chrgs`.
-        if records.is_empty()
-            && let flat = record_of(chrgs)
-            && flat.amount.amount_raw.is_some()
-        {
+        let flat = record_of(chrgs, ChargeRecordSource::LegacyFlat);
+        if flat.amount.amount_raw.is_some() {
             records.push(flat);
         }
 
-        let total = amount_of(chrgs, "TtlChrgsAndTaxAmt");
-        if records.is_empty() && total.is_none() {
+        let total = ReportedAmount::parse(chrgs, "TtlChrgsAndTaxAmt");
+        if records.is_empty() && total.amount_raw.is_none() {
             return None;
         }
         Some(Self {
-            total_ct: total.as_ref().map(|(ct, _)| *ct),
-            total_currency: total.map(|(_, ccy)| ccy),
+            total_ct: total.ct,
+            total_currency: total.currency,
+            total_amount_raw: total.amount_raw,
             records,
         })
     }
@@ -787,9 +1314,17 @@ impl CashEntry {
     /// one for the other.
     #[must_use]
     pub fn details_signed_sum_ct(&self) -> Option<i64> {
-        self.details
-            .iter()
-            .try_fold(0i64, |acc, d| acc.checked_add(d.signed_ct()?))
+        if self.details.is_empty() {
+            return Some(0);
+        }
+        let currency = self.amount.currency.as_deref()?;
+        let total = self.details.iter().try_fold(0_i128, |sum, detail| {
+            if detail.signed_currency.as_deref() != Some(currency) {
+                return None;
+            }
+            sum.checked_add(i128::from(detail.signed_ct()?))
+        })?;
+        i64::try_from(total).ok()
     }
 
     /// Whether the details resolve and add up to the entry's own signed amount.
@@ -842,20 +1377,6 @@ impl CashEntry {
     }
 }
 
-/// Read an `Amt` element into `(magnitude in cents, currency)`.
-///
-/// ISO 20022 types every camt amount as a non-negative decimal — the direction
-/// lives in a sibling `CdtDbtInd` — so the value is normalised to a magnitude
-/// here and signed exactly once, by [`signed`]. `None` when the text is not a
-/// decimal, or when its magnitude has no `i64`: `-92233720368547758.08` parses
-/// but `i64::MIN.abs()` does not exist, and a panic on a bank file is the one
-/// outcome a payments parser may not have.
-pub(crate) fn amount_of(node: &Node, tag: &str) -> Option<(i64, String)> {
-    let amt = node.child(tag)?;
-    let ct = crate::ct_from_eur_str(&amt.text).ok()?.checked_abs()?;
-    Some((ct, amt.attr("Ccy").unwrap_or("EUR").to_owned()))
-}
-
 /// The date part of an optional bank-supplied date or date-time.
 fn parse_date(raw: Option<&str>) -> Option<crate::IsoDate> {
     crate::IsoDate::parse_date_part(raw?).ok()
@@ -863,13 +1384,14 @@ fn parse_date(raw: Option<&str>) -> Option<crate::IsoDate> {
 
 /// Apply a credit/debit indicator to a magnitude.
 ///
-/// `saturating_neg` rather than `-`: every magnitude reaching here comes from
-/// [`amount_of`] and is non-negative, so the two agree — but negation is the
-/// operation that panics on `i64::MIN`, and the fields it reads are public.
-const fn signed(indicator: CreditDebitIndicator, amount_ct: i64) -> i64 {
+/// Public/restored observations cannot be trusted to contain a valid magnitude.
+const fn signed(indicator: CreditDebitIndicator, amount_ct: i64) -> Option<i64> {
+    if amount_ct < 0 {
+        return None;
+    }
     match indicator {
-        CreditDebitIndicator::Credit => amount_ct,
-        CreditDebitIndicator::Debit => amount_ct.saturating_neg(),
+        CreditDebitIndicator::Credit => Some(amount_ct),
+        CreditDebitIndicator::Debit => amount_ct.checked_neg(),
     }
 }
 
@@ -1013,6 +1535,7 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
     // that is how a single returned collection inside a credit batch is
     // reported.
     let mut amount = ReportedAmount::parse(td, "Amt");
+    let mut amount_source = td.child("Amt").map(|_| DetailAmountSource::Direct);
     // `TxDtls/CdtDbtInd` is optional and overrides the entry's when present.
     // When it is *absent* the entry's applies; when it is present but
     // unreadable it does not silently fall back, because that would resolve a
@@ -1035,15 +1558,19 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
     // same figure in the messages that omit the former. The direction stays the
     // one resolved above — only the magnitude and currency come from the
     // fallback.
+    let transaction_amount = td.path(&["AmtDtls", "TxAmt"]).map(|transaction| {
+        let mut reported = ReportedAmount::parse(transaction, "Amt");
+        reported.direction = amount.direction;
+        reported.direction_raw.clone_from(&amount.direction_raw);
+        reported
+    });
     if amount.amount_raw.is_none()
-        && let Some(fallback) = td
-            .child("AmtDtls")
-            .and_then(|ad| ad.child("TxAmt"))
-            .map(|ta| ReportedAmount::parse(ta, "Amt"))
+        && let Some(fallback) = &transaction_amount
     {
         amount.ct = fallback.ct;
-        amount.currency = fallback.currency;
-        amount.amount_raw = fallback.amount_raw;
+        amount.currency.clone_from(&fallback.currency);
+        amount.amount_raw.clone_from(&fallback.amount_raw);
+        amount_source = Some(DetailAmountSource::TransactionAmount);
     }
 
     let signed_amount_ct = if amount.amount_raw.is_some() {
@@ -1055,7 +1582,7 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
         } else {
             None
         }
-    } else if entry.sole_detail {
+    } else if entry.sole_detail && amount_source.is_none() {
         // A sole detail with no itemised amount inherits the entry's, which is
         // safe precisely because there is one transaction to attribute it to.
         entry.amount.signed_ct()
@@ -1065,7 +1592,10 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
 
     EntryDetail {
         amount,
+        amount_source,
+        transaction_amount,
         signed_amount_ct,
+        signed_currency: entry.amount.currency.clone(),
         end_to_end_id: ref_of("EndToEndId"),
         mandate_id: ref_of("MndtId"),
         creditor_id: ref_of("CdtrId"),
@@ -1127,6 +1657,68 @@ pub(crate) fn balances_of(node: &Node) -> Vec<StatementBalance> {
 #[cfg(test)]
 mod tests {
     use super::{CashEntry, CreditDebitIndicator};
+
+    #[test]
+    fn decoded_money_is_retained_and_conflicting_public_facts_are_unresolved() {
+        let mut parsed =
+            entry("<Ntry><Amt Ccy=\"EUR\"> \n1.00\t </Amt><CdtDbtInd>CRDT</CdtDbtInd></Ntry>");
+        assert_eq!(parsed.amount.amount_raw.as_deref(), Some(" \n1.00\t "));
+        assert_eq!(parsed.signed_ct(), Some(100));
+        parsed.amount.ct = Some(200);
+        assert_eq!(parsed.signed_ct(), None);
+        parsed.amount.ct = Some(100);
+        parsed.amount.direction = Some(CreditDebitIndicator::Debit);
+        assert_eq!(parsed.signed_ct(), None);
+        let mut detail = entry("<Ntry><Amt Ccy=\"EUR\">1.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><NtryDtls><TxDtls><Amt Ccy=\"EUR\">1.00</Amt></TxDtls></NtryDtls></Ntry>").details.remove(0);
+        detail.amount.ct = Some(-100);
+        assert_eq!(detail.signed_ct(), None);
+        let mut inherited = entry("<Ntry><Amt Ccy=\"EUR\">1.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><NtryDtls><TxDtls/></NtryDtls></Ntry>").details.remove(0);
+        assert_eq!(inherited.signed_ct(), Some(100));
+        inherited.amount.direction = Some(CreditDebitIndicator::Debit);
+        assert_eq!(inherited.signed_ct(), None);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn restoration_cannot_inject_a_trusted_detail_cache() {
+        let detail = entry("<Ntry><Amt Ccy=\"EUR\">1.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><NtryDtls><TxDtls/></NtryDtls></Ntry>").details.remove(0);
+        assert_eq!(detail.signed_ct(), Some(100));
+        let mut value = serde_json::to_value(&detail).unwrap();
+        value["signed_amount_ct"] = serde_json::json!(900);
+        let restored: super::EntryDetail = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.signed_ct(), None);
+    }
+
+    #[test]
+    fn invalid_magnitudes_and_missing_charge_directions_never_resolve() {
+        for magnitude in [-1, i64::MIN] {
+            let amount = super::ReportedAmount {
+                ct: Some(magnitude),
+                currency: Some("EUR".to_owned()),
+                direction: Some(CreditDebitIndicator::Debit),
+                ..Default::default()
+            };
+            assert_eq!(amount.signed_ct(), None);
+            assert!(!amount.is_resolved());
+        }
+        let parsed = entry("<Ntry><Chrgs><Rcrd><Amt Ccy=\"EUR\">3.00</Amt></Rcrd></Chrgs></Ntry>");
+        assert_eq!(parsed.charges.unwrap().total_signed_ct(), None);
+        let parsed = entry("<Ntry><Amt Ccy=\"EUR\">-1.00</Amt><CdtDbtInd>DBIT</CdtDbtInd></Ntry>");
+        assert_eq!(parsed.signed_ct(), None);
+    }
+
+    #[test]
+    fn unrecorded_charge_totals_and_mixed_currencies_are_not_zero_or_a_sum() {
+        let parsed = entry(
+            "<Ntry><Chrgs><TtlChrgsAndTaxAmt Ccy=\"USD\">not-money</TtlChrgsAndTaxAmt></Chrgs></Ntry>",
+        );
+        assert!(parsed.charges.is_some());
+        assert_eq!(parsed.charges.unwrap().total_signed_ct(), None);
+        let parsed = entry(
+            "<Ntry><Chrgs><Rcrd><Amt Ccy=\"EUR\">1.00</Amt><CdtDbtInd>DBIT</CdtDbtInd></Rcrd><Rcrd><Amt Ccy=\"USD\">2.00</Amt><CdtDbtInd>DBIT</CdtDbtInd></Rcrd></Chrgs></Ntry>",
+        );
+        assert_eq!(parsed.charges.unwrap().total_signed_ct(), None);
+    }
 
     /// Parse a camt.053 statement whose single `Ntry` is `entry_xml`.
     fn entry(entry_xml: &str) -> CashEntry {
@@ -1379,9 +1971,7 @@ mod tests {
         let charges = doc.statements[0].entries[0].charges.as_ref().unwrap();
         assert_eq!(charges.records[0].included_in_amount, None);
         assert!(!charges.all_included_in_amount());
-        // A charge with no indicator is a debit — a fee is money out, and that
-        // is the direction that cannot inflate a balance if the guess is wrong.
-        assert_eq!(charges.records[0].signed_ct(), Some(-200));
+        assert_eq!(charges.records[0].signed_ct(), None);
     }
 
     #[test]
@@ -1515,7 +2105,7 @@ mod tests {
     #[test]
     fn an_entry_without_details_reconciles_trivially() {
         let e = entry(r#"<Ntry><Amt Ccy="EUR">10.00</Amt><CdtDbtInd>CRDT</CdtDbtInd></Ntry>"#);
-        assert!(e.details.is_empty());
+        assert_eq!(e.details.len(), 0);
         assert_eq!(e.details_signed_sum_ct(), Some(0));
         assert!(e.details_reconcile());
     }

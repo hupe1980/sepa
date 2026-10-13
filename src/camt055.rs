@@ -340,9 +340,9 @@ pub struct OriginalMessage {
     /// different message than the one that was sent, which is the opposite of
     /// what this element is for.
     pub created_at: Option<IsoDateTime>,
-    /// `NbOfTxs` of the original message.
+    /// `NbOfTxs` of the original message; the writer permits at most 15 digits.
     pub number_of_transactions: Option<u64>,
-    /// `CtrlSum` of the original message, in ct.
+    /// `CtrlSum` in hundredths; the writer checks 18-digit decimal precision.
     pub control_sum_ct: Option<i64>,
 }
 
@@ -407,7 +407,25 @@ impl OriginalMessage {
 
     fn validate(&self) -> Result<(), ValidationError> {
         check_id("OrgnlGrpInf/OrgnlMsgId", &self.message_id)?;
-        check_id("OrgnlGrpInf/OrgnlMsgNmId", &self.message_name_id)
+        check_id("OrgnlGrpInf/OrgnlMsgNmId", &self.message_name_id)?;
+        if let Some(count) = self.number_of_transactions {
+            check_text("OrgnlGrpInfAndCxl/NbOfTxs", &count.to_string(), 15)?;
+        }
+        if let Some(amount) = self.control_sum_ct {
+            let scaled = if amount % 100 == 0 {
+                amount / 100
+            } else if amount % 10 == 0 {
+                amount / 10
+            } else {
+                amount
+            };
+            check_text(
+                "OrgnlGrpInfAndCxl/CtrlSum",
+                &scaled.unsigned_abs().to_string(),
+                18,
+            )?;
+        }
+        Ok(())
     }
 
     /// Write the three `OriginalGroupInformation3` elements, unindented.

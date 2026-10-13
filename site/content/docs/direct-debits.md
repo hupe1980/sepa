@@ -71,8 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Scheme | Debtor | Notes |
 |---|---|---|
-| `Core` | Consumers | Default. Refundable for eight weeks without reason |
-| `B2b` | Businesses only | Shorter cycle, no no-questions refund; the debtor's bank must hold the mandate |
+| `Core` | Consumers and businesses | Default. Eight-week no-reason refund for authorised collections |
+| `B2b` | Businesses only | No no-reason refund for authorised collections; the debtor's bank verifies the mandate |
 
 Both can appear in the same file, again as separate groups:
 
@@ -94,8 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Mandate amendments
 
-When anything about the mandate changes, the next collection must say so.
-Omitting the amendment gets the collection rejected with `MD02`.
+Report applicable mandate changes on the next collection. Missing or invalid
+mandate information can result in an `MD02` rejection.
 
 ```rust
 use sepa::{DirectDebitEntry, MandateAmendment, validate_iban};
@@ -120,8 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 The other cases are `creditor_id_changed`, `creditor_name_changed`,
-`mandate_id_changed` and `debtor_iban_changed`. An amendment carrying no actual
-change is rejected, because the debtor's bank rejects it too.
+`mandate_id_changed` and `debtor_iban_changed`. The crate rejects an amendment
+carrying no actual change.
 
 > **`SMNDA` moved.** *Same mandate, new debtor account* went in
 > `OrgnlDbtrAgt` before November 2016 and in `OrgnlDbtrAcct` after. The crate

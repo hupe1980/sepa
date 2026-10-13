@@ -1,7 +1,7 @@
 //! ISO 20022 pain.002 — Customer Payment Status Report parser.
 //!
 //! Parses the bank's response to an initiated payment batch (pain.001 or pain.008).
-//! The parser is namespace- and version-agnostic, so every generation below is
+//! The parser requires strict resolved identity; supported generations below are
 //! read by the same code:
 //!
 //! | Schema | Used by |
@@ -60,12 +60,10 @@
 //!
 //! ## Verification of Payee
 //!
-//! Mandatory for euro credit transfers since 9 October 2025: the payer's PSP
-//! checks the payee name against the account before execution and reports the
-//! outcome here. A status report is therefore no longer only about acceptance
-//! and rejection, and a verification status is deliberately **not** an
-//! acceptance — `RCVC` says a name matched, which is a different question from
-//! whether the payment was taken.
+//! DK-profile pain.002 reports can carry Verification of Payee outcomes.
+//! These customer-report codes are separate from the EPC inter-PSP API and do
+//! not establish legal obligations, liability or settlement. A verification
+//! status is **not** payment acceptance: `RCVC` reports a name match.
 //!
 //! ```rust
 //! use sepa::{VerificationOutcome, parse_pain002};
@@ -112,7 +110,7 @@ use crate::xml::{Document, Node, XmlError};
 
 /// Known pain.002 XML namespace URIs.
 ///
-/// Informational: [`parse_pain002`] is namespace-agnostic and does not consult
+/// Supported namespace constants; [`parse_pain002`] enforces explicit versions.
 /// these. They are here so an application can recognise or log which generation
 /// a bank replied in.
 pub mod ns {
@@ -194,7 +192,7 @@ pub enum VerificationOutcome {
     /// [`TransactionStatus::additional_info`]. Show it to the payer and let
     /// them decide.
     CloseMatch,
-    /// No match (`RVNM`). Executing anyway shifts liability to the payer.
+    /// No match (`RVNM`) under the DK profile; payer decision/liability are separate.
     NoMatch,
     /// Not applicable (`RVNA`) — no answer, a timeout, or a PSP outside the
     /// scheme. The reason code distinguishes them: `AB11` is a timeout, `AG03`
@@ -278,7 +276,7 @@ impl PaymentStatus {
     }
 
     fn from_code(s: &str) -> Self {
-        match s.to_ascii_uppercase().as_str() {
+        match s {
             "ACTC" => Self::Actc,
             "ACCP" => Self::Accp,
             "ACSP" => Self::Acsp,
@@ -410,7 +408,7 @@ impl ReasonCode {
     }
 
     fn from_code(s: &str) -> Self {
-        match s.to_ascii_uppercase().as_str() {
+        match s {
             "AC01" => Self::Ac01,
             "AC04" => Self::Ac04,
             "AC06" => Self::Ac06,
@@ -510,7 +508,9 @@ impl std::str::FromStr for OriginalMessageType {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StatusCount {
     /// `DtldSts` — the status these transactions share.
-    pub status: PaymentStatus,
+    pub status: Option<PaymentStatus>,
+    /// Decoded status spelling, including an empty reported element.
+    pub status_raw: Option<String>,
     /// `DtldNbOfTxs` — how many there are, when the bank stated a number this
     /// crate can read.
     ///
@@ -522,6 +522,8 @@ pub struct StatusCount {
     pub count_raw: Option<String>,
     /// `DtldCtrlSum` — their total in **ct**, when the bank reported one.
     pub total_ct: Option<i64>,
+    /// Decoded `DtldCtrlSum`, including unreadable or unrepresentable values.
+    pub total_raw: Option<String>,
 }
 
 /// `StsRsnInf` — the reason codes and free text explaining a status.
@@ -552,19 +554,15 @@ fn parse_status_reasons(block: &Node) -> (Vec<ReasonCode>, Vec<String>) {
 fn parse_status_counts(block: &Node) -> Vec<StatusCount> {
     block
         .children_named("NbOfTxsPerSts")
-        .filter_map(|n| {
-            // The status is what the row is *for*: a row that does not name one
-            // says nothing and is not reported. An unreadable *count* is a
-            // different matter — the bank still told us this status bucket
-            // exists, and dropping the row loses that.
-            Some(StatusCount {
-                status: PaymentStatus::from_code(n.text_of("DtldSts")?),
-                count: n.text_of("DtldNbOfTxs").and_then(|v| v.trim().parse().ok()),
-                count_raw: n.text_of("DtldNbOfTxs").map(str::to_owned),
-                total_ct: n
-                    .text_of("DtldCtrlSum")
-                    .and_then(|v| crate::ct_from_eur_str(v).ok()),
-            })
+        .map(|n| StatusCount {
+            status: n.text_of("DtldSts").map(PaymentStatus::from_code),
+            status_raw: n.raw_text_of("DtldSts").map(str::to_owned),
+            count: n.text_of("DtldNbOfTxs").and_then(|v| v.trim().parse().ok()),
+            count_raw: n.raw_text_of("DtldNbOfTxs").map(str::to_owned),
+            total_raw: n.raw_text_of("DtldCtrlSum").map(str::to_owned),
+            total_ct: n
+                .text_of("DtldCtrlSum")
+                .and_then(|v| crate::ct_from_eur_str(v).ok()),
         })
         .collect()
 }
@@ -611,8 +609,25 @@ pub struct TransactionStatus {
     /// where the payee's actual name comes back — split across two entries when
     /// it exceeds 105 characters.
     pub additional_info: Vec<String>,
-    /// Original instructed amount in **ct** (1/100 EUR), if present in `OrgnlTxRef`.
+    /// Original instructed amount in hundredths of its reported currency.
     pub original_amount_ct: Option<i64>,
+    /// Original currency, never inferred from the message family.
+    pub original_currency: Option<String>,
+    /// Decoded original amount text, including unrepresentable values.
+    pub original_amount_raw: Option<String>,
+    /// Observed XML source route; not inferred from amount equality.
+    pub original_amount_source: Option<crate::camt::OriginalAmountSource>,
+    /// Historical `OrgnlTxRef/InstdAmt` when canonical `Amt/InstdAmt` is also present.
+    /// Simultaneous routes are ambiguous even if values agree. Without a canonical
+    /// instructed amount, the historical route is exposed as the selected original.
+    pub legacy_referenced_amount: Option<crate::camt::ReportedAmount>,
+    /// Independent original interbank `OrgnlTxRef/IntrBkSttlmAmt` observation.
+    /// This is not an alternative to, or fallback for, instructed money.
+    pub original_settlement_amount: Option<crate::camt::ReportedAmount>,
+    /// Equivalent amount from `OrgnlTxRef/Amt/EqvtAmt`, kept independently.
+    pub original_equivalent_amount: Option<crate::camt::ReportedAmount>,
+    /// `EqvtAmt/CcyOfTrf`, not a substitute for the amount's own currency.
+    pub original_transfer_currency: Option<String>,
     /// Original debtor name, if echoed back.
     pub original_debtor_name: Option<String>,
     /// Original debtor IBAN, if echoed back.
@@ -635,6 +650,14 @@ pub struct TransactionStatus {
 pub struct PaymentInfoStatus {
     /// Original `PmtInfId` from the initiating message (`OrgnlPmtInfId`).
     pub original_payment_info_id: Option<String>,
+    /// Original `OrgnlNbOfTxs`, when readable as an unsigned count.
+    pub original_number_of_transactions: Option<u64>,
+    /// Decoded original count, including empty and unrepresentable values.
+    pub original_number_of_transactions_raw: Option<String>,
+    /// Exact hundredths of `OrgnlCtrlSum`, when representable; not a posting amount.
+    pub original_control_sum_ct: Option<i64>,
+    /// Decoded `OrgnlCtrlSum` text, including empty or unrepresentable observations.
+    pub original_control_sum_raw: Option<String>,
     /// Payment-information-level status, if present.
     pub status: Option<PaymentStatus>,
     /// Why this whole group carries that status (`StsRsnInf/Rsn`).
@@ -714,6 +737,15 @@ pub struct Pain002Document {
     /// Mandatory in the schema; `None` means the bank omitted it, which is
     /// reported rather than papered over with an empty code.
     pub original_msg_type: Option<OriginalMessageType>,
+    /// Original group `OrgnlNbOfTxs`, when readable as an unsigned count.
+    pub original_number_of_transactions: Option<u64>,
+    /// Decoded original group count, retaining empty and invalid values.
+    pub original_number_of_transactions_raw: Option<String>,
+    /// Exact hundredths of the original group `OrgnlCtrlSum`, when representable.
+    /// A control sum does not imply a currency, direction or posting decision.
+    pub original_control_sum_ct: Option<i64>,
+    /// Decoded original group `OrgnlCtrlSum`, retaining empty and invalid values.
+    pub original_control_sum_raw: Option<String>,
     /// Group-level status, if present in `OrgnlGrpInfAndSts/GrpSts`.
     pub group_status: Option<PaymentStatus>,
     /// Why the whole file carries that status (`OrgnlGrpInfAndSts/StsRsnInf`).
@@ -733,6 +765,101 @@ pub struct Pain002Document {
 }
 
 impl Pain002Document {
+    /// Located problems in current financial observations, not XSD validation.
+    /// Missing optional original amounts are not required ledger postings.
+    #[must_use]
+    pub fn financial_diagnostics(&self) -> Vec<crate::camt::FinancialDiagnostic> {
+        let mut result = crate::camt::optional_count_diagnostics(
+            "OrgnlGrpInfAndSts/OrgnlNbOfTxs",
+            self.original_number_of_transactions_raw.as_deref(),
+            self.original_number_of_transactions,
+        );
+        result.extend(crate::camt::optional_decimal_diagnostics(
+            "OrgnlGrpInfAndSts/OrgnlCtrlSum",
+            self.original_control_sum_raw.as_deref(),
+            self.original_control_sum_ct,
+        ));
+        for (index, count) in self.group_status_counts.iter().enumerate() {
+            result.extend(crate::camt::optional_count_diagnostics(
+                &format!("OrgnlGrpInfAndSts/NbOfTxsPerSts[{index}]/DtldNbOfTxs"),
+                count.count_raw.as_deref(),
+                count.count,
+            ));
+            result.extend(crate::camt::optional_decimal_diagnostics(
+                &format!("OrgnlGrpInfAndSts/NbOfTxsPerSts[{index}]/DtldCtrlSum"),
+                count.total_raw.as_deref(),
+                count.total_ct,
+            ));
+        }
+        for (index, info) in self.payment_info_statuses.iter().enumerate() {
+            let path = format!("OrgnlPmtInfAndSts[{index}]");
+            result.extend(crate::camt::optional_count_diagnostics(
+                &format!("{path}/OrgnlNbOfTxs"),
+                info.original_number_of_transactions_raw.as_deref(),
+                info.original_number_of_transactions,
+            ));
+            result.extend(crate::camt::optional_decimal_diagnostics(
+                &format!("{path}/OrgnlCtrlSum"),
+                info.original_control_sum_raw.as_deref(),
+                info.original_control_sum_ct,
+            ));
+            for (index, count) in info.status_counts.iter().enumerate() {
+                result.extend(crate::camt::optional_count_diagnostics(
+                    &format!("{path}/NbOfTxsPerSts[{index}]/DtldNbOfTxs"),
+                    count.count_raw.as_deref(),
+                    count.count,
+                ));
+                result.extend(crate::camt::optional_decimal_diagnostics(
+                    &format!("{path}/NbOfTxsPerSts[{index}]/DtldCtrlSum"),
+                    count.total_raw.as_deref(),
+                    count.total_ct,
+                ));
+            }
+            for (index, transaction) in info.transactions.iter().enumerate() {
+                let path = format!("{path}/TxInfAndSts[{index}]");
+                let source = transaction
+                    .original_amount_source
+                    .map_or("original_amount", crate::camt::OriginalAmountSource::path);
+                result.extend(crate::camt::optional_amount_diagnostics(
+                    &format!("{path}/{source}"),
+                    transaction.original_amount_raw.as_deref(),
+                    transaction.original_amount_ct,
+                    transaction.original_currency.as_deref(),
+                ));
+                if let Some(settlement) = &transaction.original_settlement_amount {
+                    result.extend(
+                        settlement.diagnostics(&format!("{path}/OrgnlTxRef/IntrBkSttlmAmt"), None),
+                    );
+                }
+                if let Some(legacy) = &transaction.legacy_referenced_amount {
+                    result.extend(legacy.diagnostics(&format!("{path}/OrgnlTxRef/InstdAmt"), None));
+                    result.push(crate::camt::FinancialDiagnostic {
+                        path: format!("{path}/OrgnlTxRef"),
+                        issue: crate::camt::FinancialIssue::ConflictingAlternatives,
+                        raw: None,
+                    });
+                }
+                if let Some(equivalent) = &transaction.original_equivalent_amount {
+                    result.extend(
+                        equivalent.diagnostics(&format!("{path}/OrgnlTxRef/Amt/EqvtAmt/Amt"), None),
+                    );
+                    result.extend(crate::camt::currency_diagnostics(
+                        &format!("{path}/OrgnlTxRef/Amt/EqvtAmt/CcyOfTrf"),
+                        transaction.original_transfer_currency.as_deref(),
+                    ));
+                    if transaction.original_amount_raw.is_some() {
+                        result.push(crate::camt::FinancialDiagnostic {
+                            path: format!("{path}/OrgnlTxRef/Amt"),
+                            issue: crate::camt::FinancialIssue::ConflictingAlternatives,
+                            raw: None,
+                        });
+                    }
+                }
+            }
+        }
+        result
+    }
+
     /// When the bank generated this status report, typed.
     ///
     /// `None` when it reported none, or one this crate cannot read;
@@ -879,13 +1006,29 @@ pub enum Pain002ParseError {
 /// Returns [`Pain002ParseError::NotPain002`] when the root element is missing,
 /// or [`Pain002ParseError::MissingElement`] for absent mandatory elements.
 pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
-    let doc = Document::parse(xml)?;
-    let namespace = doc.namespace;
+    parse_pain002_with_limits(xml, crate::ParseLimits::default())
+}
+
+/// Parse a pain.002 document with explicit finite resource limits.
+///
+/// # Errors
+/// Returns an error for invalid XML, unsupported identity or an exhausted limit.
+pub fn parse_pain002_with_limits(
+    xml: &str,
+    limits: crate::ParseLimits,
+) -> Result<Pain002Document, Pain002ParseError> {
+    let doc = Document::parse_with_limits(xml, limits)?;
+    let namespace = doc.namespace.clone();
 
     let root = doc
         .root
         .child("CstmrPmtStsRpt")
         .ok_or(Pain002ParseError::NotPain002)?;
+    doc.message(
+        "pain.002",
+        "CstmrPmtStsRpt",
+        &["001.03", "001.10", "002.03", "003.03"],
+    )?;
 
     let grp_hdr = root
         .child("GrpHdr")
@@ -925,6 +1068,8 @@ pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
     let group_status = orig_grp.text_of("GrpSts").map(PaymentStatus::from_code);
     let (group_reason_codes, group_additional_info) = parse_status_reasons(orig_grp);
     let group_status_counts = parse_status_counts(orig_grp);
+    let original_control_sum = orig_grp.raw_text_of("OrgnlCtrlSum");
+    let original_count = orig_grp.raw_text_of("OrgnlNbOfTxs");
 
     let payment_info_statuses = root
         .children_named("OrgnlPmtInfAndSts")
@@ -938,6 +1083,11 @@ pub fn parse_pain002(xml: &str) -> Result<Pain002Document, Pain002ParseError> {
         namespace,
         original_msg_id,
         original_msg_type,
+        original_number_of_transactions: original_count.and_then(|raw| raw.trim().parse().ok()),
+        original_number_of_transactions_raw: original_count.map(str::to_owned),
+        original_control_sum_ct: original_control_sum
+            .and_then(|raw| crate::ct_from_eur_str(raw).ok()),
+        original_control_sum_raw: original_control_sum.map(str::to_owned),
         group_status,
         group_reason_codes,
         group_additional_info,
@@ -954,11 +1104,18 @@ fn bic_of_agent(agent: &Node) -> Option<&str> {
 
 fn parse_payment_info_status(block: &Node) -> PaymentInfoStatus {
     let (reason_codes, additional_info) = parse_status_reasons(block);
+    let original_control_sum = block.raw_text_of("OrgnlCtrlSum");
+    let original_count = block.raw_text_of("OrgnlNbOfTxs");
     PaymentInfoStatus {
         // Mandatory in the schema, so `None` means the bank sent a malformed
         // block. Reported as absent rather than substituted: `"NOTPROVIDED"` is
         // a legal `PmtInfId`, and inventing it here could match a real group.
         original_payment_info_id: block.text_of("OrgnlPmtInfId").map(str::to_owned),
+        original_number_of_transactions: original_count.and_then(|raw| raw.trim().parse().ok()),
+        original_number_of_transactions_raw: original_count.map(str::to_owned),
+        original_control_sum_ct: original_control_sum
+            .and_then(|raw| crate::ct_from_eur_str(raw).ok()),
+        original_control_sum_raw: original_control_sum.map(str::to_owned),
         status: block.text_of("PmtInfSts").map(PaymentStatus::from_code),
         reason_codes,
         additional_info,
@@ -982,15 +1139,19 @@ fn parse_transaction_status(tx: &Node) -> TransactionStatus {
     let (reason_codes, additional_info) = parse_status_reasons(tx);
 
     let orig_tx_ref = tx.child("OrgnlTxRef");
+    let canonical_parent = orig_tx_ref
+        .and_then(|reference| reference.child("Amt"))
+        .filter(|parent| parent.child("InstdAmt").is_some());
 
-    // `Amt` is an AmountType4Choice: InstdAmt or EqvtAmt/Amt. Some banks also
-    // place InstdAmt directly under OrgnlTxRef, so fall back to a deep search.
-    let original_amount_ct = orig_tx_ref
-        .and_then(|r| {
-            r.text_at(&["Amt", "InstdAmt"])
-                .or_else(|| r.text_of_descendant("InstdAmt"))
+    let original_amount = orig_tx_ref
+        .map(|reference| {
+            crate::camt::ReportedAmount::parse(canonical_parent.unwrap_or(reference), "InstdAmt")
         })
-        .and_then(|raw| crate::ct_from_eur_str(raw).ok());
+        .unwrap_or_default();
+    let legacy_referenced_amount = orig_tx_ref
+        .filter(|reference| canonical_parent.is_some() && reference.child("InstdAmt").is_some())
+        .map(|reference| crate::camt::ReportedAmount::parse(reference, "InstdAmt"));
+    let equivalent = orig_tx_ref.and_then(|reference| reference.path(&["Amt", "EqvtAmt"]));
 
     let party = |tags: [&str; 2]| -> (Option<String>, Option<String>) {
         orig_tx_ref.map_or((None, None), |r| {
@@ -1010,7 +1171,27 @@ fn parse_transaction_status(tx: &Node) -> TransactionStatus {
         status,
         reason_codes,
         additional_info,
-        original_amount_ct,
+        original_amount_ct: original_amount.ct,
+        original_currency: original_amount.currency,
+        original_amount_raw: original_amount.amount_raw,
+        original_amount_source: orig_tx_ref.and_then(|reference| {
+            if reference.path(&["Amt", "InstdAmt"]).is_some() {
+                Some(crate::camt::OriginalAmountSource::TransactionReference)
+            } else if reference.child("InstdAmt").is_some() {
+                Some(crate::camt::OriginalAmountSource::LegacyTransactionReference)
+            } else {
+                None
+            }
+        }),
+        legacy_referenced_amount,
+        original_settlement_amount: orig_tx_ref
+            .filter(|reference| reference.child("IntrBkSttlmAmt").is_some())
+            .map(|reference| crate::camt::ReportedAmount::parse(reference, "IntrBkSttlmAmt")),
+        original_equivalent_amount: equivalent
+            .map(|node| crate::camt::ReportedAmount::parse(node, "Amt")),
+        original_transfer_currency: equivalent
+            .and_then(|node| node.raw_text_of("CcyOfTrf"))
+            .map(str::to_owned),
         original_debtor_name,
         original_debtor_iban,
         original_creditor_name,
@@ -1426,7 +1607,7 @@ mod tests {
         let matched = doc
             .group_status_counts
             .iter()
-            .find(|c| c.status == PaymentStatus::Rcvc)
+            .find(|c| c.status == Some(PaymentStatus::Rcvc))
             .unwrap();
         assert_eq!(matched.count, Some(454));
         assert_eq!(
@@ -1525,7 +1706,10 @@ mod tests {
     #[test]
     fn reason_code_roundtrip() {
         assert_eq!(ReasonCode::from_code("AC01"), ReasonCode::Ac01);
-        assert_eq!(ReasonCode::from_code("md01"), ReasonCode::Md01);
+        assert_eq!(
+            ReasonCode::from_code("md01"),
+            ReasonCode::Other("md01".into())
+        );
         assert_eq!(
             ReasonCode::from_code("ZZZZ"),
             ReasonCode::Other("ZZZZ".into())
@@ -1541,7 +1725,7 @@ mod tests {
         );
         assert_eq!(
             "rjct".parse::<PaymentStatus>().unwrap(),
-            PaymentStatus::Rjct
+            PaymentStatus::Other("rjct".into())
         );
         assert_eq!(
             "XXXX".parse::<PaymentStatus>().unwrap(),
@@ -1552,7 +1736,10 @@ mod tests {
     #[test]
     fn reason_code_fromstr() {
         assert_eq!("MD01".parse::<ReasonCode>().unwrap(), ReasonCode::Md01);
-        assert_eq!("am04".parse::<ReasonCode>().unwrap(), ReasonCode::Am04);
+        assert_eq!(
+            "am04".parse::<ReasonCode>().unwrap(),
+            ReasonCode::Other("am04".into())
+        );
     }
 
     #[test]

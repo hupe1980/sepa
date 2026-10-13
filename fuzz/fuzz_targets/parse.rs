@@ -24,6 +24,21 @@ fuzz_target!(|data: &[u8]| {
     let Ok(xml) = std::str::from_utf8(data) else {
         return;
     };
+    let limits = sepa::ParseLimits {
+        input_bytes: 4096,
+        nodes: 32,
+        depth: 8,
+        text_bytes: 64,
+        total_text_bytes: 512,
+        attributes: 4,
+        attribute_bytes: 32,
+        total_attribute_bytes: 128,
+    };
+    let _ = sepa::parse_pain002_with_limits(xml, limits);
+    let _ = sepa::parse_camt029_with_limits(xml, limits);
+    let _ = sepa::parse_camt052_with_limits(xml, limits);
+    let _ = sepa::parse_camt053_with_limits(xml, limits);
+    let _ = sepa::parse_camt054_with_limits(xml, limits);
 
     // Each parser independently: a panic in any of them is a bug.
     if let Ok(doc) = sepa::parse_pain002(xml) {
@@ -33,7 +48,10 @@ fuzz_target!(|data: &[u8]| {
             let _ = tx.is_rejected();
         }
         for count in &doc.group_status_counts {
-            let _ = count.status.verification();
+            let _ = count
+                .status
+                .as_ref()
+                .and_then(|status| status.verification());
         }
         for block in &doc.payment_info_statuses {
             let _ = block.has_rejections();
@@ -44,7 +62,10 @@ fuzz_target!(|data: &[u8]| {
             for tx in &block.transactions {
                 // Verification of Payee: the outcome must be derivable from any
                 // status a bank sends, including ones this crate does not know.
-                let _ = tx.status.as_ref().map(|s| (s.verification(), s.is_verification()));
+                let _ = tx
+                    .status
+                    .as_ref()
+                    .map(|s| (s.verification(), s.is_verification()));
                 let _ = tx.additional_info.len();
             }
         }
@@ -77,12 +98,22 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(doc) = sepa::parse_camt053(xml) {
         for stmt in &doc.statements {
             for balance in &stmt.balances {
-                assert_money(balance.signed_ct(), balance.amount.ct, balance.amount.direction);
-                assert_indicator(balance.amount.direction, balance.amount.direction_raw.as_deref());
+                assert_money(
+                    balance.signed_ct(),
+                    balance.amount.ct,
+                    balance.amount.direction,
+                );
+                assert_indicator(
+                    balance.amount.direction,
+                    balance.amount.direction_raw.as_deref(),
+                );
             }
             for entry in &stmt.entries {
                 assert_money(entry.signed_ct(), entry.amount.ct, entry.amount.direction);
-                assert_indicator(entry.amount.direction, entry.amount.direction_raw.as_deref());
+                assert_indicator(
+                    entry.amount.direction,
+                    entry.amount.direction_raw.as_deref(),
+                );
                 let _ = entry.is_return();
                 let _ = entry.end_to_end_id();
                 let _ = entry.counterparty_iban();
@@ -114,29 +145,34 @@ fuzz_target!(|data: &[u8]| {
                 }
                 if let Some(charges) = &entry.charges {
                     for record in &charges.records {
-                        assert_money(record.signed_ct(), record.amount.ct, record.amount.direction);
+                        assert_money(
+                            record.signed_ct(),
+                            record.amount.ct,
+                            record.amount.direction,
+                        );
                     }
                     // All-or-nothing: a total exists only if every record did.
-                    assert_eq!(
-                        charges.total_signed_ct().is_some(),
-                        charges.records.iter().all(|r| r.signed_ct().is_some()),
+                    assert!(
+                        charges.total_signed_ct().is_none()
+                            || (!charges.records.is_empty()
+                                && charges.records.iter().all(|r| r.signed_ct().is_some())),
                         "a charge total must not sum past a record it could not resolve"
                     );
                 }
                 // Detail amounts are resolved from three different places and
-                // summed, so overflow must saturate into `None`, not panic.
-                assert_eq!(
-                    entry.details_signed_sum_ct().is_some(),
-                    entry.details.iter().all(|d| d.signed_ct().is_some()),
+                // summed, so unrepresentable totals must return `None`, not panic.
+                assert!(
+                    entry.details_signed_sum_ct().is_none()
+                        || entry.details.iter().all(|d| d.signed_ct().is_some()),
                     "a detail sum must not skip a detail it could not resolve"
                 );
                 let _ = entry.details_reconcile();
             }
             // Likewise one level up: a net movement that quietly omits the rows
             // it could not read is a number that looks right and is not.
-            assert_eq!(
-                stmt.net_movement_ct().is_some(),
-                stmt.entries.iter().all(|e| e.signed_ct().is_some()),
+            assert!(
+                stmt.net_movement_ct().is_none()
+                    || stmt.entries.iter().all(|e| e.signed_ct().is_some()),
                 "a net movement must not skip an entry it could not resolve"
             );
             let _ = stmt.opening_balance();
@@ -150,9 +186,8 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-
-/// A ledger figure exists exactly when both of its parts do, and signing changes
-/// the sign and nothing else.
+/// A resolved ledger figure requires magnitude and direction; currency and
+/// conflict checks can still refuse it. Signing changes the sign and nothing else.
 ///
 /// Money has a magnitude and a direction. Losing either means there is no
 /// figure — not a plausible one.
@@ -161,9 +196,8 @@ fn assert_money(
     magnitude: Option<i64>,
     indicator: Option<sepa::CreditDebitIndicator>,
 ) {
-    assert_eq!(
-        signed.is_some(),
-        magnitude.is_some() && indicator.is_some(),
+    assert!(
+        signed.is_none() || (magnitude.is_some_and(|value| value >= 0) && indicator.is_some()),
         "a ledger figure requires a magnitude AND a direction"
     );
     if let (Some(signed), Some(magnitude), Some(indicator)) = (signed, magnitude, indicator) {
@@ -190,7 +224,7 @@ fn assert_indicator(indicator: Option<sepa::CreditDebitIndicator>, raw: Option<&
     if let Some(indicator) = indicator {
         let raw = raw.expect("a resolved direction must have come from somewhere");
         assert_eq!(
-            raw.trim().to_ascii_uppercase(),
+            raw.trim(),
             indicator.as_code(),
             "a direction must round-trip to the text it was read from"
         );

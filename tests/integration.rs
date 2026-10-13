@@ -301,6 +301,279 @@ mod xsd {
     }
 
     #[test]
+    fn cancellation_reason_preserves_text_without_injecting_markup() {
+        let payload = "A\r\nB\rC <Injected/> &#13;";
+        let builder = sepa::Camt055Builder::new(
+            "CXL-ESCAPE",
+            "Acme GmbH",
+            "COBADEFFXXX".parse::<sepa::Bic>().unwrap(),
+            sepa::OriginalMessage::new("ORIGINAL", "pain.008.001.08"),
+        )
+        .created_at("2026-07-15T11:30:00".parse().unwrap())
+        .cancel_whole_message(sepa::CancellationReason::Tech)
+        .additional_info(payload);
+        let xml = builder.build().unwrap();
+        let expected =
+            sepa::charset::transliterate(payload, sepa::charset::Transliteration::German);
+        assert!(xml.contains(&format!("<AddtlInf>{expected}</AddtlInf>")));
+        assert!(!xml.contains("<Injected/>"));
+        let mut streamed = Vec::new();
+        builder.write_to(&mut streamed).unwrap();
+        assert_eq!(streamed, xml.as_bytes());
+        assert_eq!(xmllint(&xml, "camt.055.001.05.xsd"), Some(Ok(())));
+        assert!(
+            builder
+                .charset(sepa::CharsetPolicy::Strict)
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cancellation_message_id_refuses_invalid_xml_and_padded_overlength_before_output() {
+        for payload in ["A\0B".to_owned(), format!(" {} ", "A".repeat(34))] {
+            let builder = sepa::Camt055Builder::new(
+                payload.clone(),
+                "Acme GmbH",
+                "COBADEFFXXX".parse::<sepa::Bic>().unwrap(),
+                sepa::OriginalMessage::new("ORIGINAL", "pain.008.001.08"),
+            )
+            .cancel_whole_message(sepa::CancellationReason::Tech);
+            assert!(builder.build().is_err(), "{payload:?}");
+            let mut streamed = b"existing output".to_vec();
+            assert!(builder.write_to(&mut streamed).is_err(), "{payload:?}");
+            assert_eq!(streamed, b"existing output");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn every_writer_keeps_external_text_out_of_xml_structure() {
+        use super::{creditor, creditor_id, debtor};
+        use sepa::{
+            CreditTransferEntry, CreditTransferGroup, DirectDebitEntry, DirectDebitGroup,
+            Pain001Builder, Pain008Builder,
+        };
+
+        fn structure(xml: &str) -> Vec<Vec<u8>> {
+            let mut reader = quick_xml::Reader::from_str(xml);
+            let mut shape = Vec::new();
+            loop {
+                match reader.read_event().unwrap() {
+                    quick_xml::events::Event::Start(tag) => {
+                        shape.push([b"+".as_slice(), tag.name().as_ref()].concat());
+                    }
+                    quick_xml::events::Event::End(tag) => {
+                        shape.push([b"-".as_slice(), tag.name().as_ref()].concat());
+                    }
+                    quick_xml::events::Event::Empty(tag) => {
+                        shape.push([b"+".as_slice(), tag.name().as_ref()].concat());
+                        shape.push([b"-".as_slice(), tag.name().as_ref()].concat());
+                    }
+                    quick_xml::events::Event::Eof => break,
+                    quick_xml::events::Event::DocType(_) => panic!("writer emitted a DTD"),
+                    _ => {}
+                }
+            }
+            shape
+        }
+        fn documents(text: &str) -> Vec<(&'static str, String)> {
+            let mut documents = Vec::new();
+            let identifier = if text == "SAFE" { "SAFE" } else { "X'1" };
+            macro_rules! record {
+                ($builder:expr, $schema:literal) => {{
+                    let builder = $builder.created_at("2026-07-19T12:00:00Z".parse().unwrap());
+                    let xml = builder.build().unwrap();
+                    let mut sink = b"existing".to_vec();
+                    super::assert_writer_boundary(
+                        Ok(xml.clone()),
+                        builder.write_to(&mut sink),
+                        &sink,
+                        None,
+                        "<Document",
+                    );
+                    documents.push(($schema, xml));
+                }};
+            }
+            let address = sepa::PostalAddress::new(text, "DE")
+                .unwrap()
+                .street(text)
+                .building_number(text)
+                .post_code(text)
+                .country_subdivision(text)
+                .department(text)
+                .sub_department(text)
+                .line(text);
+            let party = sepa::Party::new(text).with_organisation_id(identifier, Some(text));
+            for proprietary_remittance in [false, true] {
+                let remittance = if proprietary_remittance {
+                    sepa::RemittanceInfo::Proprietary {
+                        reference: identifier.into(),
+                        issuer: Some(text.into()),
+                    }
+                } else {
+                    sepa::RemittanceInfo::unstructured(text)
+                };
+                for group_party in [false, true] {
+                    let mut ct_entry = CreditTransferEntry::new(text, creditor(), 100, identifier)
+                        .with_creditor_address(address.clone())
+                        .with_ultimate_creditor(party.clone());
+                    if !group_party {
+                        ct_entry = ct_entry.with_ultimate_debtor(party.clone());
+                    }
+                    ct_entry.remittance = Some(remittance.clone());
+                    let ct_group = CreditTransferGroup::new(text, &debtor(), date("2026-07-20"))
+                        .payment_info_id(identifier)
+                        .debtor_address(address.clone());
+                    let ct_group = if group_party {
+                        ct_group.ultimate_debtor(party.clone())
+                    } else {
+                        ct_group
+                    };
+                    record!(
+                        Pain001Builder::new(text, identifier)
+                            .add_group(ct_group.add_entry(ct_entry)),
+                        "pain.001.001.09.xsd"
+                    );
+                    let mut dd_entry = DirectDebitEntry::new(
+                        identifier,
+                        date("2024-06-01"),
+                        text,
+                        debtor(),
+                        100,
+                        identifier,
+                    )
+                    .with_debtor_address(address.clone())
+                    .with_ultimate_debtor(party.clone())
+                    .with_amendment(
+                        sepa::MandateAmendment::creditor_name_changed(text)
+                            .with_original_mandate_id(identifier),
+                    );
+                    if !group_party {
+                        dd_entry = dd_entry.with_ultimate_creditor(party.clone());
+                    }
+                    dd_entry.remittance = Some(remittance.clone());
+                    let dd_group = DirectDebitGroup::new(
+                        text,
+                        &creditor(),
+                        &creditor_id(),
+                        date("2026-07-20"),
+                    )
+                    .payment_info_id(identifier)
+                    .creditor_address(address.clone());
+                    let dd_group = if group_party {
+                        dd_group.ultimate_creditor(party.clone())
+                    } else {
+                        dd_group
+                    };
+                    record!(
+                        Pain008Builder::new(text, identifier)
+                            .add_group(dd_group.add_entry(dd_entry)),
+                        "pain.008.001.08.xsd"
+                    );
+                }
+            }
+            let original = sepa::OriginalCollection::new(identifier, date("2024-06-01"))
+                .debtor(text, debtor())
+                .creditor(text, creditor());
+            record!(
+                sepa::Pain007Builder::new(text, identifier, identifier).add_group(
+                    sepa::ReversalGroup::new(identifier)
+                        .reversal_payment_info_id(identifier)
+                        .add_entry(sepa::ReversalEntry::new(
+                            identifier,
+                            100,
+                            sepa::ReversalReason::Other("ABCD".to_owned()),
+                            original
+                        ))
+                ),
+                "pain.007.001.09.xsd"
+            );
+            for scope in 0..3 {
+                let builder = sepa::Camt055Builder::new(
+                    identifier,
+                    party.clone(),
+                    party.clone(),
+                    sepa::OriginalMessage::new(identifier, identifier),
+                )
+                .case_id(identifier);
+                let builder = match scope {
+                    0 => builder
+                        .cancel_whole_message(sepa::CancellationReason::Other("ABCD".to_owned()))
+                        .additional_info(text),
+                    1 => builder.add_group(
+                        sepa::CancellationGroup::new(identifier)
+                            .payment_cancellation_id(identifier)
+                            .cancel_whole_group(sepa::CancellationReason::Cust)
+                            .additional_info(text),
+                    ),
+                    _ => builder.add_group(
+                        sepa::CancellationGroup::new(identifier)
+                            .payment_cancellation_id(identifier)
+                            .add_entry(
+                                sepa::CancellationEntry::new(
+                                    identifier,
+                                    sepa::CancellationReason::Cust,
+                                )
+                                .cancellation_id(identifier)
+                                .original_instruction_id(identifier)
+                                .additional_info(text),
+                            ),
+                    ),
+                };
+                record!(builder, "camt.055.001.05.xsd");
+            }
+            documents
+        }
+        let baseline = documents("SAFE");
+        let payload = "X<&'\">";
+        let converted =
+            sepa::charset::transliterate(payload, sepa::charset::Transliteration::German);
+        let hostile = documents(payload);
+        assert_eq!(baseline.len(), 12);
+        assert_eq!(hostile.len(), baseline.len());
+        for ((schema, baseline), (hostile_schema, xml)) in baseline.into_iter().zip(hostile) {
+            assert_eq!(schema, hostile_schema);
+            assert_eq!(structure(&baseline), structure(&xml), "{schema}");
+            let plain = super::text_nodes_with_path(&baseline)
+                .into_iter()
+                .filter(|node| node.2 == "SAFE")
+                .count();
+            let protected = super::text_nodes_with_path(&xml)
+                .into_iter()
+                .filter(|node| node.2 == "X'1" || node.2 == converted)
+                .count();
+            assert!(plain > 5, "empty text-position control for {schema}");
+            assert_eq!(
+                plain, protected,
+                "lost or structurally interpreted text in {schema}"
+            );
+            assert_eq!(xmllint(&xml, schema), Some(Ok(())), "{schema}");
+        }
+    }
+
+    #[test]
+    fn lawful_original_recall_totals_validate_against_the_pinned_schema() {
+        for (count, amount) in [
+            (0, -100),
+            (999_999_999_999_999, 999_999_999_999_999_999),
+            (1, 9_223_372_036_854_775_800),
+        ] {
+            let xml = sepa::Camt055Builder::new(
+                "RECALL-1",
+                "Customer",
+                "Bank",
+                sepa::OriginalMessage::new("ORIGINAL-1", "pain.008.001.08").totals(count, amount),
+            )
+            .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+            .cancel_whole_message(sepa::CancellationReason::Cust)
+            .build()
+            .unwrap();
+            assert_eq!(xmllint(&xml, "camt.055.001.05.xsd"), Some(Ok(())));
+        }
+    }
+
+    #[test]
     fn every_pain001_schema_version_validates() {
         // One test per variant would drift the moment a variant is added; this
         // fails to compile-and-cover nothing if `ALL` grows.
@@ -1888,6 +2161,678 @@ fn a_second_root_element_cannot_displace_the_first() {
         parse_pain002(&format!("{one}{evil}")).is_err(),
         "a trailing second root must be rejected, not silently win"
     );
+}
+
+fn assert_writer_boundary(
+    buffered: Result<String, BuildError>,
+    streamed: Result<(), sepa::WriteError>,
+    sink: &[u8],
+    invalid_location: Option<sepa::Location>,
+    expected_text: &str,
+) {
+    if let Some(location) = invalid_location {
+        let error = buffered.unwrap_err();
+        let sepa::WriteError::Validation(stream_error) = streamed.unwrap_err() else {
+            panic!("invalid input must fail validation before I/O");
+        };
+        assert_eq!(error.location, location);
+        assert_eq!(stream_error.location, location);
+        assert_eq!(error.kind.to_string(), stream_error.kind.to_string());
+        assert_eq!(sink, b"existing");
+    } else {
+        let xml = buffered.unwrap();
+        streamed.unwrap();
+        assert!(xml.contains(expected_text), "missing {expected_text:?}");
+        assert_eq!(&sink[..8], b"existing");
+        assert_eq!(&sink[8..], xml.as_bytes());
+    }
+}
+
+#[test]
+#[cfg(feature = "serde")]
+fn restored_parties_are_checked_at_every_payment_position() {
+    let cases = [
+        (
+            serde_json::json!({"name": "End party"}),
+            true,
+            "<Nm>End party</Nm>",
+        ),
+        (
+            serde_json::json!({"identifier": {"kind": "Private", "id": "CUSTOMER-1", "scheme_name": "CUSTOMER"}}),
+            true,
+            "<Id>CUSTOMER-1</Id>",
+        ),
+        (serde_json::json!({}), false, ""),
+        (serde_json::json!({"name": ""}), false, ""),
+        (serde_json::json!({"name": "A".repeat(71)}), false, ""),
+        (
+            serde_json::json!({"identifier": {"kind": "Organisation", "id": "A\u{0}B"}}),
+            false,
+            "",
+        ),
+        (
+            serde_json::json!({"identifier": {"kind": "Organisation", "id": "A//B"}}),
+            false,
+            "",
+        ),
+        (
+            serde_json::json!({"identifier": {"kind": "Organisation", "id": "CUSTOMER-1", "scheme_name": "A".repeat(36)}}),
+            false,
+            "",
+        ),
+    ];
+    for (stored, valid, expected) in cases {
+        let party: sepa::Party = serde_json::from_value(stored).unwrap();
+        for policy in [sepa::CharsetPolicy::Strict, sepa::CharsetPolicy::default()] {
+            for position in 0..3 {
+                let location = (!valid).then_some(if position == 0 {
+                    sepa::Location::group(0)
+                } else {
+                    sepa::Location::transaction(0, 0)
+                });
+                let mut ct_entry = CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1");
+                let mut ct_group =
+                    CreditTransferGroup::new("Debtor", &debtor(), date("2026-07-20"));
+                let mut dd_entry = DirectDebitEntry::new(
+                    "MND-1",
+                    date("2024-06-01"),
+                    "Debtor",
+                    debtor(),
+                    100,
+                    "E2E-1",
+                );
+                let mut dd_group = DirectDebitGroup::new(
+                    "Creditor",
+                    &creditor(),
+                    &creditor_id(),
+                    date("2026-07-20"),
+                );
+                match position {
+                    0 => {
+                        ct_group = ct_group.ultimate_debtor(party.clone());
+                        dd_group = dd_group.ultimate_creditor(party.clone());
+                    }
+                    1 => {
+                        ct_entry = ct_entry.with_ultimate_debtor(party.clone());
+                        dd_entry = dd_entry.with_ultimate_debtor(party.clone());
+                    }
+                    _ => {
+                        ct_entry = ct_entry.with_ultimate_creditor(party.clone());
+                        dd_entry = dd_entry.with_ultimate_creditor(party.clone());
+                    }
+                }
+                let ct = Pain001Builder::new("Debtor", "CT-PARTY")
+                    .charset(policy)
+                    .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                    .add_group(ct_group.add_entry(ct_entry));
+                let dd = Pain008Builder::new("Creditor", "DD-PARTY")
+                    .charset(policy)
+                    .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                    .add_group(dd_group.add_entry(dd_entry));
+                let mut sink = b"existing".to_vec();
+                assert_writer_boundary(
+                    ct.build(),
+                    ct.write_to(&mut sink),
+                    &sink,
+                    location,
+                    expected,
+                );
+                let mut sink = b"existing".to_vec();
+                assert_writer_boundary(
+                    dd.build(),
+                    dd.write_to(&mut sink),
+                    &sink,
+                    location,
+                    expected,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn purpose_codes_are_checked_before_buffered_or_streamed_output() {
+    fn check(
+        buffered: Result<String, BuildError>,
+        streamed: Result<(), sepa::WriteError>,
+        sink: &[u8],
+        code: &str,
+        invalid_location: Option<sepa::Location>,
+    ) {
+        assert_writer_boundary(
+            buffered,
+            streamed,
+            sink,
+            invalid_location,
+            &format!("<Cd>{code}</Cd>"),
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    let routes = [false, true].as_slice();
+    #[cfg(not(feature = "serde"))]
+    let routes = [false].as_slice();
+    for &restored in routes {
+        for (code, valid) in [
+            (" SALA ", false),
+            ("sala", false),
+            (" A ", false),
+            ("", false),
+            ("ABCDE", false),
+            ("A\0", false),
+            ("<X>", false),
+            ("A", true),
+            ("A1", true),
+            ("ZZZZ", true),
+            ("SALA", true),
+        ] {
+            let purpose = sepa::Purpose::Other(code.to_owned());
+            let category = sepa::CategoryPurpose::Other(code.to_owned());
+            #[cfg(feature = "serde")]
+            let (purpose, category) = if restored {
+                (
+                    serde_json::from_value(serde_json::to_value(purpose).unwrap()).unwrap(),
+                    serde_json::from_value(serde_json::to_value(category).unwrap()).unwrap(),
+                )
+            } else {
+                (purpose, category)
+            };
+            #[cfg(not(feature = "serde"))]
+            let _ = restored;
+            for group_code in [false, true] {
+                let location = (!valid).then_some(if group_code {
+                    sepa::Location::group(0)
+                } else {
+                    sepa::Location::transaction(0, 0)
+                });
+                let mut ct_entry = CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1");
+                let mut ct_group =
+                    CreditTransferGroup::new("Debtor", &debtor(), date("2026-07-20"));
+                let mut dd_entry = DirectDebitEntry::new(
+                    "MND-1",
+                    date("2024-06-01"),
+                    "Debtor",
+                    debtor(),
+                    100,
+                    "E2E-1",
+                );
+                let mut dd_group = DirectDebitGroup::new(
+                    "Creditor",
+                    &creditor(),
+                    &creditor_id(),
+                    date("2026-07-20"),
+                );
+                if group_code {
+                    ct_group = ct_group.category_purpose(category.clone());
+                    dd_group = dd_group.category_purpose(category.clone());
+                } else {
+                    ct_entry = ct_entry.with_purpose(purpose.clone());
+                    dd_entry = dd_entry.with_purpose(purpose.clone());
+                }
+                let ct = Pain001Builder::new("Debtor", "CT-CODE")
+                    .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                    .add_group(ct_group.add_entry(ct_entry));
+                let dd = Pain008Builder::new("Creditor", "DD-CODE")
+                    .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                    .add_group(dd_group.add_entry(dd_entry));
+                let mut sink = b"existing".to_vec();
+                check(ct.build(), ct.write_to(&mut sink), &sink, code, location);
+                let mut sink = b"existing".to_vec();
+                check(dd.build(), dd.write_to(&mut sink), &sink, code, location);
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "serde")]
+fn restored_recall_parties_are_checked_before_output() {
+    for (stored, valid) in [
+        (serde_json::json!({"name": "End party"}), true),
+        (
+            serde_json::json!({"identifier": {"kind": "Organisation", "id": "CUSTOMER-1"}}),
+            true,
+        ),
+        (serde_json::json!({}), false),
+        (serde_json::json!({"name": "A".repeat(71)}), false),
+        (
+            serde_json::json!({"identifier": {"kind": "Private", "id": "A//B"}}),
+            false,
+        ),
+    ] {
+        let party: sepa::Party = serde_json::from_value(stored).unwrap();
+        for policy in [sepa::CharsetPolicy::Strict, sepa::CharsetPolicy::default()] {
+            for assigner_position in [false, true] {
+                let (requester, recipient) = if assigner_position {
+                    (party.clone(), sepa::Party::new("Bank"))
+                } else {
+                    (sepa::Party::new("Customer"), party.clone())
+                };
+                let builder = sepa::Camt055Builder::new(
+                    "RECALL-1",
+                    requester,
+                    recipient,
+                    sepa::OriginalMessage::new("ORIGINAL-1", "pain.008.001.08"),
+                )
+                .case_id("CASE-1")
+                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                .charset(policy)
+                .cancel_whole_message(sepa::CancellationReason::Cust);
+                let mut sink = b"existing".to_vec();
+                assert_writer_boundary(
+                    builder.build(),
+                    builder.write_to(&mut sink),
+                    &sink,
+                    (!valid).then_some(sepa::Location::message()),
+                    "<OrgnlMsgId>ORIGINAL-1</OrgnlMsgId>",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "serde")]
+#[allow(clippy::too_many_lines)]
+fn restored_remittance_is_checked_by_both_payment_writers() {
+    for (remittance, valid, expected) in [
+        (
+            sepa::RemittanceInfo::unstructured("Invoice 1"),
+            true,
+            "<Ustrd>Invoice 1</Ustrd>",
+        ),
+        (
+            sepa::RemittanceInfo::structured("RF18539007547034".parse().unwrap()),
+            true,
+            "<Ref>RF18539007547034</Ref>",
+        ),
+        (
+            sepa::RemittanceInfo::Proprietary {
+                reference: "INV-1".into(),
+                issuer: Some("SCHEME".into()),
+            },
+            true,
+            "<Ref>INV-1</Ref>",
+        ),
+        (sepa::RemittanceInfo::unstructured(""), false, ""),
+        (
+            sepa::RemittanceInfo::unstructured("A".repeat(141)),
+            false,
+            "",
+        ),
+        (
+            sepa::RemittanceInfo::Proprietary {
+                reference: String::new(),
+                issuer: None,
+            },
+            false,
+            "",
+        ),
+        (
+            sepa::RemittanceInfo::Proprietary {
+                reference: "A".repeat(36),
+                issuer: None,
+            },
+            false,
+            "",
+        ),
+        (
+            sepa::RemittanceInfo::Proprietary {
+                reference: "INV-1".into(),
+                issuer: Some("A".repeat(36)),
+            },
+            false,
+            "",
+        ),
+    ] {
+        let restored: sepa::RemittanceInfo =
+            serde_json::from_value(serde_json::to_value(remittance).unwrap()).unwrap();
+        for policy in [sepa::CharsetPolicy::Strict, sepa::CharsetPolicy::default()] {
+            let mut ct_entry = CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1");
+            ct_entry.remittance = Some(restored.clone());
+            let ct = Pain001Builder::new("Debtor", "CT-RMT")
+                .charset(policy)
+                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                .add_group(
+                    CreditTransferGroup::new("Debtor", &debtor(), date("2026-07-20"))
+                        .add_entry(ct_entry),
+                );
+            let mut dd_entry = DirectDebitEntry::new(
+                "MND-1",
+                date("2024-06-01"),
+                "Debtor",
+                debtor(),
+                100,
+                "E2E-1",
+            );
+            dd_entry.remittance = Some(restored.clone());
+            let dd = Pain008Builder::new("Creditor", "DD-RMT")
+                .charset(policy)
+                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                .add_group(
+                    DirectDebitGroup::new(
+                        "Creditor",
+                        &creditor(),
+                        &creditor_id(),
+                        date("2026-07-20"),
+                    )
+                    .add_entry(dd_entry),
+                );
+            let location = (!valid).then_some(sepa::Location::transaction(0, 0));
+            let mut sink = b"existing".to_vec();
+            assert_writer_boundary(
+                ct.build(),
+                ct.write_to(&mut sink),
+                &sink,
+                location,
+                expected,
+            );
+            let mut sink = b"existing".to_vec();
+            assert_writer_boundary(
+                dd.build(),
+                dd.write_to(&mut sink),
+                &sink,
+                location,
+                expected,
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "serde")]
+#[allow(clippy::too_many_lines)]
+fn restored_original_records_and_amendments_are_checked_before_output() {
+    for (field, value, valid) in [
+        ("mandate_ref", serde_json::json!("MND-1"), true),
+        ("mandate_ref", serde_json::json!(""), false),
+        ("mandate_ref", serde_json::json!("A//B"), false),
+        (
+            "debtor",
+            serde_json::json!(["A".repeat(71), "DE89370400440532013000"]),
+            false,
+        ),
+        (
+            "creditor",
+            serde_json::json!(["", "NL91ABNA0417164300"]),
+            false,
+        ),
+    ] {
+        let mut stored =
+            serde_json::to_value(sepa::OriginalCollection::new("MND-1", date("2024-06-01")))
+                .unwrap();
+        stored[field] = value;
+        let original: sepa::OriginalCollection = serde_json::from_value(stored).unwrap();
+        let builder =
+            sepa::Pain007Builder::new("Creditor", "ORIGINAL-1", "REVERSAL-1")
+                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                .add_group(sepa::ReversalGroup::new("GROUP-1").add_entry(
+                    sepa::ReversalEntry::new("E2E-1", 100, sepa::ReversalReason::Cust, original),
+                ));
+        let mut sink = b"existing".to_vec();
+        assert_writer_boundary(
+            builder.build(),
+            builder.write_to(&mut sink),
+            &sink,
+            (!valid).then_some(sepa::Location::transaction(0, 0)),
+            "<MndtId>MND-1</MndtId>",
+        );
+    }
+    for (stored, valid) in [
+        (serde_json::json!({"same_mandate_new_account": true}), true),
+        (serde_json::json!({"original_mandate_id": "MND-OLD"}), true),
+        (serde_json::json!({}), false),
+        (serde_json::json!({"original_mandate_id": "A//B"}), false),
+        (
+            serde_json::json!({"original_creditor_name": "A".repeat(71)}),
+            false,
+        ),
+        (
+            serde_json::json!({"same_mandate_new_account": true, "original_debtor_iban": "DE89370400440532013000"}),
+            false,
+        ),
+    ] {
+        let mut complete = serde_json::to_value(sepa::MandateAmendment::default()).unwrap();
+        complete
+            .as_object_mut()
+            .unwrap()
+            .extend(stored.as_object().unwrap().clone());
+        let amendment: sepa::MandateAmendment = serde_json::from_value(complete).unwrap();
+        let builder = Pain008Builder::new("Creditor", "DD-AMENDMENT")
+            .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+            .add_group(
+                DirectDebitGroup::new("Creditor", &creditor(), &creditor_id(), date("2026-07-20"))
+                    .add_entry(
+                        DirectDebitEntry::new(
+                            "MND-1",
+                            date("2024-06-01"),
+                            "Debtor",
+                            debtor(),
+                            100,
+                            "E2E-1",
+                        )
+                        .with_amendment(amendment),
+                    ),
+            );
+        let mut sink = b"existing".to_vec();
+        assert_writer_boundary(
+            builder.build(),
+            builder.write_to(&mut sink),
+            &sink,
+            (!valid).then_some(sepa::Location::transaction(0, 0)),
+            "<AmdmntInd>true</AmdmntInd>",
+        );
+    }
+    for (field, value, valid) in [
+        ("message_id", serde_json::json!("ORIGINAL-1"), true),
+        ("message_id", serde_json::json!(""), false),
+        ("message_name_id", serde_json::json!("A//B"), false),
+    ] {
+        let mut stored =
+            serde_json::to_value(sepa::OriginalMessage::new("ORIGINAL-1", "pain.008.001.08"))
+                .unwrap();
+        stored[field] = value;
+        let original: sepa::OriginalMessage = serde_json::from_value(stored).unwrap();
+        let builder = sepa::Camt055Builder::new("RECALL-1", "Customer", "Bank", original)
+            .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+            .cancel_whole_message(sepa::CancellationReason::Cust);
+        let mut sink = b"existing".to_vec();
+        assert_writer_boundary(
+            builder.build(),
+            builder.write_to(&mut sink),
+            &sink,
+            (!valid).then_some(sepa::Location::message()),
+            "<OrgnlMsgId>ORIGINAL-1</OrgnlMsgId>",
+        );
+    }
+}
+
+#[test]
+fn original_recall_totals_obey_the_pinned_schema_bounds() {
+    for (count, amount, valid) in [
+        (1, 100, true),
+        (0, -100, true),
+        (999_999_999_999_999, 999_999_999_999_999_999, true),
+        (1, 9_223_372_036_854_775_800, true),
+        (1_000_000_000_000_000, 100, false),
+        (u64::MAX, 100, false),
+        (1, i64::MAX, false),
+        (1, i64::MIN, false),
+    ] {
+        let original =
+            sepa::OriginalMessage::new("ORIGINAL-1", "pain.008.001.08").totals(count, amount);
+        #[cfg(feature = "serde")]
+        let originals = [
+            original.clone(),
+            serde_json::from_value(serde_json::to_value(original).unwrap()).unwrap(),
+        ]
+        .to_vec();
+        #[cfg(not(feature = "serde"))]
+        let originals = vec![original];
+        for original in originals {
+            let builder = sepa::Camt055Builder::new("RECALL-1", "Customer", "Bank", original)
+                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
+                .cancel_whole_message(sepa::CancellationReason::Cust);
+            let mut sink = b"existing".to_vec();
+            assert_writer_boundary(
+                builder.build(),
+                builder.write_to(&mut sink),
+                &sink,
+                (!valid).then_some(sepa::Location::message()),
+                &format!("<NbOfTxs>{count}</NbOfTxs>"),
+            );
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn every_writer_refuses_invalid_reference_positions_before_output() {
+    for payload in ["X<Injected>".to_owned(), "A\0B".to_owned(), "A".repeat(36)] {
+        for policy in [sepa::CharsetPolicy::Strict, sepa::CharsetPolicy::default()] {
+            macro_rules! refuse {
+                ($builder:expr, $location:expr) => {{
+                    let builder = $builder
+                        .charset(policy)
+                        .created_at("2026-07-19T12:00:00Z".parse().unwrap());
+                    let mut sink = b"existing".to_vec();
+                    assert_writer_boundary(
+                        builder.build(),
+                        builder.write_to(&mut sink),
+                        &sink,
+                        Some($location),
+                        "",
+                    );
+                }};
+            }
+            for position in 0..5 {
+                let value = |slot| {
+                    if position == slot {
+                        payload.as_str()
+                    } else {
+                        "SAFE"
+                    }
+                };
+                let mut ct_entry = CreditTransferEntry::new("Payee", creditor(), 100, value(2))
+                    .with_ultimate_creditor(
+                        sepa::Party::new("Party").with_organisation_id(value(3), None),
+                    );
+                ct_entry.remittance = Some(sepa::RemittanceInfo::Proprietary {
+                    reference: value(4).into(),
+                    issuer: None,
+                });
+                refuse!(
+                    Pain001Builder::new("Debtor", value(0)).add_group(
+                        CreditTransferGroup::new("Debtor", &debtor(), date("2026-07-20"))
+                            .payment_info_id(value(1))
+                            .add_entry(ct_entry)
+                    ),
+                    match position {
+                        0 => sepa::Location::message(),
+                        1 => sepa::Location::group(0),
+                        _ => sepa::Location::transaction(0, 0),
+                    }
+                );
+                let dd_entry = DirectDebitEntry::new(
+                    value(3),
+                    date("2024-06-01"),
+                    "Debtor",
+                    debtor(),
+                    100,
+                    value(2),
+                )
+                .with_amendment(sepa::MandateAmendment::mandate_id_changed(value(4)));
+                refuse!(
+                    Pain008Builder::new("Creditor", value(0)).add_group(
+                        DirectDebitGroup::new(
+                            "Creditor",
+                            &creditor(),
+                            &creditor_id(),
+                            date("2026-07-20")
+                        )
+                        .payment_info_id(value(1))
+                        .add_entry(dd_entry)
+                    ),
+                    match position {
+                        0 => sepa::Location::message(),
+                        1 => sepa::Location::group(0),
+                        _ => sepa::Location::transaction(0, 0),
+                    }
+                );
+            }
+            for position in 0..7 {
+                let value = |slot| {
+                    if position == slot {
+                        payload.as_str()
+                    } else {
+                        "SAFE"
+                    }
+                };
+                let reason = if position == 6 {
+                    sepa::ReversalReason::Other(payload.clone())
+                } else {
+                    sepa::ReversalReason::Cust
+                };
+                refuse!(
+                    sepa::Pain007Builder::new("Creditor", value(1), value(0)).add_group(
+                        sepa::ReversalGroup::new(value(2))
+                            .reversal_payment_info_id(value(3))
+                            .add_entry(sepa::ReversalEntry::new(
+                                value(4),
+                                100,
+                                reason,
+                                sepa::OriginalCollection::new(value(5), date("2024-06-01"))
+                            ))
+                    ),
+                    match position {
+                        0 | 1 => sepa::Location::message(),
+                        2 | 3 => sepa::Location::group(0),
+                        _ => sepa::Location::transaction(0, 0),
+                    }
+                );
+            }
+            for position in 0..12 {
+                let value = |slot| {
+                    if position == slot {
+                        payload.as_str()
+                    } else {
+                        "SAFE"
+                    }
+                };
+                let reason = if position == 11 {
+                    sepa::CancellationReason::Other(payload.clone())
+                } else {
+                    sepa::CancellationReason::Cust
+                };
+                let requester = sepa::Party::new("Customer").with_organisation_id(value(4), None);
+                let recipient = sepa::Party::new("Bank").with_private_id(value(5), None);
+                refuse!(
+                    sepa::Camt055Builder::new(
+                        value(0),
+                        requester,
+                        recipient,
+                        sepa::OriginalMessage::new(value(2), value(3))
+                    )
+                    .case_id(value(1))
+                    .add_group(
+                        sepa::CancellationGroup::new(value(6))
+                            .payment_cancellation_id(value(7))
+                            .add_entry(
+                                sepa::CancellationEntry::new(value(8), reason)
+                                    .cancellation_id(value(9))
+                                    .original_instruction_id(value(10))
+                            )
+                    ),
+                    match position {
+                        0..=5 => sepa::Location::message(),
+                        6 | 7 => sepa::Location::group(0),
+                        _ => sepa::Location::transaction(0, 0),
+                    }
+                );
+            }
+        }
+    }
 }
 
 #[test]

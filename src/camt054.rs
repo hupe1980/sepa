@@ -20,9 +20,9 @@
 //!
 //! ## Amount sign convention
 //!
-//! camt.054 amounts are **always positive** with a separate
-//! [`CreditDebitIndicator`] field for direction. [`CashEntry::signed_ct`] gives
-//! the ledger amount (credit positive, debit negative).
+//! Amount magnitude and [`CreditDebitIndicator`] are separate observations.
+//! [`CashEntry::signed_ct`] returns credit-positive/debit-negative hundredths
+//! only for usable facts; invalid or negative magnitudes remain inspectable.
 //!
 //! ## Example
 //!
@@ -107,7 +107,7 @@ impl std::fmt::Display for CreditDebitIndicator {
 impl FromStr for CreditDebitIndicator {
     type Err = UnknownIndicator;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_uppercase().as_str() {
+        match s.trim() {
             "CRDT" => Ok(Self::Credit),
             "DBIT" => Ok(Self::Debit),
             _ => Err(UnknownIndicator(s.to_owned())),
@@ -172,13 +172,11 @@ impl Camt054Notification {
     /// All-or-nothing on purpose. Skipping the entries that cannot be resolved
     /// produces a total that looks right and is not, which is the failure mode
     /// a net movement exists to rule out; `None` says "ask about this file"
-    /// where a partial sum says nothing at all. Overflow saturates rather than
-    /// panicking, because the input is a third party's file.
+    /// where a partial sum says nothing at all. Overflow or mixed currencies
+    /// return `None`; a saturated or incomparable sum is not a ledger figure.
     #[must_use]
     pub fn net_movement_ct(&self) -> Option<i64> {
-        self.entries
-            .iter()
-            .try_fold(0i64, |acc, e| Some(acc.saturating_add(e.signed_ct()?)))
+        crate::camt::net_movement_ct(&self.entries)
     }
 
     /// Entries that are SEPA returns (Rückläufer) — a returned direct debit or
@@ -207,6 +205,23 @@ pub struct Camt054Document {
 }
 
 impl Camt054Document {
+    /// Located problems in current financial observations, not XSD validation.
+    /// Indices address retained records; transaction details are flattened.
+    #[must_use]
+    pub fn financial_diagnostics(&self) -> Vec<crate::camt::FinancialDiagnostic> {
+        self.notifications
+            .iter()
+            .enumerate()
+            .flat_map(|(index, notification)| {
+                crate::camt::cash_diagnostics(
+                    &format!("Ntfctn[{index}]"),
+                    &[],
+                    &notification.entries,
+                )
+            })
+            .collect()
+    }
+
     /// When the bank generated this document, typed.
     ///
     /// `None` when it reported none, or one this crate cannot read;
@@ -232,9 +247,8 @@ pub enum Camt054ParseError {
 
 /// Parse a camt.054 Bank-to-Customer Debit/Credit Notification XML string.
 ///
-/// Accepts every ISO version from `.001.02` to `.001.13`, including the
-/// `.001.07` reshaping of `Ntry/Sts` and of the party elements, and both the
-/// default-namespace and prefixed document shapes.
+/// Accepts `camt.054.001.08` with equivalent default or prefixed namespaces.
+/// Unsupported identities refuse; this is not full inbound XSD validation.
 ///
 /// # Errors
 ///
@@ -273,6 +287,17 @@ pub enum Camt054ParseError {
 /// # Ok::<(), sepa::Camt054ParseError>(())
 /// ```
 pub fn parse_camt054(xml: &str) -> Result<Camt054Document, Camt054ParseError> {
+    parse_camt054_with_limits(xml, crate::ParseLimits::default())
+}
+
+/// Parse a camt.054 document with explicit finite resource limits.
+///
+/// # Errors
+/// Returns an error for invalid XML, unsupported identity or an exhausted limit.
+pub fn parse_camt054_with_limits(
+    xml: &str,
+    limits: crate::ParseLimits,
+) -> Result<Camt054Document, Camt054ParseError> {
     use crate::camt;
     use crate::xml::{Document, Node};
 
@@ -287,11 +312,12 @@ pub fn parse_camt054(xml: &str) -> Result<Camt054Document, Camt054ParseError> {
         }
     }
 
-    let doc = Document::parse(xml)?;
+    let doc = Document::parse_with_limits(xml, limits)?;
     let root = doc
         .root
         .child("BkToCstmrDbtCdtNtfctn")
         .ok_or(Camt054ParseError::NotCamt054)?;
+    doc.message("camt.054", "BkToCstmrDbtCdtNtfctn", &["001.08"])?;
 
     let grp_hdr = root.child("GrpHdr");
     let text = |tag: &str| {
@@ -324,10 +350,7 @@ mod tests {
             "CRDT".parse::<CreditDebitIndicator>().unwrap(),
             CreditDebitIndicator::Credit
         );
-        assert_eq!(
-            "dbit".parse::<CreditDebitIndicator>().unwrap(),
-            CreditDebitIndicator::Debit
-        );
+        assert!("dbit".parse::<CreditDebitIndicator>().is_err());
         assert!("INVALID".parse::<CreditDebitIndicator>().is_err());
     }
 
