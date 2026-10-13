@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Mit XMLSpy v2022 (http://www.altova.com) im August 2022 von der SIZ GmbH (Klein) bearbeitet -->
+<!-- Dieses Beispiel ist der SEPA PSR zu einer Überweisungsdatei mit der Message-Id  471164564 mit vier Sammlern, in denen es sowohl Rejects als auch postive Fälle gab: -->
+<!-- 1. Sammler: okay, 2. Sammler: okay mit Änderungen, 3. Sammler: rejected, 4. Sammler: 1 von 113 Transaktionen rejected. Der Status einer SEPA- Überweisung kann nur vom ZDL des Zahlers (Auftraggebers) berichtet werden -->
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10 pain.002.001.10.xsd">
+	<CstmrPmtStsRpt>
+		<GrpHdr>
+			<MsgId>Message-ID-4712</MsgId>
+			<CreDtTm>2023-11-24T09:30:47.000Z</CreDtTm>
+			<DbtrAgt>
+				<FinInstnId>
+					<BICFI>BANKDEFF123</BICFI>
+				</FinInstnId>
+			</DbtrAgt>
+		</GrpHdr>
+		<OrgnlGrpInfAndSts>
+			<OrgnlMsgId>471164564</OrgnlMsgId>
+			<OrgnlMsgNmId>pain.001.001.09</OrgnlMsgNmId>
+		</OrgnlGrpInfAndSts>
+		<OrgnlPmtInfAndSts>
+			<OrgnlPmtInfId>Sammler 1</OrgnlPmtInfId><OrgnlNbOfTxs>10</OrgnlNbOfTxs>
+			<OrgnlCtrlSum>9341.25</OrgnlCtrlSum><PmtInfSts>ACSP</PmtInfSts>
+		</OrgnlPmtInfAndSts>
+		<OrgnlPmtInfAndSts>
+			<OrgnlPmtInfId>Sammler 2</OrgnlPmtInfId><OrgnlNbOfTxs>5</OrgnlNbOfTxs>
+			<OrgnlCtrlSum>1425.00</OrgnlCtrlSum><PmtInfSts>ACWC</PmtInfSts>
+			<StsRsnInf>
+				<Orgtr><Id><OrgId><AnyBIC>BANKDEFF123</AnyBIC></OrgId></Id></Orgtr>
+				<Rsn><Cd>DT06</Cd></Rsn>
+				<AddtlInf>Vom Kunden vorgegebenes Ausführungsdatum wurde hochgesetzt</AddtlInf>
+				<AddtlInf>ReqdExctnDt ALT: 2023-11-23</AddtlInf>
+				<AddtlInf>ReqdExctnDt NEU: 2023-11-24</AddtlInf>
+			</StsRsnInf>
+		</OrgnlPmtInfAndSts>
+		<OrgnlPmtInfAndSts>
+			<OrgnlPmtInfId>Sammler 3</OrgnlPmtInfId>
+			<OrgnlNbOfTxs>37</OrgnlNbOfTxs>
+			<OrgnlCtrlSum>1250.00</OrgnlCtrlSum>
+			<PmtInfSts>RJCT</PmtInfSts>
+			<StsRsnInf>
+				<Orgtr><Id><OrgId><AnyBIC>BANKDEFF123</AnyBIC></OrgId></Id></Orgtr>
+				<Rsn><Cd>AM05</Cd></Rsn>
+				<AddtlInf>Doppeleinreichung</AddtlInf>
+			</StsRsnInf>
+		</OrgnlPmtInfAndSts>
+		<OrgnlPmtInfAndSts>
+			<OrgnlPmtInfId>Sammler 4</OrgnlPmtInfId>
+			<OrgnlNbOfTxs>113</OrgnlNbOfTxs>
+			<OrgnlCtrlSum>37425.00</OrgnlCtrlSum>
+			<PmtInfSts>PART</PmtInfSts>
+			<NbOfTxsPerSts><DtldNbOfTxs>112</DtldNbOfTxs><DtldSts>ACSP</DtldSts></NbOfTxsPerSts>
+			<NbOfTxsPerSts><DtldNbOfTxs>1</DtldNbOfTxs><DtldSts>RJCT</DtldSts></NbOfTxsPerSts>
+			<TxInfAndSts>
+				<StsId>S45623</StsId>
+				<OrgnlEndToEndId>4656384</OrgnlEndToEndId>
+				<TxSts>RJCT</TxSts>
+				<StsRsnInf>
+					<Orgtr><Id><OrgId><AnyBIC>BANKDEFF123</AnyBIC></OrgId></Id></Orgtr>
+					<Rsn><Cd>AC01</Cd></Rsn><AddtlInf>IBAN fehlerhaft</AddtlInf>
+				</StsRsnInf>
+			</TxInfAndSts>
+		</OrgnlPmtInfAndSts>
+	</CstmrPmtStsRpt>
+</Document>

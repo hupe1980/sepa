@@ -66,6 +66,8 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
+      - name: Install xmllint
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
       - run: cargo test --all-targets --all-features
 
   test:

@@ -40,6 +40,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A document literal found in the source.
 struct Fixture {
@@ -55,24 +56,15 @@ fn manifest_dir() -> PathBuf {
 
 #[test]
 fn published_german_status_report_preserves_independent_facts() {
-    let fixture_path = manifest_dir().join(
-        "schemas/Anlage3_V3.7-3.8_Beispiele_Schemadateien_GBIC4/pain.002.001.10_PSR_SCT-Sammler_positiv_und-rejects.xml",
-    );
-    let xml = std::fs::read_to_string(&fixture_path).unwrap();
+    let xml = include_str!("data/pain.002.001.10_PSR_SCT-Sammler_positiv_und-rejects.xml");
     let schema = manifest_dir().join("tests/xsd/pain.002.001.10.xsd");
-    let validated = Command::new("xmllint")
-        .arg("--noout")
-        .arg("--schema")
-        .arg(schema)
-        .arg(fixture_path)
-        .output()
-        .expect("xmllint is required for publisher-fixture schema evidence");
-    assert!(
-        validated.status.success(),
-        "{}",
-        String::from_utf8_lossy(&validated.stderr)
-    );
-    let document = sepa::parse_pain002(&xml).unwrap();
+    match xmllint(xml, &schema) {
+        Some(result) => result.expect("publisher fixture must satisfy the pinned schema"),
+        None => eprintln!(
+            "SKIP: xmllint unavailable — publisher fixture not schema-checked; parser assertions still run"
+        ),
+    }
+    let document = sepa::parse_pain002(xml).unwrap();
     assert_eq!(document.original_msg_id, "471164564");
     assert_eq!(document.original_control_sum_raw, None);
     assert_eq!(document.original_control_sum_ct, None);
@@ -190,18 +182,22 @@ fn document_namespace(body: &str) -> Option<String> {
 }
 
 fn xmllint(xml: &str, schema: &Path) -> Option<Result<(), String>> {
+    static NEXT_DOCUMENT: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!("sepa-fixture-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
-    let doc = dir.join("doc.xml");
+    let doc = dir.join(format!(
+        "doc-{}.xml",
+        NEXT_DOCUMENT.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&doc, xml).ok()?;
     let out = Command::new("xmllint")
         .arg("--noout")
         .arg("--schema")
         .arg(schema)
         .arg(&doc)
-        .output()
-        .ok()?;
+        .output();
     let _ = std::fs::remove_file(&doc);
+    let out = out.ok()?;
     if out.status.success() {
         Some(Ok(()))
     } else {

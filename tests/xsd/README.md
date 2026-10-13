@@ -68,6 +68,18 @@ If you ever replace these files, verify that the choice types
 
 Two sources, and the difference matters.
 
+### Published XML example
+
+`tests/data/pain.002.001.10_PSR_SCT-Sammler_positiv_und-rejects.xml` is the DK
+example from `Anlage3_V3.7-3.8_Beispiele_Schemadateien_GBIC4`, published via
+[ebics.de][ebics]. Only line endings, indentation and trailing whitespace were
+normalized; element text and attributes are unchanged.
+
+SHA-256: `fb4cf7b2efa13bf7976be3e33d4ce825000f6d450f4ef905f172e3525b8fd749`.
+The fixture ships with the tests rather than depending on local downloads.
+Parser assertions always run; XSD validation runs when `xmllint` is available,
+as in the existing fixture gate and Linux test CI job.
+
 ### Official — Deutsche Kreditwirtschaft, via [ebics.de][ebics]
 
 Freely published, no registration. These are authoritative.
