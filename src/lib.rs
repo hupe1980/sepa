@@ -26,9 +26,8 @@
 //!
 //! **Dependencies:** [`thiserror`](https://crates.io/crates/thiserror) and
 //! [`quick-xml`](https://crates.io/crates/quick-xml) (required);
-//! [`serde`](https://crates.io/crates/serde),
-//! [`time`](https://crates.io/crates/time) and
-//! [`chrono`](https://crates.io/crates/chrono) (optional features).
+//! [`serde`](https://crates.io/crates/serde) and
+//! [`time`](https://crates.io/crates/time) (optional features).
 //!
 //! ## Schema versions
 //!
@@ -382,7 +381,7 @@ pub use creditor_id::{
     CreditorId, CreditorIdError, creditor_id_check_digits, validate_creditor_id,
 };
 pub use currency::{Currency, CurrencyError};
-#[cfg(any(feature = "time", feature = "chrono"))]
+#[cfg(feature = "time")]
 pub use date::ConversionError;
 pub use date::{DateError, DateTimeError, IsoDate, IsoDateTime};
 pub use iban::{

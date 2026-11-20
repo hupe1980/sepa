@@ -14,16 +14,14 @@ These guides target 0.10. For an unpublished checkout, use
 `cargo add sepa --path /path/to/sepa` instead.
 
 The crate needs Rust **1.88** or newer. Its mandatory dependencies are
-`thiserror` and `quick-xml`; three features are opt-in:
+`thiserror` and `quick-xml`; two features are opt-in:
 
 ```sh
 cargo add sepa@0.10 --features serde   # Supported values, payment inputs and reports
 cargo add sepa@0.10 --features time    # IsoDate <-> time::Date
-cargo add sepa@0.10 --features chrono  # IsoDate <-> chrono::NaiveDate
 ```
 
-`time` and `chrono` are conversion-only; the crate's own date arithmetic does
-not depend on them.
+`time` is conversion-only; the crate's own date arithmetic does not depend on it.
 
 ## Validate before you build
 

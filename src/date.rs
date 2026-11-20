@@ -25,20 +25,20 @@
 //!
 //! ## Interop
 //!
-//! With the `time` or `chrono` feature, the matching types convert in **both**
+//! With the `time` feature, the matching types convert in **both**
 //! directions, so a caller that already has a typed date never formats a
 //! string. Every conversion is fallible, and each direction fails for its own
-//! reason: `time` and `chrono` represent years this type deliberately does not,
-//! and this type represents timestamps that name no instant.
+//! reason: `time` represents years this type deliberately does not, and this
+//! type represents timestamps that name no instant.
 //!
-//! | This crate | `time` | `chrono` |
-//! |---|---|---|
-//! | [`IsoDate`] | `Date` | `NaiveDate` |
-//! | [`IsoDateTime`] (offset dropped) | `PrimitiveDateTime` | `NaiveDateTime` |
-//! | [`IsoDateTime`] (offset kept) | `OffsetDateTime` | `DateTime<FixedOffset>` |
+//! | This crate | `time` |
+//! |---|---|
+//! | [`IsoDate`] | `Date` |
+//! | [`IsoDateTime`] (offset dropped) | `PrimitiveDateTime` |
+//! | [`IsoDateTime`] (offset kept) | `OffsetDateTime` |
 //!
-//! The last row is the one with an opinion. `OffsetDateTime` and `DateTime`
-//! name an *instant*, and an [`IsoDateTime`] with no offset does not — so that
+//! The last row is the one with an opinion. `OffsetDateTime` names an
+//! *instant*, and an [`IsoDateTime`] with no offset does not — so that
 //! conversion returns [`ConversionError::NoOffset`] rather than assuming UTC.
 //! Reach for [`IsoDateTime::in_utc`] when UTC really is the answer.
 //!
@@ -149,11 +149,10 @@ pub enum DateTimeError {
 /// Error returned when an [`IsoDateTime`] cannot be expressed in an external
 /// date-time type.
 ///
-/// Only produced by the `time` and `chrono` conversions, and only in the
-/// direction that needs an instant. A timestamp with no UTC offset is a wall
-/// clock somewhere, and `time::OffsetDateTime` / `chrono::DateTime` both
-/// require the somewhere — so the conversion fails rather than assuming UTC.
-#[cfg(any(feature = "time", feature = "chrono"))]
+/// Only produced by the `time` conversions, and only in the direction that
+/// needs an instant. A timestamp with no UTC offset is a wall clock
+/// somewhere, and `time::OffsetDateTime` requires the somewhere — so the conversion fails rather than assuming UTC.
+#[cfg(feature = "time")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConversionError {
@@ -836,9 +835,9 @@ impl IsoDateTime {
 
     /// Replace the time of day, with components already known to be in range.
     ///
-    /// Used only by the `time` / `chrono` conversions, whose source types
+    /// Used only by the `time` conversions, whose source types
     /// guarantee the range.
-    #[cfg(any(feature = "time", feature = "chrono"))]
+    #[cfg(feature = "time")]
     const fn with_time(mut self, hour: u8, minute: u8, second: u8) -> Self {
         self.hour = hour;
         self.minute = minute;
@@ -1052,126 +1051,6 @@ mod time_interop {
     }
 }
 
-// ── `chrono` interop ──────────────────────────────────────────────────────────
-
-#[cfg(feature = "chrono")]
-mod chrono_interop {
-    use super::{ConversionError, DateError, IsoDate, IsoDateTime};
-    use chrono::{Datelike, Timelike};
-
-    impl TryFrom<chrono::NaiveDate> for IsoDate {
-        type Error = DateError;
-        fn try_from(d: chrono::NaiveDate) -> Result<Self, Self::Error> {
-            let year = d.year();
-            let year = u16::try_from(year).map_err(|_| DateError::YearOutOfRange {
-                year: i64::from(year),
-            })?;
-            // `chrono` months and days are 1-based u32 within calendar range.
-            #[allow(clippy::cast_possible_truncation)]
-            Self::new(year, d.month() as u8, d.day() as u8)
-        }
-    }
-
-    impl TryFrom<IsoDate> for chrono::NaiveDate {
-        type Error = DateError;
-        fn try_from(d: IsoDate) -> Result<Self, Self::Error> {
-            Self::from_ymd_opt(
-                i32::from(d.year()),
-                u32::from(d.month()),
-                u32::from(d.day()),
-            )
-            .ok_or(DateError::NotACalendarDate {
-                year: i64::from(d.year()),
-                month: u32::from(d.month()),
-                day: u32::from(d.day()),
-            })
-        }
-    }
-
-    impl TryFrom<chrono::NaiveDateTime> for IsoDateTime {
-        type Error = DateError;
-        /// The timestamp with **no** offset — `NaiveDateTime` carries none, so
-        /// claiming UTC would invent one.
-        fn try_from(t: chrono::NaiveDateTime) -> Result<Self, Self::Error> {
-            let date = IsoDate::try_from(t.date())?;
-            // `chrono` guarantees the components are in range.
-            #[allow(clippy::cast_possible_truncation)]
-            Ok(Self::from(date).with_time(t.hour() as u8, t.minute() as u8, t.second() as u8))
-        }
-    }
-
-    impl TryFrom<IsoDateTime> for chrono::NaiveDateTime {
-        type Error = DateError;
-        /// Drops the UTC offset, if any: `NaiveDateTime` has nowhere to put it.
-        /// Convert to `chrono::DateTime<FixedOffset>` when the offset matters.
-        fn try_from(t: IsoDateTime) -> Result<Self, Self::Error> {
-            let date = chrono::NaiveDate::try_from(t.date())?;
-            date.and_hms_opt(
-                u32::from(t.hour()),
-                u32::from(t.minute()),
-                u32::from(t.second()),
-            )
-            .ok_or(DateError::NotACalendarDate {
-                year: i64::from(t.date().year()),
-                month: u32::from(t.date().month()),
-                day: u32::from(t.date().day()),
-            })
-        }
-    }
-
-    impl<Tz: chrono::TimeZone> TryFrom<chrono::DateTime<Tz>> for IsoDateTime {
-        type Error = DateError;
-        /// Keeps whole-minute offsets within ±14:00. Other offsets are
-        /// re-expressed at UTC, preserving the whole-second instant.
-        ///
-        /// # Errors
-        ///
-        /// Refuses local dates and required UTC dates outside 0001–9999.
-        /// [`DateError::OutOfRange`] reports a local day that cannot be
-        /// represented by chrono's checked offset arithmetic.
-        fn try_from(t: chrono::DateTime<Tz>) -> Result<Self, Self::Error> {
-            use chrono::Offset as _;
-            let fixed = t.offset().fix();
-            let seconds = fixed.local_minus_utc();
-            let naive = t
-                .naive_utc()
-                .checked_add_offset(fixed)
-                .ok_or(DateError::OutOfRange {
-                    days: (t.timestamp() + i64::from(seconds)).div_euclid(86_400),
-                })?;
-            let mut out = Self::try_from(naive)?;
-            // XSD offsets use whole minutes within ±14:00; otherwise use UTC.
-            out.offset_minutes = i16::try_from(seconds / 60)
-                .ok()
-                .filter(|minutes| seconds % 60 == 0 && minutes.abs() <= 14 * 60);
-            if out.offset_minutes.is_none() {
-                out = Self::try_from(t.naive_utc())?.in_utc();
-            }
-            Ok(out)
-        }
-    }
-
-    impl TryFrom<IsoDateTime> for chrono::DateTime<chrono::FixedOffset> {
-        type Error = ConversionError;
-        /// # Errors
-        ///
-        /// [`ConversionError::NoOffset`] when the timestamp carries no UTC
-        /// offset — it names a wall clock, not an instant. See
-        /// [`IsoDateTime::unix_seconds`].
-        fn try_from(t: IsoDateTime) -> Result<Self, Self::Error> {
-            let minutes = t.offset_minutes().ok_or(ConversionError::NoOffset)?;
-            let offset = chrono::FixedOffset::east_opt(i32::from(minutes) * 60)
-                .ok_or(ConversionError::OutOfRange)?;
-            let naive =
-                chrono::NaiveDateTime::try_from(t).map_err(|_| ConversionError::OutOfRange)?;
-            naive
-                .and_local_timezone(offset)
-                .single()
-                .ok_or(ConversionError::OutOfRange)
-        }
-    }
-}
-
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1219,31 +1098,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "chrono")]
-    #[test]
-    fn chrono_timestamps_convert_in_both_directions() {
-        let bare: IsoDateTime = "2026-07-20T13:00:00".parse().unwrap();
-        let naive = chrono::NaiveDateTime::try_from(bare).unwrap();
-        assert_eq!(IsoDateTime::try_from(naive).unwrap(), bare);
-
-        let berlin: IsoDateTime = "2026-07-20T13:00:00+02:00".parse().unwrap();
-        let dt = chrono::DateTime::<chrono::FixedOffset>::try_from(berlin).unwrap();
-        assert_eq!(dt.timestamp(), berlin.unix_seconds().unwrap());
-        assert_eq!(IsoDateTime::try_from(dt).unwrap(), berlin);
-
-        assert_eq!(
-            chrono::DateTime::<chrono::FixedOffset>::try_from(bare),
-            Err(ConversionError::NoOffset)
-        );
-
-        // A UTC `DateTime` renders as `Z`, which is the spelling ISO 20022 uses.
-        let utc = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc);
-        assert_eq!(
-            IsoDateTime::try_from(utc).unwrap().to_string(),
-            "2026-07-20T13:00:00Z"
-        );
-    }
-
     #[cfg(feature = "time")]
     #[test]
     fn time_subminute_offsets_preserve_the_instant_by_rendering_at_utc() {
@@ -1273,41 +1127,6 @@ mod tests {
                     .unwrap()
                     .unix_timestamp(),
                 external.unix_timestamp()
-            );
-        }
-    }
-
-    #[cfg(feature = "chrono")]
-    #[test]
-    fn chrono_subminute_offsets_preserve_the_instant_by_rendering_at_utc() {
-        let local =
-            chrono::NaiveDateTime::try_from(IsoDateTime::parse("2026-01-01T00:00:00").unwrap())
-                .unwrap();
-        for seconds in [
-            -50_460, -50_401, -50_400, -3631, -1, 0, 1, 3631, 50_400, 50_401, 50_460,
-        ] {
-            let external = local
-                .and_local_timezone(chrono::FixedOffset::east_opt(seconds).unwrap())
-                .single()
-                .unwrap();
-            let converted = IsoDateTime::try_from(external).unwrap();
-            assert_eq!(
-                converted.unix_seconds(),
-                Some(external.timestamp()),
-                "offset seconds {seconds}"
-            );
-            let expected = if seconds % 60 == 0 && seconds.abs() <= 50_400 {
-                i16::try_from(seconds / 60).unwrap()
-            } else {
-                0
-            };
-            assert_eq!(converted.offset_minutes(), Some(expected));
-            assert_eq!(IsoDateTime::parse(&converted.to_string()), Ok(converted));
-            assert_eq!(
-                chrono::DateTime::<chrono::FixedOffset>::try_from(converted)
-                    .unwrap()
-                    .timestamp(),
-                external.timestamp()
             );
         }
     }
@@ -1342,59 +1161,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    #[cfg(feature = "chrono")]
-    #[test]
-    fn chrono_offset_fallback_refuses_out_of_range_utc_without_panicking() {
-        for (raw, offsets, year) in [
-            ("0001-01-01T00:00:00", [1, 50_401, 50_460, 50_400], 0),
-            (
-                "9999-12-31T23:59:59",
-                [-1, -50_401, -50_460, -50_400],
-                10_000,
-            ),
-        ] {
-            let local = chrono::NaiveDateTime::try_from(IsoDateTime::parse(raw).unwrap()).unwrap();
-            for seconds in offsets {
-                let external = local
-                    .and_local_timezone(chrono::FixedOffset::east_opt(seconds).unwrap())
-                    .single()
-                    .unwrap();
-                let converted = IsoDateTime::try_from(external);
-                if seconds.abs() == 50_400 {
-                    let converted = converted.unwrap();
-                    assert_eq!(converted.unix_seconds(), Some(external.timestamp()));
-                    assert_eq!(
-                        converted.offset_minutes(),
-                        Some(i16::try_from(seconds / 60).unwrap())
-                    );
-                    assert_eq!(IsoDateTime::parse(&converted.to_string()), Ok(converted));
-                } else {
-                    assert_eq!(converted, Err(DateError::YearOutOfRange { year }));
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "chrono")]
-    #[test]
-    fn chrono_calendar_endpoint_offsets_return_errors_without_panicking() {
-        for (utc, seconds) in [
-            (chrono::NaiveDateTime::MIN, -1),
-            (chrono::NaiveDateTime::MAX, 1),
-        ] {
-            let external = chrono::DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
-                utc,
-                chrono::FixedOffset::east_opt(seconds).unwrap(),
-            );
-            assert_eq!(
-                IsoDateTime::try_from(external),
-                Err(DateError::OutOfRange {
-                    days: (external.timestamp() + i64::from(seconds)).div_euclid(86_400)
-                })
-            );
         }
     }
 
@@ -1724,36 +1490,5 @@ mod tests {
         let t: time::Date = d.try_into().unwrap();
         assert_eq!(t.year(), 2026);
         assert_eq!(IsoDate::try_from(t).unwrap(), d);
-    }
-
-    #[cfg(feature = "chrono")]
-    #[test]
-    fn chrono_conversions_cannot_bypass_the_supported_year_range() {
-        for year in [-1, 0, 10_000, 65_535, 65_536] {
-            let date = chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
-            let expected = DateError::YearOutOfRange {
-                year: i64::from(year),
-            };
-            assert_eq!(IsoDate::try_from(date), Err(expected.clone()));
-            assert_eq!(
-                IsoDateTime::try_from(date.and_hms_opt(0, 0, 0).unwrap()),
-                Err(expected)
-            );
-        }
-        for date in [IsoDate::MIN, IsoDate::MAX] {
-            let external = chrono::NaiveDate::try_from(date).unwrap();
-            assert_eq!(IsoDate::try_from(external), Ok(date));
-            let timestamp = IsoDateTime::try_from(external.and_hms_opt(0, 0, 0).unwrap()).unwrap();
-            assert_eq!(timestamp.date(), date);
-        }
-    }
-
-    #[cfg(feature = "chrono")]
-    #[test]
-    fn chrono_types_convert_both_ways() {
-        let d = IsoDate::new(2026, 7, 20).unwrap();
-        let c: chrono::NaiveDate = d.try_into().unwrap();
-        assert_eq!(c.to_string(), "2026-07-20");
-        assert_eq!(IsoDate::try_from(c).unwrap(), d);
     }
 }

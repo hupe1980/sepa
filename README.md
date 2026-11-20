@@ -32,7 +32,7 @@
 | `address` | `PstlAdr` — this library emits structured & hybrid addresses |
 | `reference` | ISO 11649 RF Creditor Reference — validate **and** generate |
 | `party` · `purpose` · `country` · `currency` | Ultimate parties, the two distinct purpose code sets, ISO 3166, ISO 4217 |
-| `date` | `IsoDate` / `IsoDateTime` — validated at construction, `time` + `chrono` interop |
+| `date` | `IsoDate` / `IsoDateTime` — validated at construction, `time` interop |
 | `validate` · `charset` | EPC rules the XSD does not enforce; the real EPC217-08 conversion table |
 
 ### Coverage, by scheme
@@ -64,7 +64,7 @@ Common types are re-exported at the crate root.
 cargo add sepa@0.10
 ```
 
-Optional features: `serde`, `time`, `chrono` — see [Dependencies](#-dependencies).
+Optional features: `serde`, `time` — see [Dependencies](#-dependencies).
 
 ```rust
 use sepa::{
@@ -565,9 +565,9 @@ and are rejected by banks. Those rules live in `validate` and are enforced by
 | [`thiserror`](https://crates.io/crates/thiserror) | Error derives |
 | [`quick-xml`](https://crates.io/crates/quick-xml) | Correct XML parsing |
 | [`serde`](https://crates.io/crates/serde) | `serde` feature — supported values, payment inputs and reports |
-| [`time`](https://crates.io/crates/time) · [`chrono`](https://crates.io/crates/chrono) | Date interop (`time` / `chrono` features) |
+| [`time`](https://crates.io/crates/time) | Date interop (`time` feature) |
 
-`time` and `chrono` are conversion-only: the crate's own calendar arithmetic is
+`time` is conversion-only: the crate's own calendar arithmetic is
 dependency-free and behaves identically whichever features are enabled.
 
 ## 🔖 Versioning

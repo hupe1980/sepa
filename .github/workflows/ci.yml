@@ -115,11 +115,7 @@ jobs:
           - "--no-default-features"
           - "--no-default-features --features serde"
           - "--no-default-features --features time"
-          - "--no-default-features --features chrono"
           - "--no-default-features --features serde,time"
-          - "--no-default-features --features serde,chrono"
-          - "--no-default-features --features time,chrono"
-          - "--no-default-features --features serde,time,chrono"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

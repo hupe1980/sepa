@@ -22,7 +22,7 @@ facts. It does not execute payments or certify a bank's acceptance.
 <li><strong>Errors name the row</strong><p>A failure reports the ISO element <em>and</em> the group and transaction index — actionable in a collection run of ten thousand.</p></li>
 <li><strong>Independent schema fixtures</strong><p>The generated fixture matrix is checked in CI against pinned ISO schemas and German GBIC 5 subsets. This is test evidence, not certification of every possible document.</p></li>
 <li><strong>No transport or runtime</strong><p>Build strings or stream to your own writer. Storage and transport stay yours. Supply message IDs, creation timestamps and payment dates: the crate never reads the clock, so the same inputs rebuild the same file.</p></li>
-<li><strong>Two required dependencies</strong><p><code>thiserror</code> and <code>quick-xml</code>. Serde, <code>time</code> and <code>chrono</code> are opt-in features.</p></li>
+<li><strong>Two required dependencies</strong><p><code>thiserror</code> and <code>quick-xml</code>. Serde and <code>time</code> are opt-in features.</p></li>
 </ul>
 
 ## A collection run in one file

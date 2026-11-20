@@ -44,8 +44,6 @@ default = []
 serde = ["dep:serde"]
 ## Convert between `IsoDate` / `IsoDateTime` and the `time` crate's types.
 time = ["dep:time"]
-## Convert between `IsoDate` / `IsoDateTime` and the `chrono` crate's types.
-chrono = ["dep:chrono"]
 
 [dependencies]
 thiserror  = { version = "2", default-features = false }
@@ -53,7 +51,6 @@ quick-xml  = { version = "0.41", default-features = false }
 serde      = { version = "1", features = ["derive"], optional = true }
 # Optional interop; core calendar arithmetic is dependency-free.
 time       = { version = "0.3.47", default-features = false, optional = true }
-chrono     = { version = "0.4", default-features = false, optional = true }
 
 # A payments library parsing untrusted bank input warrants a strict lint floor.
 [lints.rust]

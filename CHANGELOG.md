@@ -55,6 +55,8 @@ change: `CreDtTm` is always the caller's, never a clock reading.
   build byte-identical files, so a billing run can be replayed against its own
   output. `IsoDateTime::now()` and `IsoDate::today()` remain as explicit
   helpers; nothing in the crate calls them.
+- **The `chrono` feature is removed.** `chrono` is unmaintained
+  (RUSTSEC-2026-0543). Use the `time` feature, which converts the same types.
 - **`Iban` debug-formats masked**, `Iban(DE…3000)`: the country and last four
   characters. `Display`, `as_str()` and serde are unchanged. Every builder input
   holding an IBAN — groups, entries, mandate amendments, builders — inherits it.

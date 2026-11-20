@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Dates are not in the rule table: an `IsoDate` is validated when constructed.
 
 The supported year range is **0001–9999** for construction, parsing, serde and
-the `time`/`chrono` conversions; the XSD allows wider years. Timestamp
+the `time` conversions; the XSD allows wider years. Timestamp
 conversions keep whole-minute offsets within ±14:00; other offsets are
 re-expressed in UTC without changing the instant. A date that cannot be
 represented returns a typed error rather than panicking or clamping. (A local
