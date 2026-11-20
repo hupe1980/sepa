@@ -3266,7 +3266,8 @@ fn sr005_the_library_never_reads_the_clock_implicitly() {
                 "IsoDate::today(",
             ] {
                 if code.contains(needle) {
-                    reads.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                    let file = path.file_name().unwrap().to_string_lossy();
+                    reads.push(format!("{file}:{}: {}", n + 1, line.trim()));
                 }
             }
         }
@@ -3274,7 +3275,7 @@ fn sr005_the_library_never_reads_the_clock_implicitly() {
     // date.rs defines the two helpers (and tests them); nothing else may call them.
     let unexpected: Vec<_> = reads
         .iter()
-        .filter(|r| !r.contains("src/date.rs:"))
+        .filter(|r| !r.starts_with("date.rs:"))
         .collect();
     assert!(
         unexpected.is_empty(),
