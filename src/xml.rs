@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn comments_are_not_elements() {
-        // Regression: the previous string scanner returned "COMMENTED".
+        // Commented-out elements are not content.
         let n = parse("<R><!-- <MsgId>COMMENTED</MsgId> --><MsgId>REAL</MsgId></R>");
         assert_eq!(n.text_of("MsgId"), Some("REAL"));
         assert_eq!(n.children_named("MsgId").count(), 1);
@@ -937,7 +937,7 @@ mod tests {
 
     #[test]
     fn entities_are_decoded() {
-        // Regression: the previous scanner returned "Ben &amp; Jerry&apos;s".
+        // Text is returned with entity references decoded.
         let n = parse("<R><Nm>Ben &amp; Jerry&apos;s &lt;GmbH&gt;</Nm></R>");
         assert_eq!(n.text_of("Nm"), Some("Ben & Jerry's <GmbH>"));
     }
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn self_closing_element_is_empty_not_a_swallowed_sibling() {
-        // Regression: the previous scanner scanned past `<Nm/>` to a later close tag.
+        // `<Nm/>` is a complete element; it must not pair with a later close tag.
         let n = parse("<R><Dbtr><Nm/></Dbtr><Cdtr><Nm>Real Name</Nm></Cdtr></R>");
         assert_eq!(n.path(&["Dbtr", "Nm"]).map(|x| x.text.as_str()), Some(""));
         assert_eq!(n.text_of("Dbtr"), None);
@@ -1034,9 +1034,9 @@ mod tests {
 
     #[test]
     fn a_self_closing_root_cannot_be_displaced_either() {
-        // Regression: `Event::Empty` at depth 0 assigned the root directly,
-        // bypassing the duplicate check — so `<Doc/>` followed by a second
-        // root silently handed the caller the *second* document.
+        // A self-closing root goes through the same duplicate check as any
+        // other root, so `<Doc/>` followed by a second root is rejected rather
+        // than handing the caller the *second* document.
         assert_eq!(
             Document::parse("<Doc/><Doc xmlns='urn:evil'><MsgId>EVIL</MsgId></Doc>"),
             Err(XmlError::MultipleRootElements)

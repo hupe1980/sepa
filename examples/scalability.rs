@@ -45,9 +45,12 @@ fn batch(count: usize) -> Result<Pain008Builder, Box<dyn Error>> {
             format!("TX-{index}"),
         ));
     }
-    Ok(Pain008Builder::new("Synthetic Creditor", "SYNTHETIC-BATCH")
-        .created_at("2026-10-12T12:00:00".parse()?)
-        .add_group(group))
+    Ok(Pain008Builder::new(
+        "Synthetic Creditor",
+        "SYNTHETIC-BATCH",
+        "2026-10-12T12:00:00".parse()?,
+    )
+    .add_group(group))
 }
 
 #[derive(Debug, Default)]

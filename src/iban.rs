@@ -42,13 +42,26 @@
 //! assert_eq!(iban.country_code(), "DE");
 //! ```
 
+use std::fmt::Write as _;
 use std::str::FromStr;
 
 /// A validated IBAN.  Created only via [`validate_iban`] or [`Iban::from_str`].
 ///
 /// The inner value is normalised: whitespace removed, uppercased.
 /// Cannot be forged — all constructors validate the mod-97 checksum.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `Debug` is masked — `Iban(DE…3000)` — because an IBAN is personal data and
+/// `Debug` is what ends up in logs, panics and tracing fields. [`Display`],
+/// [`as_str`](Self::as_str) and serde return the full value.
+///
+/// ```
+/// let iban: sepa::Iban = "DE89370400440532013000".parse().unwrap();
+/// assert_eq!(format!("{iban:?}"), "Iban(DE…3000)");
+/// assert_eq!(iban.to_string(), "DE89 3704 0044 0532 0130 00");
+/// ```
+///
+/// [`Display`]: std::fmt::Display
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Iban(String);
 
 impl Iban {
@@ -95,6 +108,165 @@ impl std::fmt::Display for Iban {
             f.write_str(chunk)?;
         }
         Ok(())
+    }
+}
+
+impl std::fmt::Debug for Iban {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Iban(")?;
+        mask_account(&self.0, f)?;
+        f.write_str(")")
+    }
+}
+
+/// Write `raw` with everything but its first two and last four characters
+/// replaced by `…`, or only `…` when it is shorter than twelve characters.
+///
+/// Counts characters, not bytes, so untrusted multi-byte input cannot make it
+/// panic. Twelve is the floor at which the six revealed characters are at most
+/// half of the value; every IBAN (15 or more characters) clears it.
+fn mask_account(raw: &str, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    const HEAD: usize = 2;
+    const TAIL: usize = 4;
+    const MIN_LEN: usize = 12;
+    let len = raw.chars().count();
+    if len < MIN_LEN {
+        return f.write_str("…");
+    }
+    raw.chars().take(HEAD).try_for_each(|c| f.write_char(c))?;
+    f.write_str("…")?;
+    raw.chars()
+        .skip(len - TAIL)
+        .try_for_each(|c| f.write_char(c))
+}
+
+// ── AccountId ─────────────────────────────────────────────────────────────────
+
+/// An account identifier exactly as a bank reported it.
+///
+/// Readers keep `…Acct/Id/IBAN` and `…Acct/Id/Othr/Id` as reported, without
+/// validating them: a report is evidence of what the bank sent, and a
+/// lowercase, spaced or proprietary identifier is still that evidence. Call
+/// [`iban`](Self::iban) when you need a checked [`Iban`].
+///
+/// Like [`Iban`], `Debug` is masked and [`Display`](std::fmt::Display),
+/// [`as_str`](Self::as_str) and serde return the exact text, so a parsed
+/// statement can be logged without disclosing every counterparty's account.
+///
+/// ```
+/// use sepa::AccountId;
+///
+/// let id = AccountId::new("DE89370400440532013000");
+/// assert_eq!(format!("{id:?}"), "AccountId(DE…3000)");
+/// assert_eq!(id, "DE89370400440532013000");
+/// assert_eq!(id.iban().unwrap().country_code(), "DE");
+///
+/// // Proprietary identifiers are kept too; they are simply not IBANs.
+/// assert!(AccountId::new("0532013000").iban().is_err());
+/// ```
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+pub struct AccountId(String);
+
+impl AccountId {
+    /// Wrap reported text. Never fails: nothing is validated.
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    /// The exact reported text.
+    #[inline]
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The exact reported text, by value.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    /// Validate the reported text as an IBAN (whitespace and case are
+    /// normalised, exactly as [`validate_iban`] does).
+    ///
+    /// # Errors
+    ///
+    /// The [`IbanError`] explaining why the text is not an IBAN — including
+    /// when it is a proprietary identifier.
+    pub fn iban(&self) -> Result<Iban, IbanError> {
+        validate_iban(&self.0)
+    }
+}
+
+impl std::fmt::Debug for AccountId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AccountId(")?;
+        mask_account(&self.0, f)?;
+        f.write_str(")")
+    }
+}
+
+impl std::fmt::Display for AccountId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for AccountId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for AccountId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for AccountId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for AccountId {
+    fn from(raw: String) -> Self {
+        Self(raw)
+    }
+}
+
+impl From<&str> for AccountId {
+    fn from(raw: &str) -> Self {
+        Self(raw.to_owned())
+    }
+}
+
+impl From<Iban> for AccountId {
+    fn from(iban: Iban) -> Self {
+        Self(iban.0)
+    }
+}
+
+impl From<AccountId> for String {
+    fn from(id: AccountId) -> Self {
+        id.0
+    }
+}
+
+impl PartialEq<str> for AccountId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for AccountId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
     }
 }
 
@@ -728,7 +900,8 @@ pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
             return Err(IbanError::InvalidCharacter { ch: c });
         }
     }
-    // Every character is now ASCII, so byte indices are character indices.
+    // Past this point every character is ASCII, so byte indices are character
+    // indices.
 
     // ISO 13616 fixes the header: `CCkk`. Mod-97 alone would not catch a
     // digit in the country code — the expansion happily consumes one.
@@ -788,6 +961,86 @@ pub fn validate_iban(raw: &str) -> Result<Iban, IbanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SR-001 / SR-003: log-safe Debug (spec 019) ────────────────────────────
+
+    fn masked(raw: &str) -> String {
+        format!("{:?}", AccountId::new(raw))
+    }
+
+    #[test]
+    fn sr001_iban_debug_shows_only_country_and_last_four() {
+        let iban: Iban = "DE89 3704 0044 0532 0130 00".parse().unwrap();
+        assert_eq!(format!("{iban:?}"), "Iban(DE…3000)");
+        assert_eq!(format!("{iban:#?}"), "Iban(DE…3000)");
+        assert_eq!(iban.as_str(), "DE89370400440532013000");
+        assert_eq!(iban.to_string(), "DE89 3704 0044 0532 0130 00");
+        // Nested in an Option or a Vec, the masking still applies.
+        let nested = format!("{:?}", vec![Some(iban)]);
+        assert!(!nested.contains("370400440532"), "{nested}");
+    }
+
+    #[test]
+    fn sr001_the_shortest_iban_still_hides_more_than_it_shows() {
+        // Norway: 15 characters, the shortest in the registry.
+        let iban: Iban = "NO9386011117947".parse().unwrap();
+        assert_eq!(format!("{iban:?}"), "Iban(NO…7947)");
+    }
+
+    #[test]
+    fn sr003_identifiers_shorter_than_twelve_reveal_nothing() {
+        let digits = "12345678901";
+        for len in 0..12 {
+            assert_eq!(
+                masked(&digits[..len.min(digits.len())]),
+                "AccountId(…)",
+                "len {len}"
+            );
+        }
+        assert_eq!(masked("123456789012"), "AccountId(12…9012)");
+    }
+
+    #[test]
+    fn sr003_masking_counts_characters_and_never_panics() {
+        // Multi-byte characters at both boundaries and in the hidden middle.
+        assert_eq!(masked("ÄÖ€€€€€€€€ÜẞÄÖ"), "AccountId(ÄÖ…ÜẞÄÖ)");
+        for raw in [
+            "€",
+            "€€€€€€€€€€€",
+            "🏦🏦🏦🏦🏦🏦🏦🏦🏦🏦🏦🏦🏦",
+            "a\u{0}b\u{10FFFF}cdefghij",
+        ] {
+            let out = masked(raw);
+            let shown = out.trim_start_matches("AccountId(").trim_end_matches(')');
+            assert!(shown.chars().filter(|c| *c != '…').count() <= 6, "{out}");
+        }
+    }
+
+    #[test]
+    fn sr002_account_id_keeps_exact_text_and_validates_on_demand() {
+        let raw = "de89 3704 0044 0532 0130 00";
+        let id = AccountId::new(raw);
+        assert_eq!(id, raw);
+        assert_eq!(id.as_str(), raw);
+        assert_eq!(id.to_string(), raw);
+        assert_eq!(id.iban().unwrap().as_str(), "DE89370400440532013000");
+        assert!(AccountId::new("DE89370400440532013001").iban().is_err());
+        assert_eq!(format!("{id:?}"), "AccountId(de…0 00)");
+    }
+
+    #[test]
+    fn sr004_iban_errors_never_carry_the_input() {
+        for bad in [
+            "DE89370400440532013001",
+            "DE8937O400440532013000",
+            "XX89370400440532013000",
+        ] {
+            let err = validate_iban(bad).unwrap_err();
+            for shown in [err.to_string(), format!("{err:?}")] {
+                assert!(!shown.contains("370400440532013"), "{shown}");
+            }
+        }
+    }
 
     #[test]
     fn every_registry_example_is_reproduced_from_its_own_bban() {
@@ -951,8 +1204,8 @@ mod tests {
 
     #[test]
     fn latvia_is_registered() {
-        // Regression: LV sits between LU and LV alphabetically and was missing
-        // from the table, so every Latvian IBAN failed validation.
+        // Without an LV row in the length table every Latvian IBAN would fail
+        // validation.
         assert_eq!(iban_country_length("LV"), Some(21));
         assert!(validate_iban("LV80BANK0000435195001").is_ok());
     }

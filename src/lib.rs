@@ -99,7 +99,11 @@
 //! assert_eq!(iban.to_string(), "DE89 3704 0044 0532 0130 00");
 //!
 //! // pain.001 — Credit Transfer (Überweisung)
-//! let ct_xml = Pain001Builder::new("Debtor GmbH", "CT-2026-07-001")
+//! let ct_xml = Pain001Builder::new(
+//!     "Debtor GmbH",
+//!     "CT-2026-07-001",
+//!     "2026-07-15T09:00:00".parse()?,
+//! )
 //!     .add_group(
 //!         CreditTransferGroup::new("Debtor GmbH", &iban, IsoDate::new(2026, 7, 20)?)
 //!             .add_entry(CreditTransferEntry::new(
@@ -111,7 +115,11 @@
 //!
 //! // pain.008 — a direct debit run carrying FRST and RCUR in one file.
 //! let ci = validate_creditor_id("DE98ZZZ09999999999")?;
-//! let dd_xml = Pain008Builder::new("Creditor GmbH", "DD-2026-07-001")
+//! let dd_xml = Pain008Builder::new(
+//!     "Creditor GmbH",
+//!     "DD-2026-07-001",
+//!     "2026-07-15T09:00:00".parse()?,
+//! )
 //!     .add_group(
 //!         DirectDebitGroup::new("Creditor GmbH", &iban, &ci, IsoDate::new(2026, 7, 20)?)
 //!             .sequence_type(SequenceType::Frst)
@@ -154,15 +162,14 @@
 //! the ISO 20022 element, plus the [`Location`] — group and transaction index —
 //! it came from, so a rejected collection run points at the row to fix.
 //!
-//! Two classes of mistake are absent from that list because they cannot fail
-//! there — they are unrepresentable rather than caught late. [`IsoDate`]
-//! validates at construction, so an impossible `ReqdColltnDt` never reaches a
-//! batch; and [`PostalAddress`] requires a town and a country for this library's
-//! structured/hybrid address scope. Other address fields are checked at use.
-//! This representation limit is not a claim that schemes universally refuse
+//! Two classes of mistake are unrepresentable rather than caught late.
+//! [`IsoDate`] validates at construction, so an impossible `ReqdColltnDt` never
+//! reaches a batch; and [`PostalAddress`] requires a town and a country for this
+//! library's structured/hybrid address scope (other address fields are checked
+//! at use). That is a limit of this library, not a claim that schemes refuse
 //! unstructured addresses.
 //!
-//! ## Nothing that matters is defaulted from a clock
+//! ## Nothing is defaulted from a clock
 //!
 //! `MsgId` and the payment date are constructor arguments, because neither has
 //! a safe default. `MsgId` is the key a bank de-duplicates submissions by, so
@@ -171,8 +178,33 @@
 //! scheme, the sequence type, TARGET2 and the bank's cut-off — a
 //! banking-calendar question this crate cannot answer.
 //!
-//! One implicit clock read remains: `GrpHdr/CreDtTm`. Pin it with
-//! `created_at()` and a submitted file regenerates byte-for-byte.
+//! The creation timestamp (`GrpHdr/CreDtTm`, `Assgnmt/CreDtTm`) is a
+//! constructor argument too. The crate never reads the clock on its own, so
+//! identical inputs always produce an identical file: a run can be replayed
+//! and compared with what it submitted, and a recall quotes the
+//! `OrgnlCreDtTm` the bank received. Store the timestamp with the run, or pass
+//! [`IsoDateTime::now()`] when "now" is what you mean.
+//!
+//! ## Logging and personal data
+//!
+//! An IBAN is personal data, and `Debug` is what reaches logs, panics and
+//! tracing fields. So [`Iban`] and [`AccountId`] — the exact account text a
+//! bank report carries — debug-format masked, `Iban(DE…3000)`, while
+//! `Display`, `as_str()` and serde return the full value. Every builder input
+//! and report record that holds one inherits the masking; errors never carry
+//! the values that caused them.
+//!
+//! ```
+//! let iban: sepa::Iban = "DE89370400440532013000".parse()?;
+//! assert_eq!(format!("{iban:?}"), "Iban(DE…3000)");
+//! # Ok::<(), sepa::IbanError>(())
+//! ```
+//!
+//! Masking stops at account identifiers. Names, postal addresses, remittance
+//! text and mandate references still debug-format in full: redacting them
+//! would make every record's `Debug` useless for the debugging it exists for.
+//! Redact those in your logging layer if your logs leave the trust boundary
+//! payment data lives in.
 //!
 //! ## Undoing a payment
 //!
@@ -189,9 +221,14 @@
 //! use sepa::{Camt055Builder, CancellationEntry, CancellationGroup, CancellationReason,
 //!            OriginalMessage, Pain008Builder, parse_camt029, validate_bic};
 //!
-//! # let submitted = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001");
+//! # let submitted = Pain008Builder::new(
+//!     "Stadtwerke GmbH",
+//!     "DD-2026-07-001",
+//!     "2026-07-15T09:00:00".parse()?,
+//! );
 //! let recall = Camt055Builder::new(
 //!     "CXL-2026-07-001",
+//!     "2026-07-16T08:00:00".parse()?,
 //!     "Stadtwerke GmbH",
 //!     validate_bic("COBADEFFXXX")?,
 //!     OriginalMessage::from_direct_debit(&submitted),
@@ -262,7 +299,7 @@ pub struct ReadmeDoctests;
 
 /// Compile-tests every Rust example on the documentation site.
 ///
-/// A published guide that no longer compiles is worse than no guide, so the
+/// A published guide that does not compile is worse than no guide, so the
 /// site's pages are run through the same doctest harness as the crate's own
 /// documentation. Adding a page without adding it here is the one way a sample
 /// could drift, which is why the list is explicit rather than a glob.
@@ -349,8 +386,8 @@ pub use currency::{Currency, CurrencyError};
 pub use date::ConversionError;
 pub use date::{DateError, DateTimeError, IsoDate, IsoDateTime};
 pub use iban::{
-    BbanCharClass, Iban, IbanError, iban_bban_format, iban_check_digits, iban_country_length,
-    is_sepa_country, validate_iban,
+    AccountId, BbanCharClass, Iban, IbanError, iban_bban_format, iban_check_digits,
+    iban_country_length, is_sepa_country, validate_iban,
 };
 pub use pain001::{
     ChargeBearer, CreditTransferEntry, CreditTransferGroup, CreditTransferKind,
@@ -551,9 +588,8 @@ mod tests {
     #[test]
     fn ct_to_eur_roundtrip() {
         // Both ends included: `ct_to_eur_str` is total over `i64`, so
-        // `ct_from_eur_str` has to be total over its output. Regression:
-        // `i64::MIN` printed fine and came back as `Overflow`, because the
-        // magnitude was built positive and negated afterwards.
+        // `ct_from_eur_str` has to be total over its output. `i64::MIN` is the
+        // edge: its magnitude does not fit a positive `i64`.
         for ct in [
             0i64,
             1,
@@ -598,9 +634,9 @@ mod tests {
 
     #[test]
     fn ct_from_eur_never_panics_on_multibyte_fractions() {
-        // Regression: `frac_str[..2]` panicked when byte 2 fell inside a
-        // multi-byte character. Reachable from `parse_camt053` on a bank file,
-        // because the XML layer decodes `&#8364;` to '€' before this sees it.
+        // Byte-slicing the fraction would panic inside a multi-byte character.
+        // Reachable from `parse_camt053` on a bank file, because the XML layer
+        // decodes `&#8364;` to '€' before this sees it.
         for bad in ["1.€5", "1.5€", "0.ü9", "1.€€€", "-2.€1"] {
             assert!(
                 matches!(ct_from_eur_str(bad), Err(AmountError::Malformed { .. })),
@@ -614,10 +650,10 @@ mod tests {
     #[test]
     fn a_value_below_one_cent_is_refused_rather_than_truncated() {
         // `ActiveOrHistoricCurrencyAndAmount` permits five fraction digits, so
-        // every one of these is reachable from a bank file. Truncating them —
-        // which this crate did until 0.8 — discards money silently: `0.001`
-        // became 0, and a tenth of a cent on each of a million collections is
-        // a number somebody has to explain.
+        // every one of these is reachable from a bank file. Truncating them
+        // discards money silently: `0.001` would become 0, and a tenth of a
+        // cent on each of a million collections is a number somebody has to
+        // explain.
         for (bad, digits) in [("1.239", 3), ("0.001", 3), ("1.23456", 5), ("9.999", 3)] {
             assert!(
                 matches!(
@@ -641,10 +677,9 @@ mod tests {
 
     #[test]
     fn a_sign_is_accepted_once_and_only_at_the_front() {
-        // Regression: `i64::from_str` accepts a leading sign wherever it is
-        // handed one, so "1.-5" parsed its fraction as −5 cents and quietly
-        // turned 1.50 into 0.95, while "--5" came back as +5.00 and "-+5"
-        // as −5.00.
+        // `i64::from_str` accepts a leading sign wherever it is handed one, so
+        // without this check "1.-5" would read its fraction as −5 cents (1.50
+        // becomes 0.95), "--5" as +5.00 and "-+5" as −5.00.
         for bad in [
             "1.-5", "1.+5", "1.-50", "-1.-5", "--5", "-+5", "+-5", "5-", "-", "+",
         ] {
@@ -654,10 +689,9 @@ mod tests {
                 ct_from_eur_str(bad)
             );
         }
-        // A *single* leading `+` is legal `xs:decimal` and banks send it. It
-        // used to be rejected here, which made every entry carrying one vanish
-        // from the statement — a validator stricter than the standard, with the
-        // failure hidden instead of reported.
+        // A *single* leading `+` is legal `xs:decimal` and banks send it.
+        // Rejecting it would make every entry carrying one vanish from the
+        // statement — stricter than the standard, with the failure hidden.
         assert_eq!(ct_from_eur_str("+5"), Ok(500));
         assert_eq!(ct_from_eur_str("+5.00"), Ok(500));
         assert_eq!(ct_from_eur_str("+0.01"), Ok(1));
@@ -665,8 +699,8 @@ mod tests {
 
     #[test]
     fn trailing_junk_after_the_cents_is_rejected() {
-        // Regression: only the first two fractional characters were checked, so
-        // "1.50abc" silently parsed as 1.50 EUR.
+        // Every character after the point is checked, not just the first two,
+        // so "1.50abc" is not read as 1.50 EUR.
         for bad in ["1.50abc", "1.5x", "1.005 EUR", "100x", "1.2.3"] {
             assert!(
                 matches!(ct_from_eur_str(bad), Err(AmountError::Malformed { .. })),

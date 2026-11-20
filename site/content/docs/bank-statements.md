@@ -4,9 +4,8 @@ description = "Parse camt.052, camt.053 and camt.054 statements in Rust: batch b
 weight = 8
 +++
 
-The three camt messages describe the same thing — movements on an account — and
-differ mainly in timing. They share one entry model, so reconciliation code
-works across all of them.
+The three camt messages report account movements and differ mainly in timing.
+They share one entry model, so reconciliation code works across all of them.
 
 | Message | Content | When |
 |---|---|---|
@@ -15,8 +14,8 @@ works across all of them.
 | `camt.054` | Notification of specific debits and credits | As events happen |
 
 Accepted versions are camt.052/camt.053 001.02, 001.06 and 001.08, and camt.054
-001.08. Resolved identity is not full XSD validation. See
-[reader contracts](@/docs/reader-contracts.md) for finite limits and evidence boundaries.
+001.08; see [reader contracts](@/docs/reader-contracts.md) for limits. Parsing
+is not XSD validation.
 
 ## Reading a statement
 
@@ -29,7 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stmt = &doc.statements[0];
 
     // `Acct/Id` is a choice — an IBAN or a proprietary identifier — so both
-    // are exposed and `any_id()` is the display shortcut.
+    // are exposed, exactly as reported, and `any_id()` is the shortcut.
+    // `{:?}` prints `AccountId(DE…3000)`: logs never carry the full account.
     println!("{:?} {:?}", stmt.account.any_id(), stmt.account.currency);
 
     if let Some(ct) = stmt.closing_balance().and_then(|b| b.signed_ct()) {
@@ -49,31 +49,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Amounts are reported as magnitudes with a separate credit/debit indicator.
-`signed_ct()` returns signed hundredths only when magnitude, currency, direction
-and raw/typed observations are usable and consistent. Negative magnitudes,
-unrepresentable amounts and missing or unknown currency/direction return `None`.
-Hundredths are not an ISO currency minor-unit policy.
+Amounts are magnitudes with a separate credit/debit indicator. `signed_ct()`
+returns signed hundredths only when magnitude, currency and direction are usable
+and consistent; otherwise it returns `None`, and the raw values remain on the
+entry for escalation.
 
-Supported entries retain decoded monetary text and observed currency/direction,
-including unreadable values. Protect payment data when escalating unresolved rows.
-
-`reference()` is the remittance information — the *Verwendungszweck*. ISO makes
-`RmtInf/Ustrd` repeatable, and German banks routinely split a long reference
-into 35-character chunks, so every occurrence is joined with a single space.
-Reading only the first would cut the reference exactly where the invoice number
-tends to sit.
+`reference()` is the remittance information (*Verwendungszweck*). German banks
+often split it across repeated `RmtInf/Ustrd` elements of 35 characters, so all
+occurrences are joined with a single space.
 
 ## Batch bookings
 
 A direct debit run is normally booked as **one** aggregate entry with the
-individual transactions itemised underneath. Two things matter here.
-
-First, the `Btch` block names the `PmtInfId` of the group that produced the
-booking — that is how a statement entry is matched back to the file you sent,
-without guessing from amounts and dates.
-
-Second, the parts have to account for the whole before you post anything.
+transactions itemised underneath. The `Btch` block names the `PmtInfId` of the
+group that produced it, which matches the entry back to your file. Check that
+the parts reconcile before posting:
 
 ```rust,no_run
 use sepa::parse_camt053;
@@ -107,14 +97,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> `signed_ct()` on a detail returns `Option`. `None` means the statement does
-> not determine that transaction's amount — which is exactly the case where the
-> tempting workaround, reusing the entry total for each detail, multiplies a
-> batch booking by its transaction count.
+`signed_ct()` on a detail returns `None` when the statement does not determine
+that transaction's amount. Do not substitute the entry total.
 
 ## Returns
 
-A returned collection is where camt.054 earns its place:
+camt.054 reports returned collections:
 
 ```rust,no_run
 use sepa::parse_camt054;
@@ -141,9 +129,8 @@ collection inside an otherwise-fine batch is still reported.
 
 ### The return fee
 
-A return costs the creditor money, and the fee is reported in `Chrgs` rather
-than inside the entry amount. It appears on the entry or on the transaction
-detail depending on the bank, so read both:
+Return fees are reported in `Chrgs`, on the entry or on the transaction detail
+depending on the bank, so read both:
 
 ```rust
 use sepa::parse_camt053;
@@ -171,24 +158,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`ChrgInclInd` is optional, and "the bank did not say" is a third answer rather
-than a default. `included_in_amount` is therefore an `Option<bool>`, and
-`all_included_in_amount()` is `false` unless **every** record says so
-explicitly. **False does not authorize posting:** inspect each record's inclusion;
-`None` is unresolved. Missing direction is not assumed debit. Invalid aggregate
-totals survive as raw text; absent records, mixed currencies and conflicting totals
-cannot produce a trusted sum.
+`ChrgInclInd` is optional, so `included_in_amount` is an `Option<bool>` and
+`all_included_in_amount()` is `false` unless **every** record says so. `false`
+does not authorize posting: inspect each record, where `None` is unresolved.
+Missing direction is not assumed to be debit. Absent records, mixed currencies
+and conflicting totals produce no trusted sum; invalid totals remain as raw text.
 
-ISO reshaped this block across versions — up to `.001.02` the charge sits
-directly under `Chrgs`, and from `.001.04` it moved into `Rcrd` blocks. Both are
-read, and the flat form is reported as a single record so there is one shape to
-handle.
+In `.001.02` the charge sits directly under `Chrgs`; later versions use `Rcrd`
+blocks. Both are read, and the flat form is reported as a single record.
 
 ## Dates and raw values
 
-ISO types a booking date as a date *or* a date-time, so the same field arrives
-as `2026-07-20` from one bank and `2026-07-20T09:14:00` from the next. Both are
-handled, and the original text is kept alongside the parsed value:
+ISO types a booking date as a date *or* a date-time. Both are parsed, and the
+original text is kept alongside:
 
 ```rust,no_run
 use sepa::parse_camt053;
@@ -205,19 +187,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Supported date observations remain available when typed conversion fails.
-XML, identity and limit violations still reject the input.
+The raw text remains when typed conversion fails; XML, identity and limit
+violations still reject the input.
 
 ## Free text
 
-`AddtlNtryInf` carries the bank's own statement text, and for an entry with no
-itemised detail it is often the only description in the file. It is exposed on
-the entry, alongside `AddtlTxInf` per detail.
+`AddtlNtryInf` (the bank's statement text, often the only description of an
+entry without details) is exposed on the entry, and `AddtlTxInf` per detail.
 
 ## Security
 
-Parsing uses [`quick-xml`](https://crates.io/crates/quick-xml), so comments,
-entity references, CDATA and self-closing tags are all handled correctly, and
-a prefixed `<ns2:Document>` parses identically to a default-namespaced one.
-`<!DOCTYPE>` is rejected outright, nesting is capped, and a second root element
-is an error rather than silently replacing the first.
+Parsing uses [`quick-xml`](https://crates.io/crates/quick-xml): comments,
+entity references, CDATA and prefixed namespaces (`<ns2:Document>`) are handled.
+`<!DOCTYPE>` is rejected, nesting is capped, and a second root element is an
+error.

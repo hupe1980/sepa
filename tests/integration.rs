@@ -50,52 +50,60 @@ fn creditor_id() -> sepa::CreditorId {
 }
 
 fn sct(schema: CreditTransferSchema) -> String {
-    Pain001Builder::new("Acme GmbH", "CT-2026-07-001-MAXLEN-PADDING-XXXXX")
-        .schema(schema)
-        .add_group(
-            CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
-                .debtor_bic("COBADEFF".parse().unwrap())
-                .add_entry(
-                    CreditTransferEntry::new("Supplier AG", creditor(), 12_000, "INV-2026-001")
-                        .with_bic("ABNANL2A".parse().unwrap())
-                        .with_description("Rechnung 2026-07-001"),
-                )
-                .add_entry(CreditTransferEntry::new(
-                    "Second Payee",
-                    creditor(),
-                    3_450,
-                    "INV-2026-002",
-                )),
-        )
-        .build()
-        .expect("batch is valid")
+    Pain001Builder::new(
+        "Acme GmbH",
+        "CT-2026-07-001-MAXLEN-PADDING-XXXXX",
+        "2026-07-15T09:00:00".parse().unwrap(),
+    )
+    .schema(schema)
+    .add_group(
+        CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
+            .debtor_bic("COBADEFF".parse().unwrap())
+            .add_entry(
+                CreditTransferEntry::new("Supplier AG", creditor(), 12_000, "INV-2026-001")
+                    .with_bic("ABNANL2A".parse().unwrap())
+                    .with_description("Rechnung 2026-07-001"),
+            )
+            .add_entry(CreditTransferEntry::new(
+                "Second Payee",
+                creditor(),
+                3_450,
+                "INV-2026-002",
+            )),
+    )
+    .build()
+    .expect("batch is valid")
 }
 
 fn sdd(schema: DirectDebitSchema) -> String {
-    Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-        .schema(schema)
-        .add_group(
-            DirectDebitGroup::new(
-                "Stadtwerke GmbH",
-                &debtor(),
-                &creditor_id(),
-                date("2026-07-20"),
-            )
-            .creditor_bic("COBADEFF".parse().unwrap())
-            .add_entry(
-                DirectDebitEntry::new(
-                    "MND-00042",
-                    date("2024-06-01"),
-                    "Max Mustermann",
-                    creditor(),
-                    7_500,
-                    "R2026-07-001",
-                )
-                .with_description("Abschlag Juli 2026"),
-            ),
+    Pain008Builder::new(
+        "Stadtwerke GmbH",
+        "DD-2026-07-001",
+        "2026-07-15T09:00:00".parse().unwrap(),
+    )
+    .schema(schema)
+    .add_group(
+        DirectDebitGroup::new(
+            "Stadtwerke GmbH",
+            &debtor(),
+            &creditor_id(),
+            date("2026-07-20"),
         )
-        .build()
-        .expect("batch is valid")
+        .creditor_bic("COBADEFF".parse().unwrap())
+        .add_entry(
+            DirectDebitEntry::new(
+                "MND-00042",
+                date("2024-06-01"),
+                "Max Mustermann",
+                creditor(),
+                7_500,
+                "R2026-07-001",
+            )
+            .with_description("Abschlag Juli 2026"),
+        ),
+    )
+    .build()
+    .expect("batch is valid")
 }
 
 /// Every camt.055 shape the builder can produce, for the schema gate.
@@ -108,33 +116,36 @@ fn camt055_fixtures() -> Vec<String> {
         validate_bic,
     };
 
-    let submitted = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-        .created_at("2026-07-15T09:00:00".parse().unwrap())
-        .add_group(
-            DirectDebitGroup::new(
-                "Stadtwerke GmbH",
-                &creditor(),
-                &creditor_id(),
-                date("2026-07-20"),
-            )
-            .payment_info_id("PMT-A")
-            .add_entry(DirectDebitEntry::new(
-                "MND-1",
-                date("2024-06-01"),
-                "Max Mustermann",
-                debtor(),
-                7_500,
-                "E2E-1",
-            )),
-        );
+    let submitted = Pain008Builder::new(
+        "Stadtwerke GmbH",
+        "DD-2026-07-001",
+        "2026-07-15T09:00:00".parse().unwrap(),
+    )
+    .add_group(
+        DirectDebitGroup::new(
+            "Stadtwerke GmbH",
+            &creditor(),
+            &creditor_id(),
+            date("2026-07-20"),
+        )
+        .payment_info_id("PMT-A")
+        .add_entry(DirectDebitEntry::new(
+            "MND-1",
+            date("2024-06-01"),
+            "Max Mustermann",
+            debtor(),
+            7_500,
+            "E2E-1",
+        )),
+    );
     let base = || {
         Camt055Builder::new(
             "CXL-2026-07-001",
+            "2026-07-15T11:30:00".parse().unwrap(),
             "Stadtwerke GmbH",
             validate_bic("COBADEFFXXX").unwrap(),
             OriginalMessage::from_direct_debit(&submitted),
         )
-        .created_at("2026-07-15T11:30:00".parse().unwrap())
     };
 
     vec![
@@ -305,11 +316,11 @@ mod xsd {
         let payload = "A\r\nB\rC <Injected/> &#13;";
         let builder = sepa::Camt055Builder::new(
             "CXL-ESCAPE",
+            "2026-07-15T11:30:00".parse().unwrap(),
             "Acme GmbH",
             "COBADEFFXXX".parse::<sepa::Bic>().unwrap(),
             sepa::OriginalMessage::new("ORIGINAL", "pain.008.001.08"),
         )
-        .created_at("2026-07-15T11:30:00".parse().unwrap())
         .cancel_whole_message(sepa::CancellationReason::Tech)
         .additional_info(payload);
         let xml = builder.build().unwrap();
@@ -334,6 +345,7 @@ mod xsd {
         for payload in ["A\0B".to_owned(), format!(" {} ", "A".repeat(34))] {
             let builder = sepa::Camt055Builder::new(
                 payload.clone(),
+                "2026-07-15T09:00:00".parse().unwrap(),
                 "Acme GmbH",
                 "COBADEFFXXX".parse::<sepa::Bic>().unwrap(),
                 sepa::OriginalMessage::new("ORIGINAL", "pain.008.001.08"),
@@ -382,7 +394,7 @@ mod xsd {
             let identifier = if text == "SAFE" { "SAFE" } else { "X'1" };
             macro_rules! record {
                 ($builder:expr, $schema:literal) => {{
-                    let builder = $builder.created_at("2026-07-19T12:00:00Z".parse().unwrap());
+                    let builder = $builder;
                     let xml = builder.build().unwrap();
                     let mut sink = b"existing".to_vec();
                     super::assert_writer_boundary(
@@ -431,8 +443,12 @@ mod xsd {
                         ct_group
                     };
                     record!(
-                        Pain001Builder::new(text, identifier)
-                            .add_group(ct_group.add_entry(ct_entry)),
+                        Pain001Builder::new(
+                            text,
+                            identifier,
+                            "2026-07-15T09:00:00".parse().unwrap()
+                        )
+                        .add_group(ct_group.add_entry(ct_entry)),
                         "pain.001.001.09.xsd"
                     );
                     let mut dd_entry = DirectDebitEntry::new(
@@ -467,8 +483,12 @@ mod xsd {
                         dd_group
                     };
                     record!(
-                        Pain008Builder::new(text, identifier)
-                            .add_group(dd_group.add_entry(dd_entry)),
+                        Pain008Builder::new(
+                            text,
+                            identifier,
+                            "2026-07-15T09:00:00".parse().unwrap()
+                        )
+                        .add_group(dd_group.add_entry(dd_entry)),
                         "pain.008.001.08.xsd"
                     );
                 }
@@ -477,7 +497,13 @@ mod xsd {
                 .debtor(text, debtor())
                 .creditor(text, creditor());
             record!(
-                sepa::Pain007Builder::new(text, identifier, identifier).add_group(
+                sepa::Pain007Builder::new(
+                    text,
+                    identifier,
+                    "2026-07-15T09:00:00".parse().unwrap(),
+                    identifier
+                )
+                .add_group(
                     sepa::ReversalGroup::new(identifier)
                         .reversal_payment_info_id(identifier)
                         .add_entry(sepa::ReversalEntry::new(
@@ -492,6 +518,7 @@ mod xsd {
             for scope in 0..3 {
                 let builder = sepa::Camt055Builder::new(
                     identifier,
+                    "2026-07-15T09:00:00".parse().unwrap(),
                     party.clone(),
                     party.clone(),
                     sepa::OriginalMessage::new(identifier, identifier),
@@ -561,11 +588,11 @@ mod xsd {
         ] {
             let xml = sepa::Camt055Builder::new(
                 "RECALL-1",
+                "2026-07-19T12:00:00Z".parse().unwrap(),
                 "Customer",
                 "Bank",
                 sepa::OriginalMessage::new("ORIGINAL-1", "pain.008.001.08").totals(count, amount),
             )
-            .created_at("2026-07-19T12:00:00Z".parse().unwrap())
             .cancel_whole_message(sepa::CancellationReason::Cust)
             .build()
             .unwrap();
@@ -595,48 +622,52 @@ mod xsd {
         // and a batch with no BIC at all is the common case for a German
         // creditor — so it needs covering per version, not just by default.
         for schema in CreditTransferSchema::ALL {
-            let xml = super::Pain001Builder::new("Acme GmbH", "CT-NOBIC")
-                .schema(*schema)
-                .add_group(
-                    super::CreditTransferGroup::new(
-                        "Acme GmbH",
-                        &super::debtor(),
-                        date("2026-07-20"),
-                    )
+            let xml = super::Pain001Builder::new(
+                "Acme GmbH",
+                "CT-NOBIC",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .schema(*schema)
+            .add_group(
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
                     .add_entry(super::CreditTransferEntry::new(
                         "Payee",
                         super::creditor(),
                         100,
                         "E2E-1",
                     )),
-                )
-                .build()
-                .unwrap();
+            )
+            .build()
+            .unwrap();
             assert!(!xml.contains("<CdtrAgt>"), "{schema}: EPC omits CdtrAgt");
             assert_validates(&xml, &schema_file(schema.message_id()));
         }
 
         for schema in DirectDebitSchema::ALL {
-            let xml = super::Pain008Builder::new("Stadtwerke GmbH", "DD-NOBIC")
-                .schema(*schema)
-                .add_group(
-                    super::DirectDebitGroup::new(
-                        "Stadtwerke GmbH",
-                        &super::debtor(),
-                        &super::creditor_id(),
-                        date("2026-07-20"),
-                    )
-                    .add_entry(super::DirectDebitEntry::new(
-                        "MND-1",
-                        date("2024-06-01"),
-                        "Max Mustermann",
-                        super::creditor(),
-                        7_500,
-                        "E2E-1",
-                    )),
+            let xml = super::Pain008Builder::new(
+                "Stadtwerke GmbH",
+                "DD-NOBIC",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .schema(*schema)
+            .add_group(
+                super::DirectDebitGroup::new(
+                    "Stadtwerke GmbH",
+                    &super::debtor(),
+                    &super::creditor_id(),
+                    date("2026-07-20"),
                 )
-                .build()
-                .unwrap();
+                .add_entry(super::DirectDebitEntry::new(
+                    "MND-1",
+                    date("2024-06-01"),
+                    "Max Mustermann",
+                    super::creditor(),
+                    7_500,
+                    "E2E-1",
+                )),
+            )
+            .build()
+            .unwrap();
             assert!(
                 xml.contains("<Othr><Id>NOTPROVIDED</Id></Othr>"),
                 "{schema}"
@@ -651,29 +682,33 @@ mod xsd {
         // OrgnlDbtrAcct and enumerates SMNDA under OrgnlDbtrAgt instead, so the
         // post-2016 placement was schema-invalid there.
         for schema in DirectDebitSchema::ALL {
-            let xml = super::Pain008Builder::new("Stadtwerke GmbH", "DD-SMNDA")
-                .schema(*schema)
-                .add_group(
-                    super::DirectDebitGroup::new(
-                        "Stadtwerke GmbH",
-                        &super::debtor(),
-                        &super::creditor_id(),
-                        date("2026-07-20"),
-                    )
-                    .add_entry(
-                        super::DirectDebitEntry::new(
-                            "MND-1",
-                            date("2024-06-01"),
-                            "Max Mustermann",
-                            super::creditor(),
-                            7_500,
-                            "E2E-1",
-                        )
-                        .with_amendment(sepa::MandateAmendment::debtor_account_changed()),
-                    ),
+            let xml = super::Pain008Builder::new(
+                "Stadtwerke GmbH",
+                "DD-SMNDA",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .schema(*schema)
+            .add_group(
+                super::DirectDebitGroup::new(
+                    "Stadtwerke GmbH",
+                    &super::debtor(),
+                    &super::creditor_id(),
+                    date("2026-07-20"),
                 )
-                .build()
-                .unwrap();
+                .add_entry(
+                    super::DirectDebitEntry::new(
+                        "MND-1",
+                        date("2024-06-01"),
+                        "Max Mustermann",
+                        super::creditor(),
+                        7_500,
+                        "E2E-1",
+                    )
+                    .with_amendment(sepa::MandateAmendment::debtor_account_changed()),
+                ),
+            )
+            .build()
+            .unwrap();
             assert!(xml.contains("SMNDA"), "{schema}");
             assert_validates(&xml, &schema_file(schema.message_id()));
         }
@@ -690,21 +725,25 @@ mod xsd {
     /// class of mistake that produced D43.
     #[test]
     fn oct_inst_validates_against_the_iso_schema() {
-        let xml = super::Pain001Builder::new("Acme GmbH", "OCT-XSD")
-            .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
-                    .kind(sepa::pain001::CreditTransferKind::OneLegOutInstant)
-                    .charge_bearer(sepa::pain001::ChargeBearer::Shar)
-                    .add_entry(
-                        super::CreditTransferEntry::new("Payee", super::creditor(), 5_000, "OCT-1")
-                            .with_currency("USD".parse().unwrap())
-                            .with_non_euro_leg_currency("USD".parse().unwrap())
-                            .with_purpose("RRTP".parse().unwrap())
-                            .with_description("one leg out"),
-                    ),
-            )
-            .build()
-            .unwrap();
+        let xml = super::Pain001Builder::new(
+            "Acme GmbH",
+            "OCT-XSD",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
+                .kind(sepa::pain001::CreditTransferKind::OneLegOutInstant)
+                .charge_bearer(sepa::pain001::ChargeBearer::Shar)
+                .add_entry(
+                    super::CreditTransferEntry::new("Payee", super::creditor(), 5_000, "OCT-1")
+                        .with_currency("USD".parse().unwrap())
+                        .with_non_euro_leg_currency("USD".parse().unwrap())
+                        .with_purpose("RRTP".parse().unwrap())
+                        .with_description("one leg out"),
+                ),
+        )
+        .build()
+        .unwrap();
 
         assert!(xml.contains("<SvcLvl><Cd>EOLO</Cd></SvcLvl>"), "{xml}");
         assert!(
@@ -737,14 +776,14 @@ mod xsd {
         // Regression: the DK schema has no LclInstrm element, and the builder
         // used to emit one anyway — producing a file that failed its own XSD.
         for schema in CreditTransferSchema::ALL {
-            let built = super::Pain001Builder::new("Acme GmbH", "CT-INST")
-                .schema(*schema)
-                .add_group(
-                    super::CreditTransferGroup::new(
-                        "Acme GmbH",
-                        &super::debtor(),
-                        date("2026-07-20"),
-                    )
+            let built = super::Pain001Builder::new(
+                "Acme GmbH",
+                "CT-INST",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .schema(*schema)
+            .add_group(
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
                     .kind(sepa::pain001::CreditTransferKind::Instant)
                     .add_entry(super::CreditTransferEntry::new(
                         "Payee",
@@ -752,8 +791,8 @@ mod xsd {
                         5_000,
                         "INST-1",
                     )),
-                )
-                .build();
+            )
+            .build();
 
             if schema.supports_local_instrument() {
                 let xml = built.expect("a schema with LclInstrm accepts INST");
@@ -773,6 +812,7 @@ mod xsd {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn postal_addresses_validate_in_every_schema_that_has_them() {
         // `PostalAddress6` (pain.001.001.03) and `PostalAddress24`
         // (pain.001.001.09) share the elements this crate emits and their
@@ -789,14 +829,14 @@ mod xsd {
         };
 
         for schema in CreditTransferSchema::ALL {
-            let built = super::Pain001Builder::new("Acme GmbH", "CT-ADR")
-                .schema(*schema)
-                .add_group(
-                    super::CreditTransferGroup::new(
-                        "Acme GmbH",
-                        &super::debtor(),
-                        date("2026-07-20"),
-                    )
+            let built = super::Pain001Builder::new(
+                "Acme GmbH",
+                "CT-ADR",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .schema(*schema)
+            .add_group(
+                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
                     .debtor_address(address())
                     .add_entry(
                         super::CreditTransferEntry::new(
@@ -811,8 +851,8 @@ mod xsd {
                                 .line("Herengracht 1"),
                         ),
                     ),
-                )
-                .build();
+            )
+            .build();
 
             if schema.supports_postal_address() {
                 let xml = built.expect("an ISO schema carries PstlAdr");
@@ -839,33 +879,37 @@ mod xsd {
         }
 
         for schema in DirectDebitSchema::ALL {
-            let built = super::Pain008Builder::new("Stadtwerke GmbH", "DD-ADR")
-                .schema(*schema)
-                .add_group(
-                    super::DirectDebitGroup::new(
-                        "Stadtwerke GmbH",
-                        &super::debtor(),
-                        &super::creditor_id(),
-                        date("2026-07-20"),
-                    )
-                    .creditor_address(address())
-                    .add_entry(
-                        super::DirectDebitEntry::new(
-                            "MND-1",
-                            date("2024-06-01"),
-                            "Max Mustermann",
-                            super::creditor(),
-                            7_500,
-                            "E2E-1",
-                        )
-                        .with_debtor_address(
-                            sepa::PostalAddress::new("Wien", "AT")
-                                .unwrap()
-                                .post_code("1010"),
-                        ),
-                    ),
+            let built = super::Pain008Builder::new(
+                "Stadtwerke GmbH",
+                "DD-ADR",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .schema(*schema)
+            .add_group(
+                super::DirectDebitGroup::new(
+                    "Stadtwerke GmbH",
+                    &super::debtor(),
+                    &super::creditor_id(),
+                    date("2026-07-20"),
                 )
-                .build();
+                .creditor_address(address())
+                .add_entry(
+                    super::DirectDebitEntry::new(
+                        "MND-1",
+                        date("2024-06-01"),
+                        "Max Mustermann",
+                        super::creditor(),
+                        7_500,
+                        "E2E-1",
+                    )
+                    .with_debtor_address(
+                        sepa::PostalAddress::new("Wien", "AT")
+                            .unwrap()
+                            .post_code("1010"),
+                    ),
+                ),
+            )
+            .build();
 
             if schema.supports_postal_address() {
                 let xml = built.expect("an ISO schema carries PstlAdr");
@@ -890,23 +934,27 @@ mod xsd {
         // transfer due at a stated time, which needs ReqdExctnDt/DtTm. Only
         // pain.001.001.09 types ReqdExctnDt as a date/time choice.
         for schema in CreditTransferSchema::ALL {
-            let built = super::Pain001Builder::new("Acme GmbH", "CT-TIMED")
-                .schema(*schema)
-                .add_group(
-                    super::CreditTransferGroup::new(
-                        "Acme GmbH",
-                        &super::debtor(),
-                        "2026-07-20T11:00:00Z".parse::<sepa::IsoDateTime>().unwrap(),
-                    )
-                    .kind(sepa::CreditTransferKind::Instant)
-                    .add_entry(super::CreditTransferEntry::new(
-                        "Payee",
-                        super::creditor(),
-                        5_000,
-                        "E2E-1",
-                    )),
+            let built = super::Pain001Builder::new(
+                "Acme GmbH",
+                "CT-TIMED",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .schema(*schema)
+            .add_group(
+                super::CreditTransferGroup::new(
+                    "Acme GmbH",
+                    &super::debtor(),
+                    "2026-07-20T11:00:00Z".parse::<sepa::IsoDateTime>().unwrap(),
                 )
-                .build();
+                .kind(sepa::CreditTransferKind::Instant)
+                .add_entry(super::CreditTransferEntry::new(
+                    "Payee",
+                    super::creditor(),
+                    5_000,
+                    "E2E-1",
+                )),
+            )
+            .build();
 
             if schema.supports_execution_time() {
                 let xml = built.expect("the choice type accepts a time");
@@ -942,14 +990,18 @@ mod xsd {
             if instant {
                 group = group.kind(sepa::CreditTransferKind::Instant);
             }
-            super::Pain001Builder::new("Acme GmbH", "CT-TIMED")
-                .add_group(group.add_entry(super::CreditTransferEntry::new(
-                    "Payee",
-                    super::creditor(),
-                    5_000,
-                    "E2E-1",
-                )))
-                .build()
+            super::Pain001Builder::new(
+                "Acme GmbH",
+                "CT-TIMED",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .add_group(group.add_entry(super::CreditTransferEntry::new(
+                "Payee",
+                super::creditor(),
+                5_000,
+                "E2E-1",
+            )))
+            .build()
         };
 
         assert_eq!(
@@ -974,22 +1026,26 @@ mod xsd {
         }
         // A plain date is unaffected — it is the ordinary SCT case.
         assert!(
-            super::Pain001Builder::new("Acme GmbH", "CT-PLAIN")
-                .add_group(
-                    super::CreditTransferGroup::new(
-                        "Acme GmbH",
-                        &super::debtor(),
-                        super::date("2026-07-20")
-                    )
-                    .add_entry(super::CreditTransferEntry::new(
-                        "Payee",
-                        super::creditor(),
-                        5_000,
-                        "E2E-1",
-                    )),
+            super::Pain001Builder::new(
+                "Acme GmbH",
+                "CT-PLAIN",
+                "2026-07-15T09:00:00".parse().unwrap()
+            )
+            .add_group(
+                super::CreditTransferGroup::new(
+                    "Acme GmbH",
+                    &super::debtor(),
+                    super::date("2026-07-20")
                 )
-                .build()
-                .is_ok()
+                .add_entry(super::CreditTransferEntry::new(
+                    "Payee",
+                    super::creditor(),
+                    5_000,
+                    "E2E-1",
+                )),
+            )
+            .build()
+            .is_ok()
         );
     }
 
@@ -1013,40 +1069,55 @@ mod xsd {
         );
 
         // Full reference form.
-        let xml = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-001")
-            .creditor_agent("COBADEFFXXX".parse().unwrap())
-            .add_group(sepa::ReversalGroup::new("DD-2026-07-001").add_entry(
-                sepa::ReversalEntry::reverse(&group, &entry, sepa::ReversalReason::Ms02),
-            ))
-            .build()
-            .unwrap();
+        let xml = sepa::Pain007Builder::new(
+            "Stadtwerke GmbH",
+            "RVSL-001",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "DD-2026-07-001",
+        )
+        .creditor_agent("COBADEFFXXX".parse().unwrap())
+        .add_group(sepa::ReversalGroup::new("DD-2026-07-001").add_entry(
+            sepa::ReversalEntry::reverse(&group, &entry, sepa::ReversalReason::Ms02),
+        ))
+        .build()
+        .unwrap();
         assert_validates(&xml, "pain.007.001.09.xsd");
 
         // The minimum the DK subset accepts: OrgnlTxRef with just the mandate.
-        let bare = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-002")
-            .add_group(sepa::ReversalGroup::new("DD-2026-07-001").add_entry(
-                sepa::ReversalEntry::new(
-                    "E2E-1",
-                    7_500,
-                    sepa::ReversalReason::Am05,
-                    sepa::OriginalCollection::new("MND-42", date("2024-06-01")),
-                ),
-            ))
-            .build()
-            .unwrap();
+        let bare = sepa::Pain007Builder::new(
+            "Stadtwerke GmbH",
+            "RVSL-002",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "DD-2026-07-001",
+        )
+        .add_group(
+            sepa::ReversalGroup::new("DD-2026-07-001").add_entry(sepa::ReversalEntry::new(
+                "E2E-1",
+                7_500,
+                sepa::ReversalReason::Am05,
+                sepa::OriginalCollection::new("MND-42", date("2024-06-01")),
+            )),
+        )
+        .build()
+        .unwrap();
         assert!(bare.contains("<MndtId>MND-42</MndtId>"));
         assert_validates(&bare, "pain.007.001.09.xsd");
 
         // A partial reversal is still a valid document.
-        let partial = sepa::Pain007Builder::new("Stadtwerke GmbH", "DD-1", "RVSL-003")
-            .add_group(
-                sepa::ReversalGroup::new("DD-1").add_entry(
-                    sepa::ReversalEntry::reverse(&group, &entry, sepa::ReversalReason::Ms02)
-                        .reversed_amount(2_500),
-                ),
-            )
-            .build()
-            .unwrap();
+        let partial = sepa::Pain007Builder::new(
+            "Stadtwerke GmbH",
+            "RVSL-003",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "DD-1",
+        )
+        .add_group(
+            sepa::ReversalGroup::new("DD-1").add_entry(
+                sepa::ReversalEntry::reverse(&group, &entry, sepa::ReversalReason::Ms02)
+                    .reversed_amount(2_500),
+            ),
+        )
+        .build()
+        .unwrap();
         assert!(partial.contains("<RvsdInstdAmt Ccy=\"EUR\">25.00</RvsdInstdAmt>"));
         assert_validates(&partial, "pain.007.001.09.xsd");
     }
@@ -1144,22 +1215,21 @@ mod xsd {
 
         // Structured addresses and a timed instant execution are the two newest
         // shapes, and the DK subset is where they are pinned down.
-        let addressed = super::Pain001Builder::new("Acme GmbH", "CT-DK-ADR")
-            .add_group(
-                super::CreditTransferGroup::new(
-                    "Acme GmbH",
-                    &super::debtor(),
-                    "2026-07-20T11:00:00Z".parse::<sepa::IsoDateTime>().unwrap(),
-                )
-                .kind(sepa::CreditTransferKind::Instant)
-                .debtor_bic("COBADEFFXXX".parse().unwrap())
-                .add_entry(
-                    super::CreditTransferEntry::new(
-                        "Supplier AG",
-                        super::creditor(),
-                        12_000,
-                        "E2E-1",
-                    )
+        let addressed = super::Pain001Builder::new(
+            "Acme GmbH",
+            "CT-DK-ADR",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            super::CreditTransferGroup::new(
+                "Acme GmbH",
+                &super::debtor(),
+                "2026-07-20T11:00:00Z".parse::<sepa::IsoDateTime>().unwrap(),
+            )
+            .kind(sepa::CreditTransferKind::Instant)
+            .debtor_bic("COBADEFFXXX".parse().unwrap())
+            .add_entry(
+                super::CreditTransferEntry::new("Supplier AG", super::creditor(), 12_000, "E2E-1")
                     .with_bic("ABNANL2A".parse().unwrap())
                     .with_creditor_address(
                         sepa::PostalAddress::new("Bonn", "DE")
@@ -1168,10 +1238,10 @@ mod xsd {
                             .building_number("47")
                             .post_code("53113"),
                     ),
-                ),
-            )
-            .build()
-            .unwrap();
+            ),
+        )
+        .build()
+        .unwrap();
         assert_validates(&addressed, "pain.001.001.09_GBIC_5.xsd");
         assert_validates(&addressed, "pain.001.001.09.xsd");
     }
@@ -1182,21 +1252,25 @@ mod xsd {
         let rf = sepa::RfReference::generate("539007547034").unwrap();
         assert_eq!(rf.as_str(), "RF18539007547034");
 
-        let xml = super::Pain001Builder::new("Acme GmbH", "CT-RF-001")
-            .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
-                    .add_entry(
-                        super::CreditTransferEntry::new(
-                            "Supplier AG",
-                            super::creditor(),
-                            12_000,
-                            "E2E-1",
-                        )
-                        .with_reference(rf),
-                    ),
-            )
-            .build()
-            .unwrap();
+        let xml = super::Pain001Builder::new(
+            "Acme GmbH",
+            "CT-RF-001",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
+                .add_entry(
+                    super::CreditTransferEntry::new(
+                        "Supplier AG",
+                        super::creditor(),
+                        12_000,
+                        "E2E-1",
+                    )
+                    .with_reference(rf),
+                ),
+        )
+        .build()
+        .unwrap();
 
         assert!(xml.contains("<CdOrPrtry><Cd>SCOR</Cd></CdOrPrtry>"));
         assert!(xml.contains("<Issr>ISO</Issr>"));
@@ -1225,19 +1299,23 @@ mod xsd {
         // instead of ISO's. It is the one remittance shape whose `Issr` is
         // caller text, so it is the one that has to be schema-checked as well
         // as charset-checked.
-        let xml = super::Pain001Builder::new("Acme GmbH", "CT-PROP")
-            .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
-                    .add_entry(
-                        super::CreditTransferEntry::new("Payee", super::creditor(), 5_000, "E2E-1")
-                            .with_remittance(sepa::RemittanceInfo::Proprietary {
-                                reference: "090933755493".to_owned(),
-                                issuer: Some("BBA".to_owned()),
-                            }),
-                    ),
-            )
-            .build()
-            .unwrap();
+        let xml = super::Pain001Builder::new(
+            "Acme GmbH",
+            "CT-PROP",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
+                .add_entry(
+                    super::CreditTransferEntry::new("Payee", super::creditor(), 5_000, "E2E-1")
+                        .with_remittance(sepa::RemittanceInfo::Proprietary {
+                            reference: "090933755493".to_owned(),
+                            issuer: Some("BBA".to_owned()),
+                        }),
+                ),
+        )
+        .build()
+        .unwrap();
         assert!(xml.contains("<Issr>BBA</Issr>"), "{xml}");
         assert!(!xml.contains("<Issr>ISO</Issr>"), "ISO is reserved for RF");
         assert_validates(&xml, &schema_file("pain.001.001.09"));
@@ -1247,28 +1325,32 @@ mod xsd {
     #[test]
     fn structured_remittance_validates_for_direct_debit() {
         let rf = sepa::RfReference::generate("INV20260042").unwrap();
-        let xml = super::Pain008Builder::new("Stadtwerke GmbH", "DD-RF-001")
-            .add_group(
-                super::DirectDebitGroup::new(
-                    "Stadtwerke GmbH",
-                    &super::debtor(),
-                    &super::creditor_id(),
-                    date("2026-07-20"),
-                )
-                .add_entry(
-                    super::DirectDebitEntry::new(
-                        "MND-1",
-                        date("2024-06-01"),
-                        "Max Mustermann",
-                        super::creditor(),
-                        7_500,
-                        "E2E-1",
-                    )
-                    .with_reference(rf),
-                ),
+        let xml = super::Pain008Builder::new(
+            "Stadtwerke GmbH",
+            "DD-RF-001",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            super::DirectDebitGroup::new(
+                "Stadtwerke GmbH",
+                &super::debtor(),
+                &super::creditor_id(),
+                date("2026-07-20"),
             )
-            .build()
-            .unwrap();
+            .add_entry(
+                super::DirectDebitEntry::new(
+                    "MND-1",
+                    date("2024-06-01"),
+                    "Max Mustermann",
+                    super::creditor(),
+                    7_500,
+                    "E2E-1",
+                )
+                .with_reference(rf),
+            ),
+        )
+        .build()
+        .unwrap();
         assert!(xml.contains("<Cd>SCOR</Cd>"));
         assert_validates(&xml, "pain.008.001.08.xsd");
     }
@@ -1277,28 +1359,32 @@ mod xsd {
     fn ultimate_parties_and_purpose_validate_in_sequence() {
         // Element order is fixed by xs:sequence, so a misplaced UltmtDbtr or
         // Purp fails the XSD even though the elements themselves are legal.
-        let xml = super::Pain001Builder::new("Acme GmbH", "CT-ULT-001")
-            .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
-                    .add_entry(
-                        super::CreditTransferEntry::new(
-                            "Supplier AG",
-                            super::creditor(),
-                            12_000,
-                            "E2E-1",
-                        )
-                        .with_bic("ABNANL2A".parse().unwrap())
-                        .with_ultimate_debtor(sepa::Party::new("Tochter AG"))
-                        .with_ultimate_creditor(
-                            sepa::Party::new("Endbeguenstigter GmbH")
-                                .with_organisation_id("CUST-4711", Some("CUST")),
-                        )
-                        .with_purpose(sepa::Purpose::Supp)
-                        .with_description("Rechnung 2026-07"),
-                    ),
-            )
-            .build()
-            .unwrap();
+        let xml = super::Pain001Builder::new(
+            "Acme GmbH",
+            "CT-ULT-001",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
+                .add_entry(
+                    super::CreditTransferEntry::new(
+                        "Supplier AG",
+                        super::creditor(),
+                        12_000,
+                        "E2E-1",
+                    )
+                    .with_bic("ABNANL2A".parse().unwrap())
+                    .with_ultimate_debtor(sepa::Party::new("Tochter AG"))
+                    .with_ultimate_creditor(
+                        sepa::Party::new("Endbeguenstigter GmbH")
+                            .with_organisation_id("CUST-4711", Some("CUST")),
+                    )
+                    .with_purpose(sepa::Purpose::Supp)
+                    .with_description("Rechnung 2026-07"),
+                ),
+        )
+        .build()
+        .unwrap();
 
         assert!(xml.contains("<UltmtDbtr><Nm>Tochter AG</Nm></UltmtDbtr>"));
         assert!(xml.contains("<Id><OrgId><Othr><Id>CUST-4711</Id>"));
@@ -1308,31 +1394,35 @@ mod xsd {
 
     #[test]
     fn direct_debit_ultimate_parties_and_amendment_validate() {
-        let xml = super::Pain008Builder::new("Stadtwerke GmbH", "DD-AMD-001")
-            .add_group(
-                super::DirectDebitGroup::new(
-                    "Stadtwerke GmbH",
-                    &super::debtor(),
-                    &super::creditor_id(),
-                    date("2026-07-20"),
-                )
-                .add_entry(
-                    super::DirectDebitEntry::new(
-                        "MND-1",
-                        date("2024-06-01"),
-                        "Max Mustermann",
-                        super::creditor(),
-                        7_500,
-                        "E2E-1",
-                    )
-                    .with_ultimate_creditor(sepa::Party::new("Netzbetreiber AG"))
-                    .with_ultimate_debtor(sepa::Party::new("Erika Mustermann"))
-                    .with_purpose(sepa::Purpose::Elec)
-                    .with_amendment(sepa::MandateAmendment::debtor_account_changed()),
-                ),
+        let xml = super::Pain008Builder::new(
+            "Stadtwerke GmbH",
+            "DD-AMD-001",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            super::DirectDebitGroup::new(
+                "Stadtwerke GmbH",
+                &super::debtor(),
+                &super::creditor_id(),
+                date("2026-07-20"),
             )
-            .build()
-            .unwrap();
+            .add_entry(
+                super::DirectDebitEntry::new(
+                    "MND-1",
+                    date("2024-06-01"),
+                    "Max Mustermann",
+                    super::creditor(),
+                    7_500,
+                    "E2E-1",
+                )
+                .with_ultimate_creditor(sepa::Party::new("Netzbetreiber AG"))
+                .with_ultimate_debtor(sepa::Party::new("Erika Mustermann"))
+                .with_purpose(sepa::Purpose::Elec)
+                .with_amendment(sepa::MandateAmendment::debtor_account_changed()),
+            ),
+        )
+        .build()
+        .unwrap();
 
         assert!(xml.contains("<AmdmntInd>true</AmdmntInd>"));
         assert!(
@@ -1348,32 +1438,36 @@ mod xsd {
     fn creditor_id_amendment_validates_in_every_schema_version() {
         let build = |schema| {
             let old = sepa::validate_creditor_id("DE98ZZZ09999999999").unwrap();
-            super::Pain008Builder::new("Stadtwerke GmbH", "DD-CI-CHG")
-                .schema(schema)
-                .add_group(
-                    super::DirectDebitGroup::new(
-                        "Stadtwerke GmbH",
-                        &super::debtor(),
-                        &super::creditor_id(),
-                        date("2026-07-20"),
-                    )
-                    .add_entry(
-                        super::DirectDebitEntry::new(
-                            "MND-1",
-                            date("2024-06-01"),
-                            "Max",
-                            super::creditor(),
-                            100,
-                            "E2E-1",
-                        )
-                        .with_amendment(
-                            sepa::MandateAmendment::creditor_id_changed(old)
-                                .with_original_creditor_name("Stadtwerke Muster GmbH"),
-                        ),
-                    ),
+            super::Pain008Builder::new(
+                "Stadtwerke GmbH",
+                "DD-CI-CHG",
+                "2026-07-15T09:00:00".parse().unwrap(),
+            )
+            .schema(schema)
+            .add_group(
+                super::DirectDebitGroup::new(
+                    "Stadtwerke GmbH",
+                    &super::debtor(),
+                    &super::creditor_id(),
+                    date("2026-07-20"),
                 )
-                .build()
-                .unwrap()
+                .add_entry(
+                    super::DirectDebitEntry::new(
+                        "MND-1",
+                        date("2024-06-01"),
+                        "Max",
+                        super::creditor(),
+                        100,
+                        "E2E-1",
+                    )
+                    .with_amendment(
+                        sepa::MandateAmendment::creditor_id_changed(old)
+                            .with_original_creditor_name("Stadtwerke Muster GmbH"),
+                    ),
+                ),
+            )
+            .build()
+            .unwrap()
         };
 
         for schema in DirectDebitSchema::ALL {
@@ -1390,19 +1484,23 @@ mod xsd {
     fn sct_instant_validates_under_the_default_schema() {
         // Regression: SCT Inst uses pain.001.001.09, whose ReqdExctnDt is a
         // DateAndDateTime2Choice. A bare date there failed schema validation.
-        let xml = super::Pain001Builder::new("Acme GmbH", "CT-INST-001")
-            .add_group(
-                super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
-                    .kind(sepa::pain001::CreditTransferKind::Instant)
-                    .add_entry(super::CreditTransferEntry::new(
-                        "Payee",
-                        super::creditor(),
-                        5_000,
-                        "INST-001",
-                    )),
-            )
-            .build()
-            .unwrap();
+        let xml = super::Pain001Builder::new(
+            "Acme GmbH",
+            "CT-INST-001",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            super::CreditTransferGroup::new("Acme GmbH", &super::debtor(), date("2026-07-20"))
+                .kind(sepa::pain001::CreditTransferKind::Instant)
+                .add_entry(super::CreditTransferEntry::new(
+                    "Payee",
+                    super::creditor(),
+                    5_000,
+                    "INST-001",
+                )),
+        )
+        .build()
+        .unwrap();
 
         assert!(xml.contains("<LclInstrm><Cd>INST</Cd></LclInstrm>"));
         assert!(xml.contains("<ReqdExctnDt><Dt>2026-07-20</Dt></ReqdExctnDt>"));
@@ -1513,32 +1611,36 @@ fn agents_never_use_notprovided_as_a_bic() {
     // `NOTPROVIDED` satisfies the BIC regex, so the XSD accepts
     // <BICFI>NOTPROVIDED</BICFI> — banks do not. The EPC "IBAN only" form is
     // <Othr><Id>NOTPROVIDED</Id></Othr>.
-    let sct_xml = Pain001Builder::new("Acme GmbH", "CT-NP")
+    let sct_xml = Pain001Builder::new("Acme GmbH", "CT-NP", "2026-07-15T09:00:00".parse().unwrap())
         .add_group(
             CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
                 .add_entry(CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1")),
         )
         .build()
         .unwrap();
-    let sdd_xml = Pain008Builder::new("Stadtwerke GmbH", "DD-NP")
-        .add_group(
-            DirectDebitGroup::new(
-                "Stadtwerke GmbH",
-                &debtor(),
-                &creditor_id(),
-                date("2026-07-20"),
-            )
-            .add_entry(DirectDebitEntry::new(
-                "MND-1",
-                date("2024-06-01"),
-                "Max",
-                creditor(),
-                100,
-                "E2E-1",
-            )),
+    let sdd_xml = Pain008Builder::new(
+        "Stadtwerke GmbH",
+        "DD-NP",
+        "2026-07-15T09:00:00".parse().unwrap(),
+    )
+    .add_group(
+        DirectDebitGroup::new(
+            "Stadtwerke GmbH",
+            &debtor(),
+            &creditor_id(),
+            date("2026-07-20"),
         )
-        .build()
-        .unwrap();
+        .add_entry(DirectDebitEntry::new(
+            "MND-1",
+            date("2024-06-01"),
+            "Max",
+            creditor(),
+            100,
+            "E2E-1",
+        )),
+    )
+    .build()
+    .unwrap();
 
     for xml in [&sct_xml, &sdd_xml] {
         assert!(!xml.contains("NOTPROVIDED</BIC>"));
@@ -1556,7 +1658,7 @@ fn payment_info_id_stays_within_max35text() {
     // produced a 37-character PmtInfId that breached Max35Text.
     let msg_id = "M".repeat(35);
 
-    let sct_xml = Pain001Builder::new("Acme GmbH", &msg_id)
+    let sct_xml = Pain001Builder::new("Acme GmbH", &msg_id, "2026-07-15T09:00:00".parse().unwrap())
         .add_group(
             CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
                 .add_entry(CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1")),
@@ -1564,25 +1666,29 @@ fn payment_info_id_stays_within_max35text() {
         .build()
         .unwrap();
 
-    let sdd_xml = Pain008Builder::new("Stadtwerke GmbH", &msg_id)
-        .add_group(
-            DirectDebitGroup::new(
-                "Stadtwerke GmbH",
-                &debtor(),
-                &creditor_id(),
-                date("2026-07-20"),
-            )
-            .add_entry(DirectDebitEntry::new(
-                "MND-1",
-                date("2024-06-01"),
-                "Max",
-                creditor(),
-                100,
-                "E2E-1",
-            )),
+    let sdd_xml = Pain008Builder::new(
+        "Stadtwerke GmbH",
+        &msg_id,
+        "2026-07-15T09:00:00".parse().unwrap(),
+    )
+    .add_group(
+        DirectDebitGroup::new(
+            "Stadtwerke GmbH",
+            &debtor(),
+            &creditor_id(),
+            date("2026-07-20"),
         )
-        .build()
-        .unwrap();
+        .add_entry(DirectDebitEntry::new(
+            "MND-1",
+            date("2024-06-01"),
+            "Max",
+            creditor(),
+            100,
+            "E2E-1",
+        )),
+    )
+    .build()
+    .unwrap();
 
     for xml in [&sct_xml, &sdd_xml] {
         let id = xml
@@ -1600,7 +1706,7 @@ fn payment_info_id_stays_within_max35text() {
 
     // An explicit override is validated the same way.
     assert!(matches!(
-        Pain001Builder::new("Acme GmbH", "SHORT")
+        Pain001Builder::new("Acme GmbH", "SHORT", "2026-07-15T09:00:00".parse().unwrap())
             .add_group(
                 CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
                     .payment_info_id("P".repeat(36))
@@ -1631,7 +1737,7 @@ fn control_sum_and_counts_agree_at_both_levels() {
 /// means the same thing to both and only has to be extended in one place.
 fn maximal_direct_debit() -> String {
     let ugly = "Jörg Groß & Söhne — Ψυχή";
-    Pain008Builder::new(ugly, "DD-MAX")
+    Pain008Builder::new(ugly, "DD-MAX", "2026-07-15T09:00:00".parse().unwrap())
         .add_group(
             DirectDebitGroup::new(ugly, &debtor(), &creditor_id(), date("2026-07-20"))
                 .creditor_bic("COBADEFFXXX".parse().unwrap())
@@ -1698,7 +1804,7 @@ fn maximal_direct_debit() -> String {
 /// A pain.001 exercising every text-carrying element the writer can emit.
 fn maximal_credit_transfer() -> String {
     let ugly = "Jörg Groß & Söhne — Ψυχή";
-    Pain001Builder::new(ugly, "CT-MAX")
+    Pain001Builder::new(ugly, "CT-MAX", "2026-07-15T09:00:00".parse().unwrap())
         .add_group(
             CreditTransferGroup::new(ugly, &debtor(), date("2026-07-20"))
                 .debtor_bic("COBADEFFXXX".parse().unwrap())
@@ -1742,13 +1848,13 @@ fn maximal_cancellation() -> String {
     let ugly = "Jörg Groß & Söhne";
     Camt055Builder::new(
         "CXL-MAX",
+        "2026-07-15T11:30:00".parse().unwrap(),
         Party::new(ugly).with_organisation_id("CUST-4711", Some("Größe")),
         validate_bic("COBADEFFXXX").unwrap(),
         OriginalMessage::new("DD-MAX", "pain.008.001.08")
             .created_at("2026-07-15T09:00:00".parse().unwrap())
             .totals(2, 15_000),
     )
-    .created_at("2026-07-15T11:30:00".parse().unwrap())
     .case_id("CASE-MAX")
     .add_group(
         CancellationGroup::new("PMT-MAX")
@@ -1783,16 +1889,21 @@ fn maximal_reversal() -> String {
         "E2E-1",
     )
     .with_bic("ABNANL2A".parse().unwrap());
-    sepa::Pain007Builder::new(ugly, "DD-MAX", "RVSL-MAX")
-        .add_group(
-            sepa::ReversalGroup::new("DD-MAX").add_entry(sepa::ReversalEntry::reverse(
-                &group,
-                &entry,
-                sepa::ReversalReason::Ms02,
-            )),
-        )
-        .build()
-        .unwrap()
+    sepa::Pain007Builder::new(
+        ugly,
+        "RVSL-MAX",
+        "2026-07-15T09:00:00".parse().unwrap(),
+        "DD-MAX",
+    )
+    .add_group(
+        sepa::ReversalGroup::new("DD-MAX").add_entry(sepa::ReversalEntry::reverse(
+            &group,
+            &entry,
+            sepa::ReversalReason::Ms02,
+        )),
+    )
+    .build()
+    .unwrap()
 }
 
 #[test]
@@ -1820,7 +1931,7 @@ fn every_emitted_text_value_is_in_the_sepa_character_set() {
 #[test]
 fn invalid_batches_are_rejected_before_any_xml_is_produced() {
     let group = || CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"));
-    let base = || Pain001Builder::new("Acme GmbH", "CT-1");
+    let base = || Pain001Builder::new("Acme GmbH", "CT-1", "2026-07-15T09:00:00".parse().unwrap());
     let entry = |ct| CreditTransferEntry::new("Payee", creditor(), ct, "E2E-1");
 
     assert_eq!(
@@ -2189,6 +2300,7 @@ fn assert_writer_boundary(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 #[cfg(feature = "serde")]
 fn restored_parties_are_checked_at_every_payment_position() {
     let cases = [
@@ -2261,14 +2373,20 @@ fn restored_parties_are_checked_at_every_payment_position() {
                         dd_entry = dd_entry.with_ultimate_creditor(party.clone());
                     }
                 }
-                let ct = Pain001Builder::new("Debtor", "CT-PARTY")
-                    .charset(policy)
-                    .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-                    .add_group(ct_group.add_entry(ct_entry));
-                let dd = Pain008Builder::new("Creditor", "DD-PARTY")
-                    .charset(policy)
-                    .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-                    .add_group(dd_group.add_entry(dd_entry));
+                let ct = Pain001Builder::new(
+                    "Debtor",
+                    "CT-PARTY",
+                    "2026-07-19T12:00:00Z".parse().unwrap(),
+                )
+                .charset(policy)
+                .add_group(ct_group.add_entry(ct_entry));
+                let dd = Pain008Builder::new(
+                    "Creditor",
+                    "DD-PARTY",
+                    "2026-07-19T12:00:00Z".parse().unwrap(),
+                )
+                .charset(policy)
+                .add_group(dd_group.add_entry(dd_entry));
                 let mut sink = b"existing".to_vec();
                 assert_writer_boundary(
                     ct.build(),
@@ -2370,12 +2488,18 @@ fn purpose_codes_are_checked_before_buffered_or_streamed_output() {
                     ct_entry = ct_entry.with_purpose(purpose.clone());
                     dd_entry = dd_entry.with_purpose(purpose.clone());
                 }
-                let ct = Pain001Builder::new("Debtor", "CT-CODE")
-                    .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-                    .add_group(ct_group.add_entry(ct_entry));
-                let dd = Pain008Builder::new("Creditor", "DD-CODE")
-                    .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-                    .add_group(dd_group.add_entry(dd_entry));
+                let ct = Pain001Builder::new(
+                    "Debtor",
+                    "CT-CODE",
+                    "2026-07-19T12:00:00Z".parse().unwrap(),
+                )
+                .add_group(ct_group.add_entry(ct_entry));
+                let dd = Pain008Builder::new(
+                    "Creditor",
+                    "DD-CODE",
+                    "2026-07-19T12:00:00Z".parse().unwrap(),
+                )
+                .add_group(dd_group.add_entry(dd_entry));
                 let mut sink = b"existing".to_vec();
                 check(ct.build(), ct.write_to(&mut sink), &sink, code, location);
                 let mut sink = b"existing".to_vec();
@@ -2411,12 +2535,12 @@ fn restored_recall_parties_are_checked_before_output() {
                 };
                 let builder = sepa::Camt055Builder::new(
                     "RECALL-1",
+                    "2026-07-19T12:00:00Z".parse().unwrap(),
                     requester,
                     recipient,
                     sepa::OriginalMessage::new("ORIGINAL-1", "pain.008.001.08"),
                 )
                 .case_id("CASE-1")
-                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
                 .charset(policy)
                 .cancel_whole_message(sepa::CancellationReason::Cust);
                 let mut sink = b"existing".to_vec();
@@ -2491,13 +2615,13 @@ fn restored_remittance_is_checked_by_both_payment_writers() {
         for policy in [sepa::CharsetPolicy::Strict, sepa::CharsetPolicy::default()] {
             let mut ct_entry = CreditTransferEntry::new("Payee", creditor(), 100, "E2E-1");
             ct_entry.remittance = Some(restored.clone());
-            let ct = Pain001Builder::new("Debtor", "CT-RMT")
-                .charset(policy)
-                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-                .add_group(
-                    CreditTransferGroup::new("Debtor", &debtor(), date("2026-07-20"))
-                        .add_entry(ct_entry),
-                );
+            let ct =
+                Pain001Builder::new("Debtor", "CT-RMT", "2026-07-19T12:00:00Z".parse().unwrap())
+                    .charset(policy)
+                    .add_group(
+                        CreditTransferGroup::new("Debtor", &debtor(), date("2026-07-20"))
+                            .add_entry(ct_entry),
+                    );
             let mut dd_entry = DirectDebitEntry::new(
                 "MND-1",
                 date("2024-06-01"),
@@ -2507,18 +2631,16 @@ fn restored_remittance_is_checked_by_both_payment_writers() {
                 "E2E-1",
             );
             dd_entry.remittance = Some(restored.clone());
-            let dd = Pain008Builder::new("Creditor", "DD-RMT")
-                .charset(policy)
-                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-                .add_group(
-                    DirectDebitGroup::new(
-                        "Creditor",
-                        &creditor(),
-                        &creditor_id(),
-                        date("2026-07-20"),
-                    )
+            let dd = Pain008Builder::new(
+                "Creditor",
+                "DD-RMT",
+                "2026-07-19T12:00:00Z".parse().unwrap(),
+            )
+            .charset(policy)
+            .add_group(
+                DirectDebitGroup::new("Creditor", &creditor(), &creditor_id(), date("2026-07-20"))
                     .add_entry(dd_entry),
-                );
+            );
             let location = (!valid).then_some(sepa::Location::transaction(0, 0));
             let mut sink = b"existing".to_vec();
             assert_writer_boundary(
@@ -2564,12 +2686,15 @@ fn restored_original_records_and_amendments_are_checked_before_output() {
                 .unwrap();
         stored[field] = value;
         let original: sepa::OriginalCollection = serde_json::from_value(stored).unwrap();
-        let builder =
-            sepa::Pain007Builder::new("Creditor", "ORIGINAL-1", "REVERSAL-1")
-                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-                .add_group(sepa::ReversalGroup::new("GROUP-1").add_entry(
-                    sepa::ReversalEntry::new("E2E-1", 100, sepa::ReversalReason::Cust, original),
-                ));
+        let builder = sepa::Pain007Builder::new(
+            "Creditor",
+            "REVERSAL-1",
+            "2026-07-19T12:00:00Z".parse().unwrap(),
+            "ORIGINAL-1",
+        )
+        .add_group(sepa::ReversalGroup::new("GROUP-1").add_entry(
+            sepa::ReversalEntry::new("E2E-1", 100, sepa::ReversalReason::Cust, original),
+        ));
         let mut sink = b"existing".to_vec();
         assert_writer_boundary(
             builder.build(),
@@ -2599,22 +2724,25 @@ fn restored_original_records_and_amendments_are_checked_before_output() {
             .unwrap()
             .extend(stored.as_object().unwrap().clone());
         let amendment: sepa::MandateAmendment = serde_json::from_value(complete).unwrap();
-        let builder = Pain008Builder::new("Creditor", "DD-AMENDMENT")
-            .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-            .add_group(
-                DirectDebitGroup::new("Creditor", &creditor(), &creditor_id(), date("2026-07-20"))
-                    .add_entry(
-                        DirectDebitEntry::new(
-                            "MND-1",
-                            date("2024-06-01"),
-                            "Debtor",
-                            debtor(),
-                            100,
-                            "E2E-1",
-                        )
-                        .with_amendment(amendment),
-                    ),
-            );
+        let builder = Pain008Builder::new(
+            "Creditor",
+            "DD-AMENDMENT",
+            "2026-07-19T12:00:00Z".parse().unwrap(),
+        )
+        .add_group(
+            DirectDebitGroup::new("Creditor", &creditor(), &creditor_id(), date("2026-07-20"))
+                .add_entry(
+                    DirectDebitEntry::new(
+                        "MND-1",
+                        date("2024-06-01"),
+                        "Debtor",
+                        debtor(),
+                        100,
+                        "E2E-1",
+                    )
+                    .with_amendment(amendment),
+                ),
+        );
         let mut sink = b"existing".to_vec();
         assert_writer_boundary(
             builder.build(),
@@ -2634,9 +2762,14 @@ fn restored_original_records_and_amendments_are_checked_before_output() {
                 .unwrap();
         stored[field] = value;
         let original: sepa::OriginalMessage = serde_json::from_value(stored).unwrap();
-        let builder = sepa::Camt055Builder::new("RECALL-1", "Customer", "Bank", original)
-            .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-            .cancel_whole_message(sepa::CancellationReason::Cust);
+        let builder = sepa::Camt055Builder::new(
+            "RECALL-1",
+            "2026-07-19T12:00:00Z".parse().unwrap(),
+            "Customer",
+            "Bank",
+            original,
+        )
+        .cancel_whole_message(sepa::CancellationReason::Cust);
         let mut sink = b"existing".to_vec();
         assert_writer_boundary(
             builder.build(),
@@ -2671,9 +2804,14 @@ fn original_recall_totals_obey_the_pinned_schema_bounds() {
         #[cfg(not(feature = "serde"))]
         let originals = vec![original];
         for original in originals {
-            let builder = sepa::Camt055Builder::new("RECALL-1", "Customer", "Bank", original)
-                .created_at("2026-07-19T12:00:00Z".parse().unwrap())
-                .cancel_whole_message(sepa::CancellationReason::Cust);
+            let builder = sepa::Camt055Builder::new(
+                "RECALL-1",
+                "2026-07-19T12:00:00Z".parse().unwrap(),
+                "Customer",
+                "Bank",
+                original,
+            )
+            .cancel_whole_message(sepa::CancellationReason::Cust);
             let mut sink = b"existing".to_vec();
             assert_writer_boundary(
                 builder.build(),
@@ -2693,9 +2831,7 @@ fn every_writer_refuses_invalid_reference_positions_before_output() {
         for policy in [sepa::CharsetPolicy::Strict, sepa::CharsetPolicy::default()] {
             macro_rules! refuse {
                 ($builder:expr, $location:expr) => {{
-                    let builder = $builder
-                        .charset(policy)
-                        .created_at("2026-07-19T12:00:00Z".parse().unwrap());
+                    let builder = $builder.charset(policy);
                     let mut sink = b"existing".to_vec();
                     assert_writer_boundary(
                         builder.build(),
@@ -2723,11 +2859,12 @@ fn every_writer_refuses_invalid_reference_positions_before_output() {
                     issuer: None,
                 });
                 refuse!(
-                    Pain001Builder::new("Debtor", value(0)).add_group(
-                        CreditTransferGroup::new("Debtor", &debtor(), date("2026-07-20"))
-                            .payment_info_id(value(1))
-                            .add_entry(ct_entry)
-                    ),
+                    Pain001Builder::new("Debtor", value(0), "2026-07-15T09:00:00".parse().unwrap())
+                        .add_group(
+                            CreditTransferGroup::new("Debtor", &debtor(), date("2026-07-20"))
+                                .payment_info_id(value(1))
+                                .add_entry(ct_entry)
+                        ),
                     match position {
                         0 => sepa::Location::message(),
                         1 => sepa::Location::group(0),
@@ -2744,7 +2881,12 @@ fn every_writer_refuses_invalid_reference_positions_before_output() {
                 )
                 .with_amendment(sepa::MandateAmendment::mandate_id_changed(value(4)));
                 refuse!(
-                    Pain008Builder::new("Creditor", value(0)).add_group(
+                    Pain008Builder::new(
+                        "Creditor",
+                        value(0),
+                        "2026-07-15T09:00:00".parse().unwrap()
+                    )
+                    .add_group(
                         DirectDebitGroup::new(
                             "Creditor",
                             &creditor(),
@@ -2775,7 +2917,13 @@ fn every_writer_refuses_invalid_reference_positions_before_output() {
                     sepa::ReversalReason::Cust
                 };
                 refuse!(
-                    sepa::Pain007Builder::new("Creditor", value(1), value(0)).add_group(
+                    sepa::Pain007Builder::new(
+                        "Creditor",
+                        value(0),
+                        "2026-07-15T09:00:00".parse().unwrap(),
+                        value(1)
+                    )
+                    .add_group(
                         sepa::ReversalGroup::new(value(2))
                             .reversal_payment_info_id(value(3))
                             .add_entry(sepa::ReversalEntry::new(
@@ -2810,9 +2958,10 @@ fn every_writer_refuses_invalid_reference_positions_before_output() {
                 refuse!(
                     sepa::Camt055Builder::new(
                         value(0),
+                        "2026-07-15T09:00:00".parse().unwrap(),
                         requester,
                         recipient,
-                        sepa::OriginalMessage::new(value(2), value(3))
+                        sepa::OriginalMessage::new(value(2), value(3)),
                     )
                     .case_id(value(1))
                     .add_group(
@@ -2838,24 +2987,27 @@ fn every_writer_refuses_invalid_reference_positions_before_output() {
 #[test]
 fn streaming_output_matches_the_in_memory_build() {
     let build = || {
-        Pain008Builder::new("Stadtwerke GmbH", "DD-STREAM")
-            .created_at("2026-07-19T12:00:00".parse().unwrap())
-            .add_group(
-                DirectDebitGroup::new(
-                    "Stadtwerke GmbH",
-                    &debtor(),
-                    &creditor_id(),
-                    date("2026-07-20"),
-                )
-                .add_entry(DirectDebitEntry::new(
-                    "MND-1",
-                    date("2024-06-01"),
-                    "Max Mustermann",
-                    creditor(),
-                    7_500,
-                    "E2E-1",
-                )),
+        Pain008Builder::new(
+            "Stadtwerke GmbH",
+            "DD-STREAM",
+            "2026-07-19T12:00:00".parse().unwrap(),
+        )
+        .add_group(
+            DirectDebitGroup::new(
+                "Stadtwerke GmbH",
+                &debtor(),
+                &creditor_id(),
+                date("2026-07-20"),
             )
+            .add_entry(DirectDebitEntry::new(
+                "MND-1",
+                date("2024-06-01"),
+                "Max Mustermann",
+                creditor(),
+                7_500,
+                "E2E-1",
+            )),
+        )
     };
 
     let direct = build().build().unwrap();
@@ -2865,9 +3017,13 @@ fn streaming_output_matches_the_in_memory_build() {
 
     // The streaming path validates too, and writes nothing when it refuses.
     let mut empty: Vec<u8> = Vec::new();
-    let err = Pain008Builder::new("Stadtwerke GmbH", "DD-EMPTY")
-        .write_to(&mut empty)
-        .unwrap_err();
+    let err = Pain008Builder::new(
+        "Stadtwerke GmbH",
+        "DD-EMPTY",
+        "2026-07-15T09:00:00".parse().unwrap(),
+    )
+    .write_to(&mut empty)
+    .unwrap_err();
     assert!(matches!(err, sepa::WriteError::Validation(_)));
     assert!(empty.is_empty(), "a rejected batch must write nothing");
 }
@@ -2879,9 +3035,11 @@ fn large_batch_totals_stay_exact() {
     let entries =
         (0..10_000).map(|i| CreditTransferEntry::new("Payee", creditor(), 1, format!("E2E-{i}")));
 
-    let builder = Pain001Builder::new("Acme GmbH", "BULK").add_group(
-        CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20")).add_entries(entries),
-    );
+    let builder = Pain001Builder::new("Acme GmbH", "BULK", "2026-07-15T09:00:00".parse().unwrap())
+        .add_group(
+            CreditTransferGroup::new("Acme GmbH", &debtor(), date("2026-07-20"))
+                .add_entries(entries),
+        );
 
     assert_eq!(builder.entry_count(), 10_000);
     assert_eq!(builder.total_ct(), 10_000);
@@ -3012,4 +3170,253 @@ fn every_emitted_text_value_is_within_its_max_text_bound() {
             }
         }
     }
+}
+
+// ── spec 019: caller-owned creation time, log-safe account identifiers ────────
+
+#[test]
+fn sr005_identical_inputs_build_byte_identical_messages() {
+    // Every outgoing message, built twice from identical inputs: nothing may
+    // depend on when the build ran.
+    type Build = (&'static str, fn() -> String, &'static str);
+    let builds: [Build; 4] = [
+        (
+            "pain.001",
+            maximal_credit_transfer,
+            "<CreDtTm>2026-07-15T09:00:00</CreDtTm>",
+        ),
+        (
+            "pain.008",
+            maximal_direct_debit,
+            "<CreDtTm>2026-07-15T09:00:00</CreDtTm>",
+        ),
+        (
+            "pain.007",
+            maximal_reversal,
+            "<CreDtTm>2026-07-15T09:00:00</CreDtTm>",
+        ),
+        (
+            "camt.055",
+            maximal_cancellation,
+            "<CreDtTm>2026-07-15T11:30:00</CreDtTm>",
+        ),
+    ];
+    let first: Vec<String> = builds.iter().map(|(_, build, _)| build()).collect();
+    // Cross a second boundary, the resolution of `CreDtTm`.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    for ((name, build, stamp), first) in builds.iter().zip(first) {
+        assert_eq!(first, build(), "{name} must not depend on the wall clock");
+        assert!(
+            first.contains(stamp),
+            "{name} must carry the supplied CreDtTm"
+        );
+    }
+}
+
+#[test]
+fn sr005_creation_time_is_emitted_exactly_as_supplied() {
+    for stamp in [
+        "2026-07-15T09:00:00",
+        "2026-07-15T09:00:00Z",
+        "2026-07-15T09:00:00+02:00",
+    ] {
+        let builder = Pain008Builder::new("Acme", "DD-1", stamp.parse().unwrap()).add_group(
+            DirectDebitGroup::new("Acme", &debtor(), &creditor_id(), date("2026-07-20")).add_entry(
+                DirectDebitEntry::new("MND-1", date("2024-06-01"), "Max", creditor(), 100, "E2E-1"),
+            ),
+        );
+        assert_eq!(builder.created_at().to_string(), stamp);
+        let xml = builder.build().unwrap();
+        assert!(
+            xml.contains(&format!("<CreDtTm>{stamp}</CreDtTm>")),
+            "{stamp}"
+        );
+        // A recall derived from the builder quotes the same moment.
+        let recall = sepa::Camt055Builder::new(
+            "CXL-1",
+            "2026-07-16T08:00:00".parse().unwrap(),
+            "Acme",
+            "COBADEFFXXX".parse::<sepa::Bic>().unwrap(),
+            sepa::OriginalMessage::from_direct_debit(&builder),
+        )
+        .cancel_whole_message(sepa::CancellationReason::Dupl)
+        .build()
+        .unwrap();
+        assert!(
+            recall.contains(&format!("<OrgnlCreDtTm>{stamp}</OrgnlCreDtTm>")),
+            "{stamp}"
+        );
+    }
+}
+
+#[test]
+fn sr005_the_library_never_reads_the_clock_implicitly() {
+    // The only clock reads are the two helpers a caller invokes explicitly.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut reads = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or_default();
+            for needle in [
+                "SystemTime::now",
+                "Instant::now",
+                "IsoDateTime::now(",
+                "IsoDate::today(",
+            ] {
+                if code.contains(needle) {
+                    reads.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                }
+            }
+        }
+    }
+    // date.rs defines the two helpers (and tests them); nothing else may call them.
+    let unexpected: Vec<_> = reads
+        .iter()
+        .filter(|r| !r.contains("src/date.rs:"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "implicit clock reads: {unexpected:#?}"
+    );
+    assert_eq!(
+        reads
+            .iter()
+            .filter(|r| r.contains("SystemTime::now()"))
+            .count(),
+        2
+    );
+}
+
+const LOGGED_IBANS: [&str; 2] = ["DE89370400440532013000", "NL91ABNA0417164300"];
+
+fn assert_no_account_number(what: &str, shown: &str) {
+    for iban in LOGGED_IBANS {
+        let grouped = validate_iban(iban).unwrap().to_string();
+        // The middle of the account number is what must never appear.
+        assert!(
+            !shown.contains(&iban[4..14]),
+            "{what} leaks {iban}: {shown}"
+        );
+        assert!(
+            !shown.contains(&grouped[5..14]),
+            "{what} leaks {grouped}: {shown}"
+        );
+    }
+}
+
+#[test]
+fn sr001_builder_inputs_debug_format_without_account_numbers() {
+    let group = DirectDebitGroup::new("Acme", &debtor(), &creditor_id(), date("2026-07-20"));
+    let entry = DirectDebitEntry::new("MND-1", date("2024-06-01"), "Max", creditor(), 100, "E2E-1")
+        .with_amendment(sepa::MandateAmendment::debtor_iban_changed(debtor()));
+    let builder = Pain008Builder::new("Acme", "DD-1", "2026-07-15T09:00:00".parse().unwrap())
+        .add_group(group.clone().add_entry(entry.clone()));
+    let transfer = Pain001Builder::new("Acme", "CT-1", "2026-07-15T09:00:00".parse().unwrap())
+        .add_group(
+            CreditTransferGroup::new("Acme", &debtor(), date("2026-07-20"))
+                .add_entry(CreditTransferEntry::new("Shop", creditor(), 100, "E2E-1")),
+        );
+    for (what, shown) in [
+        ("group", format!("{group:?}")),
+        ("entry", format!("{entry:#?}")),
+        ("pain.008 builder", format!("{builder:?}")),
+        ("pain.001 builder", format!("{transfer:#?}")),
+    ] {
+        assert_no_account_number(what, &shown);
+        assert!(
+            shown.contains("Iban(DE…3000)") || shown.contains("Iban(NL…4300)"),
+            "{shown}"
+        );
+    }
+}
+
+#[test]
+fn sr002_parsed_reports_debug_format_without_account_numbers() {
+    let statement = CAMT053_BATCH.replace(
+        "<RltdPties><Dbtr><Pty><Nm>Kunde Eins</Nm></Pty></Dbtr></RltdPties>",
+        "<RltdPties><Dbtr><Pty><Nm>Kunde Eins</Nm></Pty></Dbtr>\
+         <DbtrAcct><Id><IBAN>NL91ABNA0417164300</IBAN></Id></DbtrAcct></RltdPties>",
+    );
+    let doc = parse_camt053(&statement).unwrap();
+    let stmt = &doc.statements[0];
+    let detail = &stmt.entries[0].details[0];
+    assert_eq!(stmt.account.iban.as_deref(), Some("DE89370400440532013000"));
+    assert_eq!(
+        detail.counterparty_iban.as_deref(),
+        Some("NL91ABNA0417164300")
+    );
+    let iban = detail.counterparty_iban.as_ref().unwrap().iban().unwrap();
+    assert_eq!(iban.country_code(), "NL");
+    assert_no_account_number("camt.053", &format!("{doc:?}"));
+    assert_no_account_number("camt.053 pretty", &format!("{doc:#?}"));
+
+    let report = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>RESP-1</MsgId><CreDtTm>2026-07-21T09:00:00</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>DD-1</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>DD-1</OrgnlPmtInfId>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>E2E-1</OrgnlEndToEndId>
+        <TxSts>RJCT</TxSts>
+        <OrgnlTxRef>
+          <Dbtr><Pty><Nm>Max</Nm></Pty></Dbtr>
+          <DbtrAcct><Id><IBAN>de89 3704 0044 0532 0130 00</IBAN></Id></DbtrAcct>
+          <Cdtr><Pty><Nm>Acme</Nm></Pty></Cdtr>
+          <CdtrAcct><Id><IBAN>NL91ABNA0417164300</IBAN></Id></CdtrAcct>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>"#;
+    let doc = parse_pain002(report).unwrap();
+    let tx = &doc.payment_info_statuses[0].transactions[0];
+    // Exact text, as reported — lowercase and spaced — and a typed view on demand.
+    let debtor_id = tx.original_debtor_iban.as_ref().unwrap();
+    assert_eq!(debtor_id, "de89 3704 0044 0532 0130 00");
+    assert_eq!(debtor_id.iban().unwrap(), debtor());
+    assert_eq!(
+        tx.original_creditor_iban.as_deref(),
+        Some("NL91ABNA0417164300")
+    );
+    let shown = format!("{doc:?}");
+    assert_no_account_number("pain.002", &shown);
+    assert!(!shown.contains("3704 0044 0532"), "{shown}");
+}
+
+#[test]
+fn sr004_errors_never_print_a_callers_account_number() {
+    // A build failure on a message full of IBANs.
+    let err = Pain008Builder::new("Acme", "DD-1", "2026-07-15T09:00:00".parse().unwrap())
+        .add_group(
+            DirectDebitGroup::new("Acme", &debtor(), &creditor_id(), date("2026-07-20")).add_entry(
+                DirectDebitEntry::new("MND-1", date("2024-06-01"), "Max", creditor(), 0, "E2E-1"),
+            ),
+        )
+        .build()
+        .unwrap_err();
+    assert_no_account_number("BuildError", &format!("{err} {err:?}"));
+
+    // IBAN validation failures.
+    for bad in [
+        "DE89370400440532013001",
+        "DE8937O400440532013000",
+        "NL91ABNA041716430",
+    ] {
+        let err = validate_iban(bad).unwrap_err();
+        assert!(!format!("{err} {err:?}").contains(&bad[4..14]), "{err:?}");
+    }
+
+    // Reader failures on documents that contain account numbers.
+    let truncated = &CAMT053_BATCH[..CAMT053_BATCH.find("</IBAN>").unwrap()];
+    let err = parse_camt053(truncated).unwrap_err();
+    assert_no_account_number("Camt053ParseError", &format!("{err} {err:?}"));
+    let wrong_family = CAMT053_BATCH.replace("camt.053.001.08", "camt.052.001.08");
+    let err = parse_camt053(&wrong_family).unwrap_err();
+    assert_no_account_number("Camt053ParseError", &format!("{err} {err:?}"));
 }

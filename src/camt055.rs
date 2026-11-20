@@ -69,12 +69,17 @@
 //!     .add_entry(DirectDebitEntry::new(
 //!         "MND-1", "2024-06-01".parse()?, "Max Mustermann", iban.clone(), 7_500, "E2E-1",
 //!     ));
-//! let submitted = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001").add_group(group.clone());
+//! let submitted = Pain008Builder::new(
+//!     "Stadtwerke GmbH",
+//!     "DD-2026-07-001",
+//!     "2026-07-15T09:00:00".parse()?,
+//! ).add_group(group.clone());
 //! let _ = submitted.build()?;
 //!
 //! // One collection in it was a duplicate. Recall that one, not the file.
 //! let recall = Camt055Builder::new(
 //!     "CXL-2026-07-001",
+//!     "2026-07-16T08:00:00".parse()?,
 //!     "Stadtwerke GmbH",
 //!     validate_bic("COBADEFFXXX")?,
 //!     OriginalMessage::from_direct_debit(&submitted),
@@ -334,11 +339,12 @@ pub struct OriginalMessage {
     pub message_id: String,
     /// `OrgnlMsgNmId` — its message identifier, e.g. `pain.008.001.08`.
     pub message_name_id: String,
-    /// `OrgnlCreDtTm` — its `GrpHdr/CreDtTm`, when it was pinned.
+    /// `OrgnlCreDtTm` — its `GrpHdr/CreDtTm`.
     ///
-    /// `None` when the sender did not pin one: a re-derived "now" would name a
-    /// different message than the one that was sent, which is the opposite of
-    /// what this element is for.
+    /// Always set by [`from_credit_transfer`](Self::from_credit_transfer) and
+    /// [`from_direct_debit`](Self::from_direct_debit). `None` only when you
+    /// describe a message by hand and do not know when it was created; it is
+    /// optional in the schema and never re-derived from the clock.
     pub created_at: Option<IsoDateTime>,
     /// `NbOfTxs` of the original message; the writer permits at most 15 digits.
     pub number_of_transactions: Option<u64>,
@@ -372,7 +378,7 @@ impl OriginalMessage {
         Self {
             message_id: builder.message_id().to_owned(),
             message_name_id: builder.schema_version().message_id().to_owned(),
-            created_at: builder.creation_timestamp(),
+            created_at: Some(builder.created_at()),
             number_of_transactions: Some(builder.entry_count() as u64),
             control_sum_ct: Some(builder.total_ct()),
         }
@@ -384,7 +390,7 @@ impl OriginalMessage {
         Self {
             message_id: builder.message_id().to_owned(),
             message_name_id: builder.schema_version().message_id().to_owned(),
-            created_at: builder.creation_timestamp(),
+            created_at: Some(builder.created_at()),
             number_of_transactions: Some(builder.entry_count() as u64),
             control_sum_ct: Some(builder.total_ct()),
         }
@@ -756,7 +762,7 @@ pub struct Camt055Builder {
     assignment_id: String,
     assigner: CaseParty,
     assignee: CaseParty,
-    created_at: Option<IsoDateTime>,
+    created_at: IsoDateTime,
     case_id: Option<String>,
     original: OriginalMessage,
     whole_message: Option<CancellationReason>,
@@ -771,6 +777,7 @@ impl Camt055Builder {
     /// `assignment_id` identifies this request — it is what a
     /// [`camt.029`](crate::camt029) answer echoes back, so it has to come from
     /// a sequence that survives a restart, exactly as a `MsgId` does.
+    /// `created_at` is `Assgnmt/CreDtTm`, emitted exactly as given.
     ///
     /// `assigner` is the party asking (a `&str` becomes a named party) and
     /// `assignee` the one asked (a [`Bic`] becomes an agent).
@@ -780,6 +787,7 @@ impl Camt055Builder {
     )]
     pub fn new(
         assignment_id: impl Into<String>,
+        created_at: IsoDateTime,
         assigner: impl Into<CaseParty>,
         assignee: impl Into<CaseParty>,
         original: OriginalMessage,
@@ -788,7 +796,7 @@ impl Camt055Builder {
             assignment_id: assignment_id.into(),
             assigner: assigner.into(),
             assignee: assignee.into(),
-            created_at: None,
+            created_at,
             case_id: None,
             original,
             whole_message: None,
@@ -798,14 +806,16 @@ impl Camt055Builder {
         }
     }
 
-    /// Pin `Assgnmt/CreDtTm`.
-    ///
-    /// The same single clock read the payment builders have: left unset,
-    /// `build()` stamps [`IsoDateTime::now`].
+    /// The `Assgnmt/Id` this request will carry.
     #[must_use]
-    pub fn created_at(mut self, timestamp: IsoDateTime) -> Self {
-        self.created_at = Some(timestamp);
-        self
+    pub fn assignment_id(&self) -> &str {
+        &self.assignment_id
+    }
+
+    /// The `Assgnmt/CreDtTm` this request will carry, exactly as supplied.
+    #[must_use]
+    pub const fn created_at(&self) -> IsoDateTime {
+        self.created_at
     }
 
     /// Open a `Case` with this identifier, created by the assigner.
@@ -1042,7 +1052,7 @@ impl Camt055Builder {
     }
 
     fn write_xml_to<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
-        let now = self.created_at.unwrap_or_else(IsoDateTime::now);
+        let now = self.created_at;
 
         w.write_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
         writeln!(w, "<Document xmlns=\"{NAMESPACE}\">")?;
@@ -1147,34 +1157,37 @@ mod tests {
         validate_bic("COBADEFFXXX").unwrap()
     }
     fn submitted() -> Pain008Builder {
-        Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-            .created_at("2026-07-15T09:00:00".parse().unwrap())
-            .add_group(
-                DirectDebitGroup::new(
-                    "Stadtwerke GmbH",
-                    &iban(),
-                    &validate_creditor_id("DE98ZZZ09999999999").unwrap(),
-                    d("2026-07-20"),
-                )
-                .payment_info_id("PMT-A")
-                .add_entry(DirectDebitEntry::new(
-                    "MND-1",
-                    d("2024-06-01"),
-                    "Max Mustermann",
-                    iban(),
-                    7_500,
-                    "E2E-1",
-                )),
+        Pain008Builder::new(
+            "Stadtwerke GmbH",
+            "DD-2026-07-001",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            DirectDebitGroup::new(
+                "Stadtwerke GmbH",
+                &iban(),
+                &validate_creditor_id("DE98ZZZ09999999999").unwrap(),
+                d("2026-07-20"),
             )
+            .payment_info_id("PMT-A")
+            .add_entry(DirectDebitEntry::new(
+                "MND-1",
+                d("2024-06-01"),
+                "Max Mustermann",
+                iban(),
+                7_500,
+                "E2E-1",
+            )),
+        )
     }
     fn recall() -> Camt055Builder {
         Camt055Builder::new(
             "CXL-1",
+            "2026-07-15T11:30:00".parse().unwrap(),
             "Stadtwerke GmbH",
             bank(),
             OriginalMessage::from_direct_debit(&submitted()),
         )
-        .created_at("2026-07-15T11:30:00".parse().unwrap())
     }
 
     #[test]
@@ -1212,10 +1225,16 @@ mod tests {
             Some("2026-07-15T09:00:00")
         );
 
-        let xml = Camt055Builder::new("CXL-1", "Stadtwerke GmbH", bank(), original)
-            .cancel_whole_message(CancellationReason::Tech)
-            .build()
-            .unwrap();
+        let xml = Camt055Builder::new(
+            "CXL-1",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "Stadtwerke GmbH",
+            bank(),
+            original,
+        )
+        .cancel_whole_message(CancellationReason::Tech)
+        .build()
+        .unwrap();
         assert!(xml.contains("<OrgnlMsgId>DD-2026-07-001</OrgnlMsgId>"));
         assert!(xml.contains("<OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>"));
         assert!(xml.contains("<OrgnlCreDtTm>2026-07-15T09:00:00</OrgnlCreDtTm>"));
@@ -1223,20 +1242,36 @@ mod tests {
     }
 
     #[test]
-    fn an_unpinned_creation_timestamp_is_not_invented() {
-        // `from_direct_debit` on a builder with no `created_at` must leave
-        // `OrgnlCreDtTm` out rather than stamping "now" — the element names the
-        // moment the *original* was created, and that moment is gone.
-        let unpinned = Pain008Builder::new("Acme", "DD-9");
-        assert_eq!(
-            OriginalMessage::from_direct_debit(&unpinned).created_at,
-            None
-        );
+    fn a_recall_always_quotes_the_original_creation_time() {
+        // Derived from a builder, `OrgnlCreDtTm` is the time that builder
+        // emitted — there is no unpinned builder left to lose it.
+        let original = Pain008Builder::new("Acme", "DD-9", "2026-07-15T09:00:00".parse().unwrap());
+        let quoted = OriginalMessage::from_direct_debit(&original);
+        assert_eq!(quoted.created_at, Some(original.created_at()));
         let xml = Camt055Builder::new(
             "CXL-9",
+            "2026-07-16T08:00:00".parse().unwrap(),
             "Acme",
             bank(),
-            OriginalMessage::from_direct_debit(&unpinned),
+            quoted,
+        )
+        .cancel_whole_message(CancellationReason::Cust)
+        .build()
+        .unwrap();
+        assert!(xml.contains("<OrgnlCreDtTm>2026-07-15T09:00:00</OrgnlCreDtTm>"));
+        assert!(xml.contains("<CreDtTm>2026-07-16T08:00:00</CreDtTm>"));
+    }
+
+    #[test]
+    fn a_hand_described_original_without_a_time_omits_it() {
+        // Described by hand, an unknown creation time is left out rather than
+        // invented: the element names the moment the original was created.
+        let xml = Camt055Builder::new(
+            "CXL-9",
+            "2026-07-16T08:00:00".parse().unwrap(),
+            "Acme",
+            bank(),
+            OriginalMessage::new("DD-9", "pain.008.001.08"),
         )
         .cancel_whole_message(CancellationReason::Cust)
         .build()
@@ -1468,6 +1503,7 @@ mod tests {
         let modern = validate_bic("E097DEFF").unwrap();
         let err = Camt055Builder::new(
             "CXL-1",
+            "2026-07-15T09:00:00".parse().unwrap(),
             "Acme",
             modern,
             OriginalMessage::new("DD-1", "pain.008.001.08"),

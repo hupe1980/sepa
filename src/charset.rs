@@ -323,8 +323,8 @@ mod tests {
 
     #[test]
     fn the_capital_sharp_s_expands_in_upper_case() {
-        // Regression: U+1E9E shared an arm with 'ß' and produced "ss", so an
-        // upper-cased name came back mixed-case — "STRAssE" on the statement.
+        // U+1E9E expands to "SS", not "ss" like 'ß', so an upper-cased name
+        // stays upper-case — not "STRAssE" on the statement.
         assert_eq!(transliterate("STRAẞE", Transliteration::German), "STRASSE");
         assert_eq!(transliterate("straße", Transliteration::German), "strasse");
         // The EPC table is one-to-one for both cases and keeps them apart too.
@@ -403,7 +403,7 @@ mod tests {
         // and is already SEPA-legal are omitted". A row for a legal character
         // means the transcription slipped — and it is invisible in normal use,
         // because `transliterate` short-circuits on `is_sepa_char` before ever
-        // consulting the table. Regression: U+0020 SPACE was mapped to '.'.
+        // consulting the table (U+0020 SPACE mapped to '.' would go unnoticed).
         for (cp, replacement) in crate::charset_table::EPC_CONVERSION_TABLE {
             if let Some(ch) = char::from_u32(*cp) {
                 assert!(

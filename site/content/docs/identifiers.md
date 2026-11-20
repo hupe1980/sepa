@@ -4,9 +4,9 @@ description = "Validate IBANs, BICs, SEPA Creditor Identifiers and ISO 11649 RF 
 weight = 2
 +++
 
-Constructors, string parsing and optional serde restoration share the checks
-for these identifier types. Validity establishes the recorded format and
-checksum rules, not allocation, account existence or reachability.
+Constructors, string parsing and serde restoration run the same checks.
+Validity covers format and checksum rules, not allocation, account existence or
+reachability.
 
 | Type | Standard | What is checked |
 |---|---|---|
@@ -17,9 +17,8 @@ checksum rules, not allocation, account existence or reachability.
 
 ## IBAN: the checksum is the easy half
 
-A checksum alone does not establish national structure. The SWIFT IBAN Registry
-records `8!n10!n` for Germany and `4!a10!n` for the Netherlands; each BBAN
-character is checked against the recorded pattern:
+Each BBAN character is checked against the SWIFT IBAN Registry structure —
+`8!n10!n` for Germany, `4!a10!n` for the Netherlands:
 
 ```rust
 use sepa::iban::{BbanCharClass, IbanError};
@@ -46,25 +45,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The error names the **position**, the character class the registry requires and
-the country's structure string — enough to point an operator at the keystroke to
-fix.
+The error names the **position**, the required character class and the
+country's structure string.
 
-Three details worth knowing:
-
-- **89 countries** are in the registry, checked in CI against the 78 real
-  example IBANs SWIFT publishes, so a transcription slip fails the build rather
-  than a payment.
-- **Length comes from the structure**, not a second table, so the two cannot
-  disagree.
-- **A country outside the registry** gets mod-97 and a length range and nothing
-  more. The crate does not invent a structure it has not been given.
+- **89 countries** are in the registry, tested against SWIFT's 78 published
+  example IBANs.
+- **Length is derived from the structure**, not a separate table.
+- **A country outside the registry** gets mod-97 and a length range only.
 
 ### Building one from a bank code and an account number
 
-The check digits are derivable, so there is no reason to paste a snippet for
-them — and doing it through `Iban::from_bban` means the result still has to pass
-the registry structure, which a bare `98 − n mod 97` does not:
+`Iban::from_bban` computes the check digits and still applies the registry
+structure:
 
 ```rust
 use sepa::{Iban, iban::{iban_check_digits, IbanError}};
@@ -88,9 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Being a valid IBAN is not being reachable
 
-`is_sepa()` answers a different question: whether the country participates in
-the SEPA schemes at all. Forty-two do; plenty of structurally perfect IBANs are
-not among them.
+`is_sepa()` reports whether the country participates in the SEPA schemes
+(42 do).
 
 ```rust
 use sepa::validate_iban;
@@ -129,21 +120,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`NOTPROVIDED` is rejected on purpose. It is what the EPC puts in `DbtrAgt` when
-no agent is known, it passes an XSD exactly like a real BIC, and treating it as
-one addresses a bank that does not exist. The builders emit it only in the
-`Othr/Id` position the guidelines specify, never in a `BIC` element.
+`NOTPROVIDED` is the EPC placeholder for an unknown debtor agent. It passes the
+XSD BIC pattern, so `validate_bic` rejects it explicitly; the builders emit it
+only in the `Othr/Id` position the guidelines specify.
 
-### The prefix is alphanumeric, and being stricter is not being safer
+### Alphanumeric prefixes and schema patterns
 
-ISO 9362:2022 widened the business party prefix — the first four characters —
-from letters to **alphanumerics**, and SWIFT allocates BICs under it. Any
-validator still testing `[A-Z]{6}` for the first six characters rejects a real
-BIC, which is a loud failure the payer sees.
-
-ISO 20022 tracks the same split, and this crate emits messages on both sides of
-it. So `validate_bic` accepts the current standard, and *which schema can hold a
-given BIC* is a separate question the builders ask:
+ISO 9362:2022 widened the business party prefix (the first four characters) from
+letters to **alphanumerics**, and SWIFT allocates BICs under it. `validate_bic`
+accepts the current standard; whether a given schema can hold the BIC is checked
+separately:
 
 ```rust
 use sepa::{BicPattern, validate_bic};
@@ -159,15 +145,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Put a BIC the older schema cannot hold into a `pain.008.001.02` batch and
-`build()` refuses it by name, rather than emitting a document `xmllint` would
-reject at the bank.
-
-The element name is **not** the signal: `pain.008.001.08` writes `BICFI` over
-the wide pattern, `pain.008.001.02` writes `BIC` over the narrow one, and
-`camt.055.001.05` writes `BICFI` over the *narrow* one. Two different ISO 20022
-types are even named `BICFIIdentifier` with different patterns, which is why a
-violation reports the pattern rather than a type name.
+`build()` rejects a BIC the selected schema cannot hold. The element name is
+**not** the signal: `pain.008.001.08` writes `BICFI` with the wide pattern,
+`pain.008.001.02` writes `BIC` with the narrow one, and `camt.055.001.05` writes
+`BICFI` with the *narrow* one. Two ISO 20022 types named `BICFIIdentifier` have
+different patterns, so a violation reports the pattern, not a type name.
 
 ## Creditor Identifier: not an IBAN, and not checked like one
 
@@ -183,9 +165,8 @@ DE98ZZZ09999999999
 └───────── country code
 ```
 
-Applying the IBAN rule instead — whole string, expected remainder 1 — rejects
-every genuine Creditor Identifier, because it folds `ZZZ` into the sum. It is
-the single most common way a home-grown AT-02 implementation goes wrong.
+Applying the IBAN rule to the whole string instead rejects every genuine
+Creditor Identifier, because it folds `ZZZ` into the sum.
 
 ```rust
 use sepa::validate_creditor_id;
@@ -205,10 +186,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## RF references: the identifier designed to come back
 
-An ISO 11649 RF Creditor Reference is the one identifier here built to make a
-round trip: you put it on the invoice, the debtor's bank carries it in
-`RmtInf/Strd/CdtrRefInf/Ref`, and it returns on your camt statement — so the
-payment matches the invoice with nobody reading anything.
+An ISO 11649 RF Creditor Reference goes on the invoice, travels in
+`RmtInf/Strd/CdtrRefInf/Ref`, and returns on your camt statement, so the payment
+can be matched to the invoice automatically.
 
 ```rust
 use sepa::RfReference;
@@ -229,10 +209,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Attach it with `with_reference(…)` on a credit transfer or a direct debit and
-the crate writes the block the EPC requires — including the two spellings
-implementations routinely get wrong: the element is `CdOrPrtry` (capital `O`),
-and `Issr` must be `ISO` when `Ref` carries an RF reference.
+Attach it with `with_reference(…)` on a credit transfer or direct debit; the
+crate writes the EPC block, including `CdOrPrtry` (capital `O`) and `Issr` =
+`ISO`.
+
+## Logging and personal data
+
+An IBAN is personal data, and `Debug` is what lands in logs, panics, test
+output and tracing fields. So `Iban` debug-formats masked — the country and
+the last four characters, enough to recognise an account, not enough to debit
+one. `Display`, `as_str()` and serde still give the full value, so you only
+ever print an account number on purpose.
+
+Bank reports keep account identifiers exactly as the bank sent them —
+lowercase, spaced or a proprietary `Othr/Id` — as an `AccountId`, masked the
+same way, with `iban()` for a checked view:
+
+```rust
+use sepa::{AccountId, Iban};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let iban: Iban = "DE89370400440532013000".parse()?;
+    assert_eq!(format!("{iban:?}"), "Iban(DE…3000)");
+    assert_eq!(iban.to_string(), "DE89 3704 0044 0532 0130 00"); // on purpose
+
+    let reported = AccountId::new("de89 3704 0044 0532 0130 00");
+    assert_eq!(format!("{reported:?}"), "AccountId(de…0 00)");
+    assert_eq!(reported.iban()?, iban);
+    Ok(())
+}
+```
+
+Identifiers shorter than twelve characters are masked entirely. Every record
+holding an `Iban` or `AccountId` inherits the masking, and errors never carry
+the values that caused them. Names, postal addresses, remittance text and
+mandate references are not masked — redacting them would make `Debug` useless
+for debugging — so redact those in your logging layer if logs leave the trust
+boundary your payment data lives in.
 
 ## Where they come from
 

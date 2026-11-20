@@ -508,9 +508,8 @@ mod tests {
 
     #[test]
     fn a_proprietary_issuer_is_length_checked_and_transliterated() {
-        // Regression: `Tp/Issr` was neither validated nor put through the
-        // charset policy, so any text at all reached the wire — non-SEPA
-        // characters included, and with no `Max35Text` bound.
+        // `Tp/Issr` is free text on the wire, so it gets the same `Max35Text`
+        // bound and charset policy as every other text field.
         use crate::validate::CharsetPolicy;
 
         let long = RemittanceInfo::Proprietary {
@@ -810,9 +809,9 @@ mod tests {
 
     #[test]
     fn the_limit_binds_on_the_transliterated_text_not_the_input() {
-        // Regression: 140 characters of German went in, `Mueller`-style
-        // expansion pushed it past 140, and the writer silently cut the tail —
-        // which is where an invoice number tends to sit.
+        // `Mueller`-style expansion can push 140 characters of German past
+        // 140. That is an error, not a silent cut of the tail — which is where
+        // an invoice number tends to sit.
         let policy = crate::validate::CharsetPolicy::default();
         let input = format!("{}ü", "A".repeat(139)); // 140 chars in, 141 out
         assert_eq!(input.chars().count(), 140);

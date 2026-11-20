@@ -786,8 +786,8 @@ pub struct EntryDetail {
     pub reference: Option<String>,
     /// Counterparty name (debtor for credits; creditor for debits).
     pub counterparty_name: Option<String>,
-    /// Counterparty IBAN.
-    pub counterparty_iban: Option<String>,
+    /// Counterparty IBAN, exactly as reported (`Debug` masks it).
+    pub counterparty_iban: Option<crate::AccountId>,
     /// ISO 20022 return reason code, when this transaction is a return.
     pub return_reason_code: Option<String>,
     /// `TxDtls/RtrInf/AddtlInf` — the bank's free text about the return.
@@ -1077,9 +1077,9 @@ impl Charges {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AccountRef {
     /// `Acct/Id/IBAN`, when the account is IBAN-addressable.
-    pub iban: Option<String>,
+    pub iban: Option<crate::AccountId>,
     /// `Acct/Id/Othr/Id` — the proprietary alternative to an IBAN.
-    pub other_id: Option<String>,
+    pub other_id: Option<crate::AccountId>,
     /// `Acct/Ccy` — the currency the account is denominated in.
     ///
     /// Worth checking before treating an entry amount as EUR: camt is not a
@@ -1095,8 +1095,8 @@ impl AccountRef {
     /// For display and logging. Match on [`iban`](Self::iban) directly when the
     /// distinction matters — only an IBAN can be validated or paid to.
     #[must_use]
-    pub fn any_id(&self) -> Option<&str> {
-        self.iban.as_deref().or(self.other_id.as_deref())
+    pub fn any_id(&self) -> Option<&crate::AccountId> {
+        self.iban.as_ref().or(self.other_id.as_ref())
     }
 
     fn parse(node: &Node) -> Self {
@@ -1105,10 +1105,12 @@ impl AccountRef {
         };
         let id = acct.child("Id");
         Self {
-            iban: id.and_then(|i| i.text_of("IBAN")).map(str::to_owned),
+            iban: id
+                .and_then(|i| i.text_of("IBAN"))
+                .map(crate::AccountId::from),
             other_id: id
                 .and_then(|i| i.text_at(&["Othr", "Id"]))
-                .map(str::to_owned),
+                .map(crate::AccountId::from),
             currency: acct.text_of("Ccy").map(str::to_owned),
             servicer_bic: acct.child("Svcr").and_then(agent_bic).map(str::to_owned),
         }
@@ -1285,8 +1287,8 @@ impl CashEntry {
 
     /// Counterparty IBAN of the first detail.
     #[must_use]
-    pub fn counterparty_iban(&self) -> Option<&str> {
-        self.first_detail()?.counterparty_iban.as_deref()
+    pub fn counterparty_iban(&self) -> Option<&crate::AccountId> {
+        self.first_detail()?.counterparty_iban.as_ref()
     }
 
     /// Return reason code of the first detail.
@@ -1603,7 +1605,7 @@ pub(crate) fn parse_detail(td: &Node, entry: &EntryContext<'_>) -> EntryDetail {
         counterparty_name: party_name(parties, name_tag),
         counterparty_iban: parties
             .and_then(|p| p.text_at(&[acct_tag, "Id", "IBAN"]))
-            .map(str::to_owned),
+            .map(crate::AccountId::from),
         return_reason_code: td
             .path(&["RtrInf", "Rsn"])
             .and_then(Node::code)
@@ -2002,10 +2004,10 @@ mod tests {
 
     #[test]
     fn a_batch_of_one_is_still_a_batch() {
-        // Regression: `batch_booked` was `TxDtls count > 1`, so a single-
-        // transaction collection run read as an ordinary payment — and the
-        // entry total was then attributed to the one itemised detail even
-        // though the bank said it aggregated three.
+        // `batch_booked` follows the bank's `Btch`, not the `TxDtls` count: a
+        // collection run with one itemised detail is still a batch, and the
+        // entry total is not attributed to that detail when the bank says it
+        // aggregated three.
         let e = entry(
             r#"<Ntry>
                  <Amt Ccy="EUR">125.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
@@ -2041,7 +2043,7 @@ mod tests {
     fn the_banks_free_text_survives_at_both_levels() {
         // `AddtlNtryInf` is where several German banks put the statement text,
         // and for an entry with no NtryDtls it is the only description there
-        // is. Both it and `AddtlTxInf` used to be dropped on the floor.
+        // is. Both it and `AddtlTxInf` are kept.
         let e = entry(
             r#"<Ntry>
                  <Amt Ccy="EUR">75.00</Amt><CdtDbtInd>DBIT</CdtDbtInd>
@@ -2069,9 +2071,9 @@ mod tests {
 
     #[test]
     fn a_remittance_split_across_several_ustrd_is_read_whole() {
-        // Regression: only the first `Ustrd` was read. German banks split a
-        // long Verwendungszweck into 35-character occurrences, so the invoice
-        // number — which usually sits at the end — was being thrown away.
+        // German banks split a long Verwendungszweck into 35-character `Ustrd`
+        // occurrences, and the invoice number usually sits at the end, so all
+        // of them are read.
         let e = entry(
             r#"<Ntry>
                  <Amt Ccy="EUR">75.00</Amt><CdtDbtInd>CRDT</CdtDbtInd>

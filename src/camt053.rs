@@ -371,7 +371,10 @@ mod tests {
         assert_eq!(e.end_to_end_id(), Some("E2E-INV-2026"));
         assert_eq!(e.reference(), Some("Invoice 2026-07-001"));
         assert_eq!(e.counterparty_name(), Some("Max Mustermann GmbH"));
-        assert_eq!(e.counterparty_iban(), Some("NL91ABNA0417164300"));
+        assert_eq!(
+            e.counterparty_iban().map(crate::AccountId::as_str),
+            Some("NL91ABNA0417164300")
+        );
         assert!(!e.is_return());
         assert_eq!(e.signed_ct(), Some(15_542)); // credit = positive
     }
@@ -407,11 +410,17 @@ mod tests {
         assert_eq!(acct.other_id.as_deref(), Some("1234567890"));
         assert_eq!(acct.currency.as_deref(), Some("CHF"));
         assert_eq!(acct.servicer_bic.as_deref(), Some("POFICHBEXXX"));
-        assert_eq!(acct.any_id(), Some("1234567890"));
+        assert_eq!(
+            acct.any_id().map(crate::AccountId::as_str),
+            Some("1234567890")
+        );
 
         // An IBAN account still reports the IBAN, and `any_id` prefers it.
         let acct = &parse_camt053(CAMT053_EXAMPLE).unwrap().statements[0].account;
-        assert_eq!(acct.any_id(), Some("DE89370400440532013000"));
+        assert_eq!(
+            acct.any_id().map(crate::AccountId::as_str),
+            Some("DE89370400440532013000")
+        );
 
         // No Acct block at all is empty, not a panic or an invented value.
         let bare = "<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:camt.053.001.08\"><BkToCstmrStmt><Stmt><Id>S</Id></Stmt></BkToCstmrStmt></Document>";
@@ -472,7 +481,10 @@ mod tests {
         assert_eq!(e.amount.direction, Some(CreditDebitIndicator::Debit));
         assert_eq!(e.signed_ct(), Some(-50_000)); // debit = negative
         assert_eq!(e.counterparty_name(), Some("Supplier AG"));
-        assert_eq!(e.counterparty_iban(), Some("NL91ABNA0417164300"));
+        assert_eq!(
+            e.counterparty_iban().map(crate::AccountId::as_str),
+            Some("NL91ABNA0417164300")
+        );
         assert_eq!(e.reference(), Some("Supplier invoice July"));
     }
 

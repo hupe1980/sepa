@@ -330,9 +330,8 @@ mod tests {
 
     #[test]
     fn iban_style_checksum_is_rejected() {
-        // Regression: applying the ISO 13616 (IBAN) rule to a CI accepts DE74
-        // and rejects the canonical DE98. Neither may happen.
-        // "DE74…" is what the old IBAN-style checksum wrongly accepted.
+        // Applying the ISO 13616 (IBAN) rule to a CI would accept DE74 and
+        // reject the canonical DE98. Neither may happen.
         assert!(validate_creditor_id(concat!("DE", "74", "ZZZ09999999999")).is_err());
         assert!(validate_creditor_id("DE98ZZZ09999999999").is_ok());
     }
@@ -379,9 +378,9 @@ mod tests {
 
     #[test]
     fn the_country_must_be_a_real_country() {
-        // Regression: the check digits are computed over the country code, so
-        // a `ZZ` identifier is internally consistent and used to validate. The
-        // registry is the only thing that rules it out.
+        // The check digits are computed over the country code, so a `ZZ`
+        // identifier is internally consistent. The registry is the only thing
+        // that rules it out.
         let forged = format!(
             "ZZ{}ZZZ09999999999",
             creditor_id_check_digits("09999999999", "ZZ")

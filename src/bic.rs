@@ -469,7 +469,8 @@ pub fn validate_bic(raw: &str) -> Result<Bic, BicError> {
             return Err(BicError::InvalidCharacter { ch, pos });
         }
     }
-    // Every character is now ASCII, so byte indices are character indices.
+    // Past this point every character is ASCII, so byte indices are character
+    // indices.
 
     // The pattern says "two letters"; only a country code addresses a bank.
     let country = &upper[4..6];
@@ -538,11 +539,10 @@ mod tests {
 
     #[test]
     fn an_alphanumeric_business_party_prefix_is_accepted() {
-        // Regression: the prefix was checked as `[A-Z]{4}`, which is the
-        // pre-2019 ISO 20022 pattern and *not* the standard. ISO 9362:2022
-        // §6.3.1 types it 4!c, SWIFT allocates BICs under it, and every
-        // message this crate emits by default uses BICFIDec2014Identifier —
-        // so rejecting one refused a BIC the schema accepts.
+        // `[A-Z]{4}` is the pre-2019 ISO 20022 pattern and *not* the standard.
+        // ISO 9362:2022 §6.3.1 types the prefix 4!c, SWIFT allocates BICs
+        // under it, and every message this crate emits by default uses
+        // BICFIDec2014Identifier — so the schema accepts these.
         for b in ["E097AEXX", "WG11US335AB", "C0BADEFF"] {
             let bic = validate_bic(b).unwrap_or_else(|e| panic!("{b} must validate: {e}"));
             assert!(bic.fits(BicPattern::Alphanumeric));
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_bic_is_marked_by_second_location_character() {
-        // Regression: the rule is position 8 (index 7), not position 7.
+        // The rule is position 8 (index 7), not position 7.
         assert!(validate_bic("DEUTDEF0").unwrap().is_test());
         assert!(!validate_bic("COBADEFF").unwrap().is_test());
     }

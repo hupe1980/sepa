@@ -7,28 +7,27 @@ weight = 1
 ## Install
 
 ```sh
-cargo add sepa@0.9
+cargo add sepa@0.10
 ```
 
-These guides target 0.9. For an unpublished checkout, use
+These guides target 0.10. For an unpublished checkout, use
 `cargo add sepa --path /path/to/sepa` instead.
 
-The crate needs Rust **1.88** or newer. Two dependencies are mandatory —
-`thiserror` and `quick-xml` — and three features are opt-in:
+The crate needs Rust **1.88** or newer. Its mandatory dependencies are
+`thiserror` and `quick-xml`; three features are opt-in:
 
 ```sh
-cargo add sepa@0.9 --features serde   # Supported values, payment inputs and reports
-cargo add sepa@0.9 --features time    # IsoDate <-> time::Date
-cargo add sepa@0.9 --features chrono  # IsoDate <-> chrono::NaiveDate
+cargo add sepa@0.10 --features serde   # Supported values, payment inputs and reports
+cargo add sepa@0.10 --features time    # IsoDate <-> time::Date
+cargo add sepa@0.10 --features chrono  # IsoDate <-> chrono::NaiveDate
 ```
 
-`time` and `chrono` are conversion-only. The crate's own calendar arithmetic is
-dependency-free, so dates behave identically whichever features are enabled.
+`time` and `chrono` are conversion-only; the crate's own date arithmetic does
+not depend on them.
 
 ## Validate before you build
 
-Identifiers are types, not strings. Constructing one runs the real checks, so
-everything downstream can assume they passed.
+Identifiers are types, not strings: constructing one runs the checks.
 
 ```rust
 use sepa::{validate_bic, validate_creditor_id, validate_iban};
@@ -51,8 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `as_str` gives the normalised value for the wire; `to_string` groups it in
 fours for display.
 
-IBAN validation also checks the registered BBAN structure. A checksum alone
-does not establish that each character belongs in its national position:
+IBAN validation also checks the registered national BBAN structure, not just
+the checksum:
 
 ```rust
 use sepa::iban::{BbanCharClass, IbanError};
@@ -85,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("DE89370400440532013000")?;
     let creditor = validate_iban("NL91ABNA0417164300")?;
 
-    let xml = Pain001Builder::new("Acme GmbH", "CT-2026-07-001")
+    let xml = Pain001Builder::new("Acme GmbH", "CT-2026-07-001", "2026-07-15T09:00:00".parse()?)
         .add_group(
             CreditTransferGroup::new("Acme GmbH", &debtor, IsoDate::new(2026, 7, 20)?)
                 .add_entry(
@@ -104,16 +103,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 point or a general currency minor-unit scale. `IsoDate::new` rejects impossible
 dates at construction.
 
-Message IDs and payment dates are required caller inputs. Supply durable IDs and
-choose dates using your banking calendar. `IsoDate::plus_days` performs calendar
-arithmetic, not banking-day scheduling. Pin `.created_at(...)` for reproducible
-output; otherwise the builder obtains the message creation timestamp from the clock.
+Message IDs, the creation timestamp and payment dates are caller inputs; choose
+dates with your banking calendar (`IsoDate::plus_days` is calendar arithmetic,
+not banking-day scheduling). The crate never reads the clock: record the
+creation timestamp with the run, or pass `IsoDateTime::now()` explicitly. The
+same inputs produce the same file byte for byte.
 
 ## Writing large files
 
-`build()` returns a `String`. For a batch of tens of thousands, stream it
-instead — validation still runs first, so a rejected batch leaves the target
-untouched rather than writing a truncated document.
+`build()` returns a `String`. For large batches, stream with `write_to`.
+Validation runs first, so a rejected batch leaves the target untouched.
 
 ```rust
 use sepa::Pain008Builder;
@@ -129,8 +128,8 @@ fn write_batch(builder: &Pain008Builder) -> Result<(), Box<dyn std::error::Error
 }
 ```
 
-Later I/O failure can leave a partial file. For atomic replacement, write a
-temporary file and rename it only after successful writing and flushing.
+An I/O failure while writing can leave a partial file; for atomic replacement,
+write to a temporary file and rename it after flushing.
 
 ## Next
 

@@ -99,12 +99,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_purpose(Purpose::Elec)
     .with_description("Abschlag Juli 2026");
 
-    let pain008 = Pain008Builder::new("Stadtwerke Muster GmbH", "DD-2026-07-001")
-        // Pinned, so the file regenerates byte-for-byte — and so a camt.055
-        // recall can quote the `OrgnlCreDtTm` the bank actually received.
-        .created_at("2026-07-15T09:00:00".parse()?)
-        .add_group(first_group.clone().add_entry(first_entry.clone()))
-        .add_group(recurring_group.clone().add_entry(recurring_entry.clone()));
+    // `CreDtTm` is the caller's, like `MsgId`: store it with the run, so the
+    // file regenerates byte-for-byte and a camt.055 recall can quote the
+    // `OrgnlCreDtTm` the bank actually received.
+    let pain008 = Pain008Builder::new(
+        "Stadtwerke Muster GmbH",
+        "DD-2026-07-001",
+        "2026-07-15T09:00:00".parse()?,
+    )
+    .add_group(first_group.clone().add_entry(first_entry.clone()))
+    .add_group(recurring_group.clone().add_entry(recurring_entry.clone()));
     let pain008_xml = pain008.build()?;
 
     println!("\n── pain.008 Direct Debit run ──");
@@ -122,10 +126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let recall_xml = Camt055Builder::new(
         "CXL-2026-07-001",
+        "2026-07-16T08:00:00".parse()?,
         "Stadtwerke Muster GmbH",     // Assgnr — you
         validate_bic("COBADEFFXXX")?, // Assgne — your bank
         // Copied from the builder that produced the file, not retyped: MsgId,
-        // the pinned CreDtTm and the totals all come across.
+        // its CreDtTm and the totals all come across.
         OriginalMessage::from_direct_debit(&pain008),
     )
     .case_id("CASE-2026-07-001")
@@ -184,8 +189,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pain007_xml = Pain007Builder::new(
         "Stadtwerke Muster GmbH",
-        "DD-2026-07-001",
         "STORNO-2026-07-001",
+        "2026-07-15T09:00:00".parse()?,
+        "DD-2026-07-001",
     )
     .creditor_agent(validate_bic("COBADEFFXXX")?)
     .add_group(
@@ -212,28 +218,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reference = RfReference::generate("ERSTATTUNG-2025-HUBER").expect("valid reference");
     println!("\nRF reference: {reference}"); // grouped for printing
 
-    let pain001_xml = Pain001Builder::new("Stadtwerke Muster GmbH", "CT-2026-07-001")
-        .add_group(
-            CreditTransferGroup::new(
-                "Stadtwerke Muster GmbH",
-                &creditor_iban,
-                IsoDate::new(2026, 7, 22)?,
-            )
-            .debtor_address(creditor_address)
-            .add_entry(
-                CreditTransferEntry::new(
-                    "Franz Huber",
-                    refund_iban,
-                    3_200, // 32.00 EUR Erstattung
-                    "ERSTATTUNG-2025",
-                )
-                .with_reference(reference)
-                // Hybrid: the town and country are structured, the rest is
-                // one free-text line.
-                .with_creditor_address(PostalAddress::new("Wien", "AT")?.line("Stephansplatz 3/2")),
-            ),
+    let pain001_xml = Pain001Builder::new(
+        "Stadtwerke Muster GmbH",
+        "CT-2026-07-001",
+        "2026-07-15T09:00:00".parse()?,
+    )
+    .add_group(
+        CreditTransferGroup::new(
+            "Stadtwerke Muster GmbH",
+            &creditor_iban,
+            IsoDate::new(2026, 7, 22)?,
         )
-        .build()?;
+        .debtor_address(creditor_address)
+        .add_entry(
+            CreditTransferEntry::new(
+                "Franz Huber",
+                refund_iban,
+                3_200, // 32.00 EUR Erstattung
+                "ERSTATTUNG-2025",
+            )
+            .with_reference(reference)
+            // Hybrid: the town and country are structured, the rest is
+            // one free-text line.
+            .with_creditor_address(PostalAddress::new("Wien", "AT")?.line("Stephansplatz 3/2")),
+        ),
+    )
+    .build()?;
 
     println!("\n── pain.001 Credit Transfer batch ──");
     println!("Total:   {}", sepa::ct_to_eur_str(3_200));
@@ -245,58 +255,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Validation and transliteration ────────────────────────────────────────
 
-    let umlaut_xml = Pain001Builder::new("Müller & Söhne GmbH", "CT-UMLAUT")
-        .add_group(
-            CreditTransferGroup::new(
-                "Müller & Söhne GmbH",
-                &creditor_iban,
-                IsoDate::new(2026, 7, 22)?,
-            )
-            .add_entry(CreditTransferEntry::new(
-                "Jörg Groß",
-                creditor_iban.clone(),
-                1_000,
-                "E2E-UMLAUT",
-            )),
+    let umlaut_xml = Pain001Builder::new(
+        "Müller & Söhne GmbH",
+        "CT-UMLAUT",
+        "2026-07-15T09:00:00".parse()?,
+    )
+    .add_group(
+        CreditTransferGroup::new(
+            "Müller & Söhne GmbH",
+            &creditor_iban,
+            IsoDate::new(2026, 7, 22)?,
         )
-        .build()?;
+        .add_entry(CreditTransferEntry::new(
+            "Jörg Groß",
+            creditor_iban.clone(),
+            1_000,
+            "E2E-UMLAUT",
+        )),
+    )
+    .build()?;
     assert!(umlaut_xml.contains("Mueller + Soehne GmbH"));
     assert!(umlaut_xml.contains("Joerg Gross"));
 
     // Invalid batches are rejected instead of producing a file the bank refuses.
-    let rejected = Pain001Builder::new("Acme GmbH", "CT-BAD")
+    let rejected = Pain001Builder::new("Acme GmbH", "CT-BAD", "2026-07-15T09:00:00".parse()?)
         .build()
         .expect_err("an empty batch must be rejected");
 
     // A field-level failure names the group and transaction it came from, so a
     // rejected run points at the row to fix rather than at the whole file.
-    let located = Pain008Builder::new("Stadtwerke Muster GmbH", "DD-BAD")
-        .add_group(
-            DirectDebitGroup::new(
-                "Stadtwerke Muster GmbH",
-                &creditor_iban,
-                &creditor_id,
-                IsoDate::new(2026, 7, 20)?,
-            )
-            .add_entry(DirectDebitEntry::new(
-                "MND-1",
-                "2024-01-01".parse()?,
-                "Erste Kundin",
-                creditor_iban.clone(),
-                100,
-                "E2E-1",
-            ))
-            .add_entry(DirectDebitEntry::new(
-                "MND-2",
-                "2024-01-01".parse()?,
-                "Zweiter Kunde",
-                creditor_iban.clone(),
-                0, // a zero amount is outside the SEPA range
-                "E2E-2",
-            )),
+    let located = Pain008Builder::new(
+        "Stadtwerke Muster GmbH",
+        "DD-BAD",
+        "2026-07-15T09:00:00".parse()?,
+    )
+    .add_group(
+        DirectDebitGroup::new(
+            "Stadtwerke Muster GmbH",
+            &creditor_iban,
+            &creditor_id,
+            IsoDate::new(2026, 7, 20)?,
         )
-        .build()
-        .expect_err("a zero amount must be rejected");
+        .add_entry(DirectDebitEntry::new(
+            "MND-1",
+            "2024-01-01".parse()?,
+            "Erste Kundin",
+            creditor_iban.clone(),
+            100,
+            "E2E-1",
+        ))
+        .add_entry(DirectDebitEntry::new(
+            "MND-2",
+            "2024-01-01".parse()?,
+            "Zweiter Kunde",
+            creditor_iban.clone(),
+            0, // a zero amount is outside the SEPA range
+            "E2E-2",
+        )),
+    )
+    .build()
+    .expect_err("a zero amount must be rejected");
 
     println!("\n── Validation ──");
     println!("Transliterated: Müller & Söhne GmbH -> Mueller + Soehne GmbH");

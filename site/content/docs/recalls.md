@@ -8,8 +8,7 @@ A **recall** is you asking your bank to stop a file you have already sent, befor
 it settles. It is a `camt.055` Customer Payment Cancellation Request, and the
 answer comes back as a `camt.029` Resolution of Investigation.
 
-The word "cancel" covers three different messages in SEPA, and they are not
-interchangeable:
+"Cancel" covers three different SEPA messages:
 
 | You want to | Message | Kind |
 |---|---|---|
@@ -17,19 +16,15 @@ interchangeable:
 | Give back a direct debit that settled | [`pain.007`](@/docs/reversals.md) | an **instruction** — the money moves |
 | Learn a payment came back | [`camt.054`](@/docs/bank-statements.md) | a **report** — after the fact |
 
-Cancellation availability depends on the payment's processing state and bank.
-`ARDT` reports that the transaction was already returned; it does not mean
-merely settled or authorize another reversal. Reconcile the existing return.
-
-Only `camt.055.001.05` and `camt.029.001.06` are named by the DFÜ-Abkommen, so
-unlike the payment messages there is no version to choose.
+Whether a cancellation is possible depends on the payment's processing state
+and the bank. The DFÜ-Abkommen names only `camt.055.001.05` and
+`camt.029.001.06`, so there is no version to choose.
 
 ## Three scopes, and they are alternatives
 
-A recall can name the whole file, a whole `PmtInf` group, or individual
-transactions. The XSD makes every part of that optional, so it happily admits
-"cancel the whole message, and also specifically these two" — which no bank can
-action. Here the three are alternatives and mixing them is a build error.
+A recall names the whole file, a whole `PmtInf` group, or individual
+transactions. The XSD allows mixing them; the builder treats them as
+alternatives and rejects a mix.
 
 ### Named transactions
 
@@ -46,8 +41,11 @@ let iban = validate_iban("DE89370400440532013000")?;
 let ci   = validate_creditor_id("DE98ZZZ09999999999")?;
 
 // The run that went out this morning.
-let submitted = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-    .created_at("2026-07-15T09:00:00".parse()?)
+let submitted = Pain008Builder::new(
+    "Stadtwerke GmbH",
+    "DD-2026-07-001",
+    "2026-07-15T09:00:00".parse()?,
+)
     .add_group(
         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, IsoDate::new(2026, 7, 20)?)
             .payment_info_id("PMT-2026-07-A")
@@ -58,6 +56,7 @@ let submitted = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
 
 let recall = Camt055Builder::new(
     "CXL-2026-07-001",                              // Assgnmt/Id — the case key
+    "2026-07-16T08:00:00".parse()?,                 // Assgnmt/CreDtTm — yours to record
     "Stadtwerke GmbH",                              // Assgnr — you
     validate_bic("COBADEFFXXX")?,                   // Assgne — your bank
     OriginalMessage::from_direct_debit(&submitted), // MsgId, CreDtTm and totals
@@ -73,21 +72,23 @@ assert!(recall.contains("<Cd>DUPL</Cd>"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`OriginalMessage::from_direct_debit` takes the **builder**, not the XML. Every
-element the recall needs is already in it, and retyping `OrgnlMsgId` by hand is
-how a recall comes to name a file that was never submitted under that
-identifier. There is a `from_credit_transfer` for pain.001.
-
-Note what it does *not* do: if the original builder never pinned a
-`created_at`, `OrgnlCreDtTm` is left out rather than stamped with "now". The
-element names the moment the original was created, and that moment is gone.
+`OriginalMessage::from_direct_debit` (and `from_credit_transfer` for pain.001)
+takes the original **builder**, so `OrgnlMsgId`, `OrgnlCreDtTm` and the totals
+match what was submitted. `OriginalMessage::new` describes an original by hand;
+without a known creation time, `OrgnlCreDtTm` is omitted.
 
 ### A whole group
 
 ```rust
 # use sepa::{Camt055Builder, CancellationGroup, CancellationReason, OriginalMessage, validate_bic};
-# let base = || Camt055Builder::new("CXL-1", "Stadtwerke GmbH", validate_bic("COBADEFFXXX").unwrap(),
-#     OriginalMessage::new("DD-2026-07-001", "pain.008.001.08"));
+# let at: sepa::IsoDateTime = "2026-07-16T08:00:00".parse()?;
+# let base = || Camt055Builder::new(
+#     "CXL-1",
+#     at,
+#     "Stadtwerke GmbH",
+#     validate_bic("COBADEFFXXX").unwrap(),
+#     OriginalMessage::new("DD-2026-07-001", "pain.008.001.08"),
+);
 let xml = base()
     .add_group(
         CancellationGroup::new("PMT-2026-07-A")
@@ -104,8 +105,14 @@ assert!(xml.contains("<PmtInfCxl>true</PmtInfCxl>"));
 
 ```rust
 # use sepa::{Camt055Builder, CancellationReason, OriginalMessage, validate_bic};
-# let base = || Camt055Builder::new("CXL-1", "Stadtwerke GmbH", validate_bic("COBADEFFXXX").unwrap(),
-#     OriginalMessage::new("DD-2026-07-001", "pain.008.001.08"));
+# let at: sepa::IsoDateTime = "2026-07-16T08:00:00".parse()?;
+# let base = || Camt055Builder::new(
+#     "CXL-1",
+#     at,
+#     "Stadtwerke GmbH",
+#     validate_bic("COBADEFFXXX").unwrap(),
+#     OriginalMessage::new("DD-2026-07-001", "pain.008.001.08"),
+);
 let xml = base()
     .cancel_whole_message(CancellationReason::Tech)
     .additional_info("Fehlerhafter Lauf")
@@ -115,13 +122,16 @@ assert!(xml.contains("<GrpCxl>true</GrpCxl>"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Combining any two of the three is refused before any XML exists:
+Combining scopes is refused:
 
 ```rust
 # use sepa::{Camt055Builder, CancellationEntry, CancellationGroup, CancellationReason,
 #            OriginalMessage, ValidationError, validate_bic};
 let err = Camt055Builder::new(
-    "CXL-1", "Stadtwerke GmbH", validate_bic("COBADEFFXXX")?,
+    "CXL-1",
+    "2026-07-15T09:00:00".parse()?,
+    "Stadtwerke GmbH",
+    validate_bic("COBADEFFXXX")?,
     OriginalMessage::new("DD-1", "pain.008.001.08"),
 )
 .cancel_whole_message(CancellationReason::Tech)
@@ -138,9 +148,8 @@ assert!(matches!(err.kind, ValidationError::MutuallyExclusive { .. }));
 
 ## A reason is mandatory
 
-ISO types `CxlRsnInf` as optional. No bank can act on a reasonless recall, so
-here it is a constructor argument on all three scopes and the reasonless form is
-not something you can build.
+ISO types `CxlRsnInf` as optional, but no bank can act on a recall without a
+reason, so it is a constructor argument on all three scopes.
 
 | Code | Means |
 |---|---|
@@ -151,10 +160,8 @@ not something you can build.
 | `CUST` | The customer asked, no further reason given |
 | `AGNT` · `CURR` · `CUTA` | Wrong agent, wrong currency, replaced by a technical transfer |
 
-`CancellationReason5Code` is a **closed** enumeration — unlike the purpose code
-lists, ISO does not revise it quarterly. A code outside it therefore cannot go
-in `Cd` without making the document schema-invalid, so an unrecognised one is
-written to the `Prtry` branch the choice provides for exactly that:
+`CancellationReason5Code` is a **closed** enumeration, so an unrecognised code
+is written to the `Prtry` branch instead of `Cd`:
 
 ```rust
 use sepa::CancellationReason;
@@ -207,10 +214,8 @@ assert_eq!(tx.status, Some(CancellationStatus::Accepted));
 
 ### `PDCR` is not an answer yet
 
-Three statuses matter: `ACCR` accepted, `RJCR` rejected and **`PDCR` pending** —
-the bank has taken the case and has not resolved it. Booking a pending recall as
-accepted writes off money that is not coming back; booking it as rejected
-collects twice. Check `is_final()` before doing either.
+`ACCR` is accepted, `RJCR` rejected and **`PDCR` pending** — the bank has not
+resolved the case yet. Check `is_final()` before posting either way.
 
 ```rust,no_run
 use sepa::parse_camt029;
@@ -231,16 +236,12 @@ if !answer.is_final() {
 # Ok::<(), sepa::Camt029ParseError>(())
 ```
 
-### A refusal explains itself at one level, and it may not be the one you read
+### Reasons may sit at any level
 
-Exactly as with [status reports](@/docs/status-reports.md), which level carries
-the reason depends on how far the bank got. A bank that refuses the *whole*
-submission sends no transaction blocks at all, so code that walks only
-`TxInfAndSts` sees an empty document and concludes the recall worked.
-
-`rejection_reasons()` gathers all three levels, and `is_accepted()` treats an
-empty document as *not* an acceptance — a bank that lists nothing has told you
-nothing.
+As with [status reports](@/docs/status-reports.md), a refusal of the *whole*
+request carries no transaction blocks. `rejection_reasons()` gathers all three
+levels, and `is_accepted()` treats a document with no statuses as *not*
+accepted.
 
 ```rust
 use sepa::{parse_camt029, RejectionReason};
@@ -280,8 +281,8 @@ assert_eq!(answer.rejection_reasons(), [&RejectionReason::Ardt]);
 | `NOOR` | The bank cannot find the original | Check the `MsgId` and `PmtInfId` you sent |
 | `LEGL` · `AGNT` | Refused for legal reasons, or by an agent | Nothing through the schemes |
 
-`is_already_returned()` identifies `ARDT`. Other reasons describe the refusal,
-not a complete account of the available banking or legal remedies.
+`is_already_returned()` identifies `ARDT`, which reports an existing return —
+not permission for another reversal.
 
 ## What is checked before anything is written
 
@@ -294,9 +295,4 @@ not a complete account of the available banking or legal remedies.
 | `AddtlInf` ≤ 105 characters | `Max105Text` — the only such limit in the crate |
 | Original transaction count ≤ 15 digits | The pinned original-group count bound; zero remains accepted |
 | Original control sum ≤ 18 decimal digits | Schema precision in hundredths; signed and representable trailing-zero values remain accepted |
-| The assignee BIC fits the schema's pattern | camt.055 names its type `BICFI` but keeps the **pre-2019** pattern |
-
-That last one is worth knowing about: `camt.055.001.05` uses the element name
-`BICFI` with the old `[A-Z]{6}…` pattern, while `pain.008.001.08` uses the same
-name with the new alphanumeric one. The element name does not tell you which —
-see [identifiers](@/docs/identifiers.md).
+| The assignee BIC fits the schema's pattern | `camt.055.001.05` writes `BICFI` with the letters-only pattern; see [identifiers](@/docs/identifiers.md) |

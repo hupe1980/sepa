@@ -4,15 +4,14 @@ description = "Supported ISO 20022 versions and per-message schema selection."
 weight = 11
 +++
 
-Which version a bank requires varies by bank and by regulatory cut-over, so it
-is a per-message choice rather than a compile-time constant.
+The required version varies by bank, so it is chosen per message rather than
+at compile time.
 
-**The version is not the scheme.** These are two independent axes and it is
-worth keeping them apart: all three credit-transfer schemes — SCT, SCT Instant
-and OCT Inst — use `pain.001.001.09` in the supported current profiles. Pick the *version* with
-`Pain001Builder::schema` and the *scheme* with `CreditTransferGroup::kind`; see
-[credit transfers](/docs/credit-transfers/). The one interaction is that OCT
-Inst postdates the older schemas, so `EOLO` requires `pain.001.001.09`.
+**The version is not the scheme.** SCT, SCT Instant and OCT Inst all use
+`pain.001.001.09`. Pick the *version* with `Pain001Builder::schema` and the
+*scheme* with `CreditTransferGroup::kind`; see
+[credit transfers](/docs/credit-transfers/). `EOLO` (OCT Inst) requires
+`pain.001.001.09`.
 
 | Message | Versions, default first |
 |---|---|
@@ -39,7 +38,11 @@ use sepa::pain008::DirectDebitSchema;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schema: DirectDebitSchema = "pain.008.001.02".parse()?;
-    let builder = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001").schema(schema);
+    let builder = Pain008Builder::new(
+        "Stadtwerke GmbH",
+        "DD-2026-07-001",
+        "2026-07-15T09:00:00".parse()?,
+    ).schema(schema);
 
     assert_eq!(schema.message_id(), "pain.008.001.02");
     assert_eq!(builder.group_count(), 0);
@@ -47,21 +50,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The versions differ on the wire, not just in the namespace, and the crate
-handles the differences rather than papering over them: `BIC` was renamed
-`BICFI` in the 2019 maintenance release, `ReqdExctnDt` became a date-time
-choice, and the `SMNDA` marker sits in a different element in the legacy German
-schema. Where a feature genuinely does not exist in a version — an instant
-transfer on a schema with no local-instrument element — you get a typed error
-instead of a file that fails its own schema.
+The versions differ on the wire, not just in the namespace: ISO renamed `BIC`
+to `BICFI` in the 2019 maintenance release, `ReqdExctnDt` became a date or
+date-time choice, and the legacy German schema places the `SMNDA` marker in a
+different element. The builders emit the right form for the selected version.
+A feature the version lacks — such as an instant transfer on a schema with no
+local-instrument element — is a typed error.
 
 ## Why not newer ISO versions?
 
-ISO advises communities to use the most recent message definition available,
-and has published `pain.001.001.13`, `pain.008.001.12` and `pain.002.001.15`.
-
-**Use the version required by the applicable scheme profile and your bank.**
-A newer ISO version is not automatically an accepted SEPA version.
+ISO has published `pain.001.001.13`, `pain.008.001.12` and `pain.002.001.15`,
+but a newer ISO version is not an accepted SEPA version. **Use the version
+required by the applicable scheme profile and your bank.**
 
 | Message | Vendored newer ISO version | Supported current SEPA version |
 |---|---|---|
@@ -70,17 +70,13 @@ A newer ISO version is not automatically an accepted SEPA version.
 | `pain.002` | `.001.15` | **`.001.10`** |
 | `pain.007` | `.001.13` | **`.001.09`** |
 
-Those versions have been mandatory since **19 November 2023**. ISO's guidance is
-written for communities free to choose their own version; a scheme participant
-is not one.
-
-Address requirements are independent of message-version selection; see
-[postal addresses](/docs/addresses/). Proposals for future versions do not change
-the versions accepted by the current profiles.
+The supported SEPA versions have been mandatory since **19 November 2023**.
+Address requirements are independent of the version; see
+[postal addresses](/docs/addresses/).
 
 ## How the output is checked
 
-CI validates generated fixtures for each emitted schema version against pinned
-ISO XSDs, plus German GBIC subsets for the default SCT/SDD versions. Builders
-validate field rules; they do not run an XSD validator for each output. Schema
-validity is test evidence, not a guarantee of bank acceptance.
+CI validates generated fixtures for each emitted version against pinned ISO
+XSDs, plus the German GBIC subsets for the default SCT/SDD versions. Builders
+check field rules; they do not run an XSD validator per output, and schema
+validity does not guarantee bank acceptance.

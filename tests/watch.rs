@@ -356,22 +356,22 @@ const CONSUMERS: &[Consumer] = &[
     Consumer {
         workspace: "mako",
         manifest: "../mako/Cargo.toml",
-        pinned: "0.7",
-        last_verified: "2026-09-17",
+        pinned: "0.9",
+        last_verified: "2026-11-20",
         review_every_days: 90,
     },
     Consumer {
         workspace: "emob",
         manifest: "../emob/Cargo.toml",
-        pinned: "0.7",
-        last_verified: "2026-09-17",
+        pinned: "0.9",
+        last_verified: "2026-11-20",
         review_every_days: 90,
     },
     Consumer {
         workspace: "esales",
         manifest: "../esales/Cargo.toml",
-        pinned: "0.6",
-        last_verified: "2026-09-17",
+        pinned: "0.9",
+        last_verified: "2026-11-20",
         review_every_days: 90,
     },
     Consumer {

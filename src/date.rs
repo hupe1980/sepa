@@ -397,9 +397,9 @@ impl IsoDate {
             .as_secs();
         // Both saturations are toward the end of the calendar the clock is
         // actually past, never toward its start. `unwrap_or(Self::MIN)` here
-        // turned a clock set past year 9999 into **0001-01-01** — a date that
-        // is not merely wrong but wrong in the opposite direction, and one that
-        // reads as a plausible sentinel rather than as a broken clock.
+        // would turn a clock set past year 9999 into **0001-01-01** — wrong in
+        // the opposite direction, and a plausible-looking sentinel rather than
+        // an obviously broken clock.
         let days = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
         Self::from_epoch_days(days).unwrap_or(Self::MAX)
     }
@@ -1201,8 +1201,7 @@ mod tests {
     #[cfg(feature = "time")]
     #[test]
     fn time_timestamps_convert_in_both_directions() {
-        // Regression: only `time::PrimitiveDateTime -> IsoDateTime` existed,
-        // while the module docs promised both directions for every type.
+        // The module docs promise both directions for every type.
         let bare: IsoDateTime = "2026-07-20T13:00:00".parse().unwrap();
         let primitive = time::PrimitiveDateTime::try_from(bare).unwrap();
         assert_eq!(IsoDateTime::try_from(primitive).unwrap(), bare);
@@ -1401,10 +1400,10 @@ mod tests {
 
     #[test]
     fn timestamps_compare_as_instants_not_as_written_fields() {
-        // Regression: `IsoDateTime` derived `Ord` over (date, h, m, s, offset),
-        // so `13:00:00+02:00` — an hour *earlier* than `12:00:00Z` — sorted
-        // after it. The type no longer has an ordering; `unix_seconds` does,
-        // and it is `None` for exactly the values that name no instant.
+        // An `Ord` over (date, h, m, s, offset) would sort `13:00:00+02:00` —
+        // an hour *earlier* than `12:00:00Z` — after it. So the type has no
+        // ordering; `unix_seconds` does, and it is `None` for exactly the
+        // values that name no instant.
         let utc: IsoDateTime = "2026-07-20T12:00:00Z".parse().unwrap();
         let berlin: IsoDateTime = "2026-07-20T13:00:00+02:00".parse().unwrap();
         let naive: IsoDateTime = "2026-07-20T12:00:00".parse().unwrap();
@@ -1672,9 +1671,10 @@ mod tests {
 
     #[test]
     fn a_multibyte_time_part_is_rejected_rather_than_panicking() {
-        // Regression: the offset was split off with `rest.split_at(len - 6)`,
-        // and for `"€€a"` — seven bytes — index 1 falls inside the first '€'.
-        // `IsoDateTime` parses untrusted text, so that was a reachable panic.
+        // Splitting the offset off by byte index (`rest.split_at(len - 6)`)
+        // would land inside the first '€' of `"€€a"` — seven bytes.
+        // `IsoDateTime` parses untrusted text, so that would be a reachable
+        // panic.
         for bad in [
             "2026-07-20T€€a",
             "2026-07-20T€€",

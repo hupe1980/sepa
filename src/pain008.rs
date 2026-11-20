@@ -65,7 +65,11 @@
 //!
 //! let collect = IsoDate::new(2026, 7, 20)?;
 //!
-//! let xml = Pain008Builder::new("Creditor GmbH", "BATCH-2026-07-001")
+//! let xml = Pain008Builder::new(
+//!     "Creditor GmbH",
+//!     "BATCH-2026-07-001",
+//!     "2026-07-15T09:00:00".parse()?,
+//! )
 //!     .add_group(
 //!         DirectDebitGroup::new("Creditor GmbH", &creditor, &ci, collect)
 //!             .sequence_type(SequenceType::Rcur)
@@ -525,9 +529,8 @@ impl MandateAmendment {
             });
         }
         // `OrgnlDbtrAcct` occurs once; SMNDA and an explicit previous IBAN are
-        // two ways of filling it. The writer used to silently prefer SMNDA and
-        // drop the IBAN, which is not something a batch should discover from a
-        // diff of its own output.
+        // two ways of filling it. Silently preferring one would drop data the
+        // caller supplied, so both together is an error.
         if self.same_mandate_new_account && self.original_debtor_iban.is_some() {
             return Err(ValidationError::MutuallyExclusive {
                 field: "AmdmntInfDtls/OrgnlDbtrAcct",
@@ -843,15 +846,16 @@ impl DirectDebitGroup {
     /// banking-calendar answer this crate cannot give: it depends on the
     /// scheme, the sequence type and TARGET2. Compute it against your own
     /// calendar and pass it in.
+    #[must_use]
     pub fn new(
-        creditor_name: impl Into<String>,
+        creditor_name: &str,
         creditor_iban: &Iban,
         creditor_id: &CreditorId,
         collection_date: IsoDate,
     ) -> Self {
         Self {
             payment_info_id: None,
-            creditor_name: creditor_name.into(),
+            creditor_name: creditor_name.to_owned(),
             creditor_iban: creditor_iban.clone(),
             creditor_bic: None,
             creditor_address: None,
@@ -981,7 +985,7 @@ impl DirectDebitGroup {
 pub struct Pain008Builder {
     initiating_party: String,
     msg_id: String,
-    created_at: Option<IsoDateTime>,
+    created_at: IsoDateTime,
     schema: DirectDebitSchema,
     charset: CharsetPolicy,
     groups: Vec<DirectDebitGroup>,
@@ -994,25 +998,25 @@ impl Pain008Builder {
     /// are a duplicate, and the second is rejected — or, worse, accepted and
     /// silently discarded. It is therefore required, and must come from a
     /// sequence that survives a restart.
-    pub fn new(initiating_party: impl Into<String>, msg_id: impl Into<String>) -> Self {
+    ///
+    /// `created_at` is `GrpHdr/CreDtTm`, emitted exactly as given. It is an
+    /// argument, not a default read from the clock, for the same reason
+    /// `MsgId` is: identical inputs must produce an identical file, so a run
+    /// can be replayed and compared with what was submitted. Store it with the
+    /// run; pass [`IsoDateTime::now()`] only when you mean "now".
+    pub fn new(
+        initiating_party: impl Into<String>,
+        msg_id: impl Into<String>,
+        created_at: IsoDateTime,
+    ) -> Self {
         Self {
             initiating_party: initiating_party.into(),
             msg_id: msg_id.into(),
-            created_at: None,
+            created_at,
             schema: DirectDebitSchema::default(),
             charset: CharsetPolicy::default(),
             groups: Vec::new(),
         }
-    }
-
-    /// Pin the creation timestamp (`GrpHdr/CreDtTm`).
-    ///
-    /// This is the crate's **only** implicit clock read: left unset, `build()`
-    /// stamps [`IsoDateTime::now`]. Set it to make output byte-reproducible.
-    #[must_use]
-    pub fn created_at(mut self, timestamp: IsoDateTime) -> Self {
-        self.created_at = Some(timestamp);
-        self
     }
 
     /// Select the pain.008 schema version (default
@@ -1026,9 +1030,13 @@ impl Pain008Builder {
     ///
     /// // A bank still on the pre-2023 version, read from configuration.
     /// let schema: DirectDebitSchema = "pain.008.001.02".parse()?;
-    /// let builder = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001").schema(schema);
+    /// let builder = Pain008Builder::new(
+    ///     "Stadtwerke GmbH",
+    ///     "DD-2026-07-001",
+    ///     "2026-07-15T09:00:00".parse()?,
+    /// ).schema(schema);
     /// # let _ = builder;
-    /// # Ok::<(), sepa::UnknownSchema>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[must_use]
     pub fn schema(mut self, schema: DirectDebitSchema) -> Self {
@@ -1067,13 +1075,11 @@ impl Pain008Builder {
         self.schema
     }
 
-    /// The pinned `GrpHdr/CreDtTm`, or `None` when `build()` will stamp one.
+    /// The `GrpHdr/CreDtTm` this message will carry, exactly as supplied.
     ///
-    /// `None` rather than "now": a timestamp read here would not be the one the
-    /// document ends up carrying, and a recall that quotes the wrong
-    /// `OrgnlCreDtTm` names a message that was never sent.
+    /// A [`camt.055`](crate::camt055) recall quotes it as `OrgnlCreDtTm`.
     #[must_use]
-    pub const fn creation_timestamp(&self) -> Option<IsoDateTime> {
+    pub const fn created_at(&self) -> IsoDateTime {
         self.created_at
     }
 
@@ -1312,7 +1318,11 @@ impl Pain008Builder {
     /// let iban = validate_iban("DE89370400440532013000")?;
     /// let ci = validate_creditor_id("DE98ZZZ09999999999")?;
     ///
-    /// let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07")
+    /// let xml = Pain008Builder::new(
+    ///     "Stadtwerke GmbH",
+    ///     "DD-2026-07",
+    ///     "2026-07-15T09:00:00".parse()?,
+    /// )
     ///     .add_group(
     ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, IsoDate::new(2026, 7, 20)?)
     ///             .sequence_type(SequenceType::Frst)
@@ -1364,7 +1374,7 @@ impl Pain008Builder {
     fn write_xml_to<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
         use crate::xml_util::write_escaped;
 
-        let now = self.created_at.unwrap_or_else(IsoDateTime::now);
+        let now = self.created_at;
         let namespace = self.schema.namespace();
         let initiating = self.charset.render(&self.initiating_party);
 
@@ -1568,7 +1578,7 @@ mod tests {
         DirectDebitGroup::new(name, &de_iban(), &ci(), date)
     }
     fn one_group(name: &str) -> Pain008Builder {
-        Pain008Builder::new(name, "DD-001")
+        Pain008Builder::new(name, "DD-001", "2026-07-15T09:00:00".parse().unwrap())
             .add_group(group(name).add_entry(entry("MND-001", 7_500)))
     }
 
@@ -1589,22 +1599,26 @@ mod tests {
 
     #[test]
     fn first_and_recurring_collections_fit_in_one_file() {
-        // The whole point of the group restructure: a real direct debit run has
-        // both, and previously needed two files.
-        let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-RUN")
-            .add_group(
-                group_on("Stadtwerke GmbH", d("2026-07-20"))
-                    .sequence_type(SequenceType::Frst)
-                    .add_entry(entry("MND-NEW", 5_000)),
-            )
-            .add_group(
-                group_on("Stadtwerke GmbH", d("2026-07-18"))
-                    .sequence_type(SequenceType::Rcur)
-                    .add_entry(entry("MND-OLD", 7_500))
-                    .add_entry(entry("MND-OLD-2", 2_500)),
-            )
-            .build()
-            .unwrap();
+        // Sequence type is per group, so a real direct debit run, which has
+        // both, fits in one file.
+        let xml = Pain008Builder::new(
+            "Stadtwerke GmbH",
+            "DD-RUN",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            group_on("Stadtwerke GmbH", d("2026-07-20"))
+                .sequence_type(SequenceType::Frst)
+                .add_entry(entry("MND-NEW", 5_000)),
+        )
+        .add_group(
+            group_on("Stadtwerke GmbH", d("2026-07-18"))
+                .sequence_type(SequenceType::Rcur)
+                .add_entry(entry("MND-OLD", 7_500))
+                .add_entry(entry("MND-OLD-2", 2_500)),
+        )
+        .build()
+        .unwrap();
 
         assert_eq!(xml.matches("<PmtInf>").count(), 2);
         assert!(xml.contains("<SeqTp>FRST</SeqTp>"));
@@ -1617,7 +1631,7 @@ mod tests {
 
     #[test]
     fn core_and_b2b_can_coexist_in_one_file() {
-        let xml = Pain008Builder::new("Test", "DD-MIX")
+        let xml = Pain008Builder::new("Test", "DD-MIX", "2026-07-15T09:00:00".parse().unwrap())
             .add_group(
                 group("Test")
                     .scheme(DirectDebitScheme::Core)
@@ -1636,7 +1650,7 @@ mod tests {
 
     #[test]
     fn postal_addresses_sit_inside_the_party_after_the_name() {
-        let xml = Pain008Builder::new("Test", "DD-ADR")
+        let xml = Pain008Builder::new("Test", "DD-ADR", "2026-07-15T09:00:00".parse().unwrap())
             .add_group(
                 group("Stadtwerke GmbH")
                     .creditor_address(
@@ -1668,7 +1682,7 @@ mod tests {
 
     #[test]
     fn an_address_on_a_schema_without_one_is_rejected() {
-        let err = Pain008Builder::new("Test", "DD-DK-ADR")
+        let err = Pain008Builder::new("Test", "DD-DK-ADR", "2026-07-15T09:00:00".parse().unwrap())
             .schema(DirectDebitSchema::DkV2_7)
             .add_group(
                 group("Test").add_entry(
@@ -1702,7 +1716,7 @@ mod tests {
         // taken. The debtor's bank answers MD01 and charges a return fee.
         let collect = d("2026-07-20");
         let build = |signed| {
-            Pain008Builder::new("Acme", "DD-1")
+            Pain008Builder::new("Acme", "DD-1", "2026-07-15T09:00:00".parse().unwrap())
                 .add_group(
                     DirectDebitGroup::new("Acme", &de_iban(), &ci(), collect).add_entry(
                         DirectDebitEntry::new("MND-1", signed, "Max", nl_iban(), 1_000, "E2E-1"),
@@ -1738,7 +1752,7 @@ mod tests {
         // letting xmllint find it at the bank.
         let modern = crate::validate_bic("E097DEFF").unwrap();
         let build = |schema| {
-            Pain008Builder::new("Acme", "DD-1")
+            Pain008Builder::new("Acme", "DD-1", "2026-07-15T09:00:00".parse().unwrap())
                 .schema(schema)
                 .add_group(
                     DirectDebitGroup::new("Acme", &de_iban(), &ci(), d("2026-07-20"))
@@ -1764,7 +1778,7 @@ mod tests {
 
     #[test]
     fn legacy_dk_schema_uses_bic_element() {
-        let xml = Pain008Builder::new("Test", "DD-DK")
+        let xml = Pain008Builder::new("Test", "DD-DK", "2026-07-15T09:00:00".parse().unwrap())
             .schema(DirectDebitSchema::DkV2_7)
             .add_group(
                 group("Test")
@@ -1788,7 +1802,7 @@ mod tests {
 
     #[test]
     fn mandate_amendment_emits_smnda_in_its_current_position() {
-        let xml = Pain008Builder::new("Test", "DD-AMD")
+        let xml = Pain008Builder::new("Test", "DD-AMD", "2026-07-15T09:00:00".parse().unwrap())
             .add_group(group("Test").add_entry(
                 entry("M1", 1_000).with_amendment(MandateAmendment::debtor_account_changed()),
             ))
@@ -1806,7 +1820,7 @@ mod tests {
     fn an_amendment_with_no_detail_is_rejected() {
         // Sending an amendment identical to the original earns an MD02 reject.
         assert!(matches!(
-            Pain008Builder::new("Test", "DD-AMD")
+            Pain008Builder::new("Test", "DD-AMD", "2026-07-15T09:00:00".parse().unwrap())
                 .add_group(
                     group("Test")
                         .add_entry(entry("M1", 1_000).with_amendment(MandateAmendment::default()),)
@@ -1820,15 +1834,15 @@ mod tests {
 
     #[test]
     fn an_amendment_cannot_both_state_and_suppress_the_previous_account() {
-        // `OrgnlDbtrAcct` occurs once; the writer used to silently prefer
-        // SMNDA and drop the IBAN the caller had supplied.
+        // `OrgnlDbtrAcct` occurs once; SMNDA plus an explicit IBAN is an error
+        // rather than one silently winning.
         let amendment = MandateAmendment {
             original_debtor_iban: Some(nl_iban()),
             same_mandate_new_account: true,
             ..MandateAmendment::default()
         };
         assert_eq!(
-            Pain008Builder::new("Test", "DD-AMD")
+            Pain008Builder::new("Test", "DD-AMD", "2026-07-15T09:00:00".parse().unwrap())
                 .add_group(group("Test").add_entry(entry("M1", 100).with_amendment(amendment)))
                 .build()
                 .unwrap_err()
@@ -1846,7 +1860,7 @@ mod tests {
             MandateAmendment::debtor_iban_changed(nl_iban()),
         ] {
             assert!(
-                Pain008Builder::new("Test", "DD-AMD")
+                Pain008Builder::new("Test", "DD-AMD", "2026-07-15T09:00:00".parse().unwrap())
                     .add_group(group("Test").add_entry(entry("M1", 100).with_amendment(a)))
                     .build()
                     .is_ok()
@@ -1856,11 +1870,12 @@ mod tests {
 
     #[test]
     fn ultimate_creditor_cannot_be_set_at_both_levels() {
-        let b = Pain008Builder::new("Test", "DD-ULT").add_group(
-            group("Test")
-                .ultimate_creditor(Party::new("Gruppe"))
-                .add_entry(entry("M1", 100).with_ultimate_creditor(Party::new("Transaktion"))),
-        );
+        let b = Pain008Builder::new("Test", "DD-ULT", "2026-07-15T09:00:00".parse().unwrap())
+            .add_group(
+                group("Test")
+                    .ultimate_creditor(Party::new("Gruppe"))
+                    .add_entry(entry("M1", 100).with_ultimate_creditor(Party::new("Transaktion"))),
+            );
         assert_eq!(
             b.build(),
             Err(BuildError::transaction(
@@ -1876,7 +1891,7 @@ mod tests {
         // An identifier is the key the bank echoes back; rewriting it silently
         // would break the caller's own reconciliation.
         assert!(matches!(
-            Pain008Builder::new("Test", "DD-1")
+            Pain008Builder::new("Test", "DD-1", "2026-07-15T09:00:00".parse().unwrap())
                 .add_group(group("Test").add_entry(DirectDebitEntry::new(
                     "MND-Ü",
                     d("2024-01-01"),
@@ -1902,11 +1917,11 @@ mod tests {
     #[test]
     fn empty_message_and_empty_group_are_both_rejected() {
         assert_eq!(
-            Pain008Builder::new("Test", "E").build(),
+            Pain008Builder::new("Test", "E", "2026-07-15T09:00:00".parse().unwrap()).build(),
             Err(BuildError::message(ValidationError::EmptyBatch))
         );
         assert_eq!(
-            Pain008Builder::new("Test", "E")
+            Pain008Builder::new("Test", "E", "2026-07-15T09:00:00".parse().unwrap())
                 .add_group(group("Test"))
                 .build(),
             Err(BuildError::group(0, ValidationError::EmptyBatch))
@@ -1915,18 +1930,22 @@ mod tests {
 
     #[test]
     fn validation_rejects_bad_fields() {
-        let b = || Pain008Builder::new("Test", "OK");
+        let b = || Pain008Builder::new("Test", "OK", "2026-07-15T09:00:00".parse().unwrap());
         let err = b()
             .add_group(group("Test").add_entry(entry("M1", 0)))
             .build()
             .unwrap_err();
         assert!(matches!(err.kind, ValidationError::AmountOutOfRange { .. }));
         assert!(matches!(
-            Pain008Builder::new("Test", "X".repeat(36))
-                .add_group(group("Test").add_entry(entry("M1", 100)))
-                .build()
-                .unwrap_err()
-                .kind,
+            Pain008Builder::new(
+                "Test",
+                "X".repeat(36),
+                "2026-07-15T09:00:00".parse().unwrap()
+            )
+            .add_group(group("Test").add_entry(entry("M1", 100)))
+            .build()
+            .unwrap_err()
+            .kind,
             ValidationError::TooLong { .. }
         ));
     }
@@ -1943,7 +1962,7 @@ mod tests {
     fn errors_name_the_group_and_transaction_that_failed() {
         // A collection run is thousands of rows long; "Dbtr/Nm is too long" is
         // only actionable once it says which row.
-        let err = Pain008Builder::new("Test", "DD-LOC")
+        let err = Pain008Builder::new("Test", "DD-LOC", "2026-07-15T09:00:00".parse().unwrap())
             .add_group(group("Test").add_entry(entry("M1", 100)))
             .add_group(
                 group("Test")
@@ -1958,34 +1977,39 @@ mod tests {
 
     #[test]
     fn totals_use_integer_arithmetic() {
-        let b = Pain008Builder::new("Test", "DD").add_group(
-            group("Test")
-                .add_entry(entry("M1", 10))
-                .add_entry(entry("M2", 20)),
-        );
+        let b = Pain008Builder::new("Test", "DD", "2026-07-15T09:00:00".parse().unwrap())
+            .add_group(
+                group("Test")
+                    .add_entry(entry("M1", 10))
+                    .add_entry(entry("M2", 20)),
+            );
         assert_eq!(b.total_ct(), 30);
         assert!(b.build().unwrap().contains("<CtrlSum>0.30</CtrlSum>"));
     }
 
     #[test]
     fn non_sepa_characters_are_transliterated() {
-        let xml = Pain008Builder::new("Müller & Söhne GmbH", "DD-UML")
-            .add_group(
-                DirectDebitGroup::new("Müller & Söhne GmbH", &de_iban(), &ci(), d("2026-07-20"))
-                    .add_entry(
-                        DirectDebitEntry::new(
-                            "MND-001",
-                            d("2024-01-01"),
-                            "Jörg Groß",
-                            nl_iban(),
-                            100,
-                            "E2E-1",
-                        )
-                        .with_description("Abschlag für Straße 1"),
-                    ),
-            )
-            .build()
-            .unwrap();
+        let xml = Pain008Builder::new(
+            "Müller & Söhne GmbH",
+            "DD-UML",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(
+            DirectDebitGroup::new("Müller & Söhne GmbH", &de_iban(), &ci(), d("2026-07-20"))
+                .add_entry(
+                    DirectDebitEntry::new(
+                        "MND-001",
+                        d("2024-01-01"),
+                        "Jörg Groß",
+                        nl_iban(),
+                        100,
+                        "E2E-1",
+                    )
+                    .with_description("Abschlag für Straße 1"),
+                ),
+        )
+        .build()
+        .unwrap();
         assert!(xml.contains("Mueller + Soehne GmbH"));
         assert!(xml.contains("Joerg Gross"));
         assert!(xml.contains("Abschlag fuer Strasse 1"));
@@ -2002,7 +2026,7 @@ mod tests {
 
     #[test]
     fn streaming_matches_the_in_memory_build() {
-        let make = || one_group("Test").created_at("2026-07-19T12:00:00".parse().unwrap());
+        let make = || one_group("Test");
         let direct = make().build().unwrap();
         let mut buf: Vec<u8> = Vec::new();
         make().write_to(&mut buf).unwrap();
@@ -2023,9 +2047,9 @@ mod tests {
 
     #[test]
     fn the_collection_date_is_required_and_never_defaulted() {
-        // It used to default to `IsoDate::today().plus_days(5)` — the SDD Core
-        // pre-notification floor. That is a banking-calendar answer this crate
-        // cannot give, and it made a batch depend on the machine clock.
+        // No default such as today plus the SDD Core pre-notification floor:
+        // that is a banking-calendar answer this crate cannot give, and it
+        // would make a batch depend on the machine clock.
         let group = group_on("Test", d("2026-07-20"));
         assert_eq!(group.requested_collection_date(), d("2026-07-20"));
     }
@@ -2049,7 +2073,7 @@ mod tests {
 
     #[test]
     fn the_epc_legacy_schema_uses_the_pre_2019_bic_element() {
-        let xml = Pain008Builder::new("Test", "DD-V2")
+        let xml = Pain008Builder::new("Test", "DD-V2", "2026-07-15T09:00:00".parse().unwrap())
             .schema(DirectDebitSchema::IsoV2)
             .add_group(
                 group("Test")
@@ -2065,11 +2089,11 @@ mod tests {
 
     #[test]
     fn smnda_moves_to_the_original_agent_under_the_dk_schema() {
-        // Regression: pain.008.003.02 admits nothing but an IBAN under
+        // pain.008.003.02 admits nothing but an IBAN under
         // OrgnlDbtrAcct, and enumerates SMNDA under OrgnlDbtrAgt instead — so
         // the current placement is schema-invalid there.
         let build = |schema| {
-            Pain008Builder::new("Test", "DD-AMD")
+            Pain008Builder::new("Test", "DD-AMD", "2026-07-15T09:00:00".parse().unwrap())
                 .schema(schema)
                 .add_group(group("Test").add_entry(
                     entry("M1", 1_000).with_amendment(MandateAmendment::debtor_account_changed()),

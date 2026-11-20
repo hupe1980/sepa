@@ -29,44 +29,32 @@ output does not certify bank acceptance.
 | `ReqdExctnDt/DtTm` | only with `LclInstrm = INST`, and only with a UTC offset |
 | Ultimate party | at group level or transaction level, never both |
 
-Serde restoration of mutable payment inputs does not certify them for output.
-Incomplete `Party` values are refused at use. For `Purpose::Other` and
-`CategoryPurpose::Other`, builders validate the exact emitted value: 1–4 uppercase
-ASCII letters/digits, without padding. Direct/restored lowercase or padded codes
-are refused, not rewritten. String parsing intentionally trims/uppercases when
-that conversion is desired. Well-shaped unknown codes remain supported; this is
-a representation policy, not current ISO code-list membership certification.
+Further rules:
 
-Two of those are worth calling out because they are easy to get wrong and
-impossible for a schema to catch.
+- **Lengths count the emitted text.** They are checked after transliteration
+  (`Müller` → `Mueller`) and include leading/trailing whitespace, as the
+  `Max35Text`/`Max70Text` types preserve it. Nothing is truncated.
+- **Blank-only values and identifier slash rules** are library policies, not
+  XSD rules.
+- **XML 1.0-forbidden characters** are rejected with
+  `ValidationError::InvalidXmlCharacter`. The escaper also quotes markup and
+  writes carriage returns as `&#13;`.
+- **`PmtInfId` must be unique within a message**: the bank echoes it in
+  `pain.002` and in a camt statement's `NtryDtls/Btch`, so a duplicate makes a
+  booking unattributable.
+- **Purpose codes.** For `Purpose::Other` and `CategoryPurpose::Other`, builders
+  check the emitted value is 1–4 uppercase ASCII letters/digits. Lowercase or
+  padded values are refused, not rewritten; string parsing trims and uppercases.
+  Well-formed unknown codes are accepted — this is not code-list membership.
+- **Serde-restored inputs** are validated when built, not when deserialised;
+  an incomplete `Party` is refused at use.
 
-**Lengths bind on what the bank receives, not on what you passed in.**
-Transliteration can lengthen a string — `Müller` becomes `Mueller` — so a
-140-character German remittance line can cross the limit on its way out. The
-check runs after conversion and rejects; nothing is ever silently truncated,
-because the tail of a remittance line is where the invoice number sits.
-
-Bounds count the complete emitted text, including leading/trailing whitespace.
-The pinned `Max35Text` and `Max70Text` types derive from whitespace-preserving
-`xs:string`; a trimmed length is not the length written to XML. Blank-only refusal
-and identifier slash rules are explicit library policies, not universal XSD rules.
-
-Shared text validation rejects XML 1.0-forbidden characters with the located
-`ValidationError::InvalidXmlCharacter`. Ordinary text is checked after the selected
-transliteration policy; strict mode refuses unsupported SEPA characters, and
-identifiers are never transliterated. The XML escaper independently quotes markup
-and encodes carriage returns as `&#13;` wherever raw text reaches it. This is a
-syntax safeguard, not a new UTF-8 passthrough mode. Invalid builders leave an
-existing `write_to()` sink untouched; later I/O failure is not transactional.
-
-**`PmtInfId` must be unique within a message.** It is the key a bank echoes back
-in the `pain.002` and in the `NtryDtls/Btch` block of a camt statement, so two
-groups sharing one make a booking unattributable.
+A builder that fails validation leaves a `write_to()` sink untouched; an I/O
+failure during writing is not transactional.
 
 ## Errors name the row
 
-In a run of ten thousand collections, "the amount is out of range" is only
-actionable once it says which one:
+Every error carries the location of the offending group and transaction:
 
 ```rust
 use sepa::{
@@ -79,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ci = validate_creditor_id("DE98ZZZ09999999999")?;
     let date = IsoDate::new(2026, 7, 20)?;
 
-    let err = Pain008Builder::new("Stadtwerke GmbH", "DD-1")
+    let err = Pain008Builder::new("Stadtwerke GmbH", "DD-1", "2026-07-15T09:00:00".parse()?)
         .add_group(
             DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, date)
                 .add_entry(DirectDebitEntry::new(
@@ -99,25 +87,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Dates are absent from the rule table on purpose. An `IsoDate` is validated
-where it is constructed, so an impossible collection date never reaches a
-batch — there is nothing for `build()` to catch.
+Dates are not in the rule table: an `IsoDate` is validated when constructed.
 
-The supported year range is **0001–9999**, including component construction,
-parsing, serde restoration and optional `time`/`chrono` conversions. Wider years
-are allowed by XSD, but are outside this library's representation. This is not
-a bank-acceptance guarantee. Timestamp conversions retain exact whole-minute
-offsets within ±14:00; offsets containing seconds or outside that bound are
-re-expressed at UTC without changing the whole-second instant. UTC conversion
-must also remain within the supported date range. An unrepresentable local date
-or required UTC date returns a typed date error rather than panicking or clamping.
-Exact whole-minute offsets within ±14:00 do not require UTC conversion: valid
-local endpoint dates remain accepted even if their UTC date is outside 0001–9999.
+The supported year range is **0001–9999** for construction, parsing, serde and
+the `time`/`chrono` conversions; the XSD allows wider years. Timestamp
+conversions keep whole-minute offsets within ±14:00; other offsets are
+re-expressed in UTC without changing the instant. A date that cannot be
+represented returns a typed error rather than panicking or clamping. (A local
+date with a kept offset is accepted even if its UTC date falls outside
+0001–9999.)
 
 ## Nothing is silently truncated
 
-A remittance line of exactly 140 German characters is 141 once the umlauts are
-converted. That is a rejection, not a quiet trim:
+A 140-character remittance line is 141 once an umlaut is converted, and is
+rejected:
 
 ```rust
 use sepa::{CharsetPolicy, RemittanceInfo, ValidationError};
@@ -153,22 +136,14 @@ fn main() {
 }
 ```
 
-Use it to pre-check your own data with the same numbers the builders apply,
-rather than copying them into your code where they can drift.
-
-Tests walk populated generated fixtures against this table and an explicit list
-of values bounded by their types. Keep those fixtures populated when adding a
-writer field; this is not proof for every possible document.
+Use it to pre-check your data with the same limits the builders apply.
 
 ## The `Strd` block counts its own markup
 
-The EPC caps structured remittance information at 140 characters *including the
-XML tags*, which is why the block is emitted minified — pretty-printing alone
-overruns it. No per-field check can see that limit: a 35-character `Ref` and a
-35-character `Issr` are each perfectly legal and together break it.
-
-The block is therefore measured by rendering it, with the same function the
-writer uses, so what is checked is exactly what is emitted:
+The EPC caps structured remittance at 140 characters *including the XML tags*,
+so the block is emitted minified and measured by rendering it with the writer's
+own function. A 35-character `Ref` and a 35-character `Issr` are each legal and
+together exceed the cap:
 
 ```rust
 use sepa::{CharsetPolicy, RemittanceInfo, ValidationError};
@@ -188,16 +163,14 @@ fn main() {
 ## The character set
 
 Writers use the 73-character SEPA Basic Latin set. The default policy converts
-unsupported text; strict mode refuses it. Bank acceptance remains separate.
+unsupported text; `CharsetPolicy::Strict` refuses it.
 
 ```text
 a–z  A–Z  0–9  / - ? : ( ) . , ' +  and space
 ```
 
-Conversion uses the **published EPC217-08 table**, transcribed from the
-spreadsheet the EPC distributes — 1010 mappings — rather than an approximation.
-That matters beyond plain accents, where generic transliterators diverge from
-the standard:
+Conversion uses the **published EPC217-08 table** (1010 mappings), which
+differs from generic transliterators beyond plain accents:
 
 | Input | EPC217-08 | Typical generic folding |
 |---|---|---|
@@ -227,28 +200,21 @@ fn main() {
 }
 ```
 
-The German style is the default because losing the umlaut changes how a name
-reads — and on a bank statement, who it appears to be. It overrides exactly
-seven characters, following the alternative the German banking industry
-sanctions.
+The German style is the default; it overrides seven characters, following the
+alternative the German banking industry sanctions. Set `CharsetPolicy::Strict`
+on a builder to reject out-of-set text instead of rewriting it.
 
-Set `CharsetPolicy::Strict` on a builder to reject out-of-set text instead of
-rewriting it, when your data is already sanitised and you want a hard guarantee
-that nothing is silently changed.
+> Identifiers are **never** transliterated, whatever the policy — the bank
+> echoes them back for reconciliation. Out-of-set characters in an identifier
+> are an error.
 
-> Identifiers are **never** transliterated, whatever the policy. An identifier
-> is the key the bank echoes back on the statement, so quietly rewriting
-> `MND-Straße` to `MND-Strasse` would break your own reconciliation. Out-of-set
-> characters in an identifier are a hard error.
+## Reading bank documents
 
-## Reader Boundaries
-
-Readers support the namespaces, finite intake limits and retained fields in
-[reader contracts](@/docs/reader-contracts.md), not every lawful bank document
-or complete inbound XSD validation. Raw observations remain available when
-their typed value is unusable. Dates support optional timezones; money supports
-a leading `+` but refuses significant precision below a hundredth.
-`IsoDateTime` represents whole seconds, not fractional-second precision.
+Readers accept the namespaces and limits in
+[reader contracts](@/docs/reader-contracts.md); they do not perform inbound XSD
+validation. Raw observations remain available when a typed value is unusable.
+Dates accept optional timezones; amounts accept a leading `+` but refuse
+precision below a hundredth; `IsoDateTime` holds whole seconds.
 
 An unreadable `<CdtDbtInd>` is not a credit. Signing requires a usable magnitude,
 currency and direction:
@@ -270,7 +236,5 @@ for entry in &parse_camt053(&xml)?.statements[0].entries {
 # }
 ```
 
-An entry is **never dropped** for being unreadable either — a missing booking
-looks identical to one that never happened. Totals follow the same rule:
-`net_movement_ct()` returns `None` rather than quietly summing only the rows it
-could read.
+An unreadable entry is **never dropped**, and `net_movement_ct()` returns
+`None` rather than summing only the readable rows.

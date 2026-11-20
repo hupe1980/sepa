@@ -61,7 +61,7 @@ Common types are re-exported at the crate root.
 ## 🚀 Quick start
 
 ```sh
-cargo add sepa@0.9
+cargo add sepa@0.10
 ```
 
 Optional features: `serde`, `time`, `chrono` — see [Dependencies](#-dependencies).
@@ -78,7 +78,7 @@ let debtor   = validate_iban("NL91ABNA0417164300")?;
 let ci       = validate_creditor_id("DE98ZZZ09999999999")?;
 
 // pain.001 — Überweisung
-let ct = Pain001Builder::new("Acme GmbH", "CT-2026-07-001")
+let ct = Pain001Builder::new("Acme GmbH", "CT-2026-07-001", "2026-07-15T09:00:00".parse()?)
     .add_group(
         CreditTransferGroup::new("Acme GmbH", &creditor, IsoDate::new(2026, 7, 20)?)   // typed, never a string
             .add_entry(
@@ -90,7 +90,7 @@ let ct = Pain001Builder::new("Acme GmbH", "CT-2026-07-001")
 
 // pain.008 — a collection run with FRST and RCUR in ONE file.
 // SeqTp lives on the group, so each sequence type needs its own.
-let dd = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
+let dd = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "2026-07-15T09:00:00".parse()?)
     .add_group(
         DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, IsoDate::new(2026, 7, 20)?)
             .sequence_type(SequenceType::Frst)
@@ -116,8 +116,8 @@ assert!(dd.contains("<SeqTp>FRST</SeqTp>") && dd.contains("<SeqTp>RCUR</SeqTp>")
 *before* any XML exists. Each `add_group` becomes one `PmtInf`; sequence type,
 execution date, debtor account and batch booking all live at that level.
 
-Note what the constructors take: **`MsgId` and the payment date are arguments,
-not defaults** — see [Design](#-design) for why neither has a safe one.
+**`MsgId`, the creation timestamp and the payment date are arguments, not
+defaults** — see [Design](#-design).
 
 ---
 
@@ -135,38 +135,24 @@ values; signing refuses negative or contradictory observations. Charge inclusion
 must be resolved separately before posting. Serde cannot restore trusted derived
 detail signing. See [reader contracts](https://hupe1980.github.io/sepa/docs/reader-contracts/).
 
-**Message IDs and payment dates are caller inputs.** Supply durable IDs and choose
-dates using your banking calendar. Builders default only the creation timestamp
-from the clock; pin `.created_at(...)` for reproducible output.
+**Message IDs, creation timestamps and payment dates are caller inputs.** Supply
+durable IDs, record the creation timestamp with the run and choose dates using
+your banking calendar. The crate never reads the clock, so identical inputs give a
+byte-identical file — a run can be replayed and compared with what it submitted.
+
+**Logs stay free of account numbers.** `Iban` and the readers' `AccountId`
+debug-format masked — `Iban(DE…3000)` — while `Display`, `as_str()` and serde
+return the full value. Errors never carry the values that caused them. Names,
+addresses and remittance text are not masked; redact them in your logging layer.
 
 **Validated values enforce their construction contracts.** An `Iban` has passed
-mod-97 *and* the registered national BBAN structure. An `IsoDate` is a real
-calendar day in 0001–9999, enforced by component construction, parsing, serde
-and optional date-library conversions. This is a library range, not the full
-XSD year space. Timestamp conversions preserve whole-second instants by using
-UTC when an external offset has seconds or exceeds ±14:00; offsets are never
-rounded to minutes. An unrepresentable local date or required UTC date returns
-a typed date error rather than panicking or clamping. Exact whole-minute offsets
-within ±14:00 remain valid even when their UTC date falls outside the library range.
-`PostalAddress` requires town and country for this library's
-structured/hybrid scope, including serde restoration. EPC153-22 v2.2 still permits
-unstructured addresses and sets no replacement cutoff. Address obligations depend
-on scheme, participant geography and law; do not omit required data to fit an API.
-
-Mutable payment inputs are checked at use, not certified by serde restoration.
-`Party::default()` and incomplete restored parties cannot be emitted. Direct or
-restored `Purpose::Other` and `CategoryPurpose::Other` values must contain 1–4
-uppercase ASCII letters/digits without padding; builders check the exact spelling
-they emit. Parse a raw string when trimming/uppercasing is intended. Well-shaped
-unknown codes remain supported; this is not a current code-list membership check.
-
-Text bounds count the complete emitted value after the selected character policy,
-including surrounding whitespace. Blank-only refusal is library policy, not
-`xs:string` whitespace collapse. Shared text validation rejects XML 1.0-forbidden
-characters with `ValidationError::InvalidXmlCharacter`; identifiers are never
-transliterated. Ordinary text still follows transliteration or strict refusal.
-The shared XML escaper preserves literal carriage returns as `&#13;` wherever
-raw text reaches it; this does not add a UTF-8 passthrough character policy.
+mod-97 *and* the registered national BBAN structure; an `IsoDate` is a real
+calendar day in 0001–9999, however it was built or restored. `PostalAddress`
+requires town and country (this library's structured/hybrid scope). Mutable
+inputs — parties, purpose codes, text — are checked by `build()`, against the
+exact spelling emitted. Text over a limit or outside XML 1.0 is refused, never
+truncated; identifiers are never transliterated. Details:
+[validation](https://hupe1980.github.io/sepa/docs/validation/).
 
 ```rust
 use sepa::{IsoDate, PostalAddress, validate_iban};
@@ -224,7 +210,7 @@ use sepa::{ChargeBearer, CreditTransferEntry, CreditTransferGroup, CreditTransfe
 # let day    = IsoDate::new(2026, 7, 20)?;
 
 // OCT Inst — the euro leg of a payment leaving SEPA, paying out in USD.
-let xml = Pain001Builder::new("Acme GmbH", "OCT-001")
+let xml = Pain001Builder::new("Acme GmbH", "OCT-001", "2026-07-15T09:00:00".parse()?)
     .add_group(
         CreditTransferGroup::new("Acme GmbH", &debtor, day)
             .kind(CreditTransferKind::OneLegOutInstant)
@@ -241,7 +227,7 @@ assert!(xml.contains("<ChrgBr>SHAR</ChrgBr>"));   // SLEV is *forbidden* here
 assert!(xml.contains("<InstrForCdtrAgt><InstrInf>USD</InstrInf></InstrForCdtrAgt>"));
 
 // The same charge bearer under SEPA, where only SLEV is legal:
-let err = Pain001Builder::new("Acme GmbH", "CT-001")
+let err = Pain001Builder::new("Acme GmbH", "CT-001", "2026-07-15T09:00:00".parse()?)
     .add_group(
         CreditTransferGroup::new("Acme GmbH", &debtor, day)
             .charge_bearer(ChargeBearer::Shar)
@@ -262,7 +248,7 @@ assert!(matches!(err.kind, ValidationError::ChargeBearerNotAllowed { .. }));
 # let iban = validate_iban("DE89370400440532013000")?;
 # let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 # let date = IsoDate::new(2026, 7, 20)?;
-let err = Pain008Builder::new("Stadtwerke GmbH", "DD-1")
+let err = Pain008Builder::new("Stadtwerke GmbH", "DD-1", "2026-07-15T09:00:00".parse()?)
     .add_group(
         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, date)
             .add_entry(DirectDebitEntry::new("MND-1", date, "Erste", iban.clone(), 100, "E2E-1"))
@@ -324,12 +310,17 @@ let entry = DirectDebitEntry::new(
     "MND-42", "2024-06-01".parse()?, "Max Mustermann", debtor, 7_500, "E2E-1",
 );
 
-let xml = Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-001")
-    .add_group(
-        ReversalGroup::new("DD-2026-07-001")
-            .add_entry(ReversalEntry::reverse(&group, &entry, ReversalReason::Ms02)),
-    )
-    .build()?;
+let xml = Pain007Builder::new(
+    "Stadtwerke GmbH",
+    "RVSL-001",
+    "2026-07-17T09:00:00".parse()?,
+    "DD-2026-07-001", // the collection being reversed
+)
+.add_group(
+    ReversalGroup::new("DD-2026-07-001")
+        .add_entry(ReversalEntry::reverse(&group, &entry, ReversalReason::Ms02)),
+)
+.build()?;
 
 assert!(xml.contains("<RvsdInstdAmt Ccy=\"EUR\">75.00</RvsdInstdAmt>"));
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -353,13 +344,17 @@ use sepa::{Camt055Builder, CancellationEntry, CancellationGroup, CancellationRea
 #            validate_creditor_id, validate_iban};
 # let iban = validate_iban("DE89370400440532013000")?;
 # let ci = validate_creditor_id("DE98ZZZ09999999999")?;
-# let submitted = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-#     .created_at("2026-07-15T09:00:00".parse()?)
+# let submitted = Pain008Builder::new(
+#     "Stadtwerke GmbH",
+#     "DD-2026-07-001",
+#     "2026-07-15T09:00:00".parse()?,
+# )
 #     .add_group(DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, IsoDate::new(2026,7,20)?)
 #         .payment_info_id("PMT-2026-07-A")
 #         .add_entry(DirectDebitEntry::new("MND-1","2024-06-01".parse()?,"Max",iban.clone(),7_500,"E2E-1")));
 let xml = Camt055Builder::new(
     "CXL-2026-07-001",
+    "2026-07-16T08:00:00".parse()?,       // Assgnmt/CreDtTm — yours to record
     "Stadtwerke GmbH",                    // Assgnr — you
     validate_bic("COBADEFFXXX")?,         // Assgne — your bank
     OriginalMessage::from_direct_debit(&submitted),  // copies MsgId, CreDtTm, totals
@@ -581,8 +576,7 @@ While `0.x`, minor releases may break the Rust API, stored forms, reader behavio
 or emitted output. [CHANGELOG.md](CHANGELOG.md) distinguishes those contracts.
 Patch releases preserve public signatures and valid output; security fixes may
 tighten input checks. Pin the version deliberately and review migration notes.
-Examples target **0.9.0**. For an unpublished checkout, use a local path or pinned
-source revision.
+Examples target **0.10**.
 
 ## 📄 License
 

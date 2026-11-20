@@ -28,7 +28,7 @@ fuzz_target!(|data: (&str, &str, i64, u8)| {
         .street(text)
         .line(text);
 
-    let sct = sepa::Pain001Builder::new(text, id)
+    let sct = sepa::Pain001Builder::new(text, id, "2026-07-15T09:00:00".parse().unwrap())
         .schema(CreditTransferSchema::ALL[pick])
         .add_group(
             sepa::CreditTransferGroup::new(text, &iban, date)
@@ -53,7 +53,7 @@ fuzz_target!(|data: (&str, &str, i64, u8)| {
     }
 
     if let Ok(ci) = sepa::validate_creditor_id("DE98ZZZ09999999999") {
-        let sdd = sepa::Pain008Builder::new(text, id)
+        let sdd = sepa::Pain008Builder::new(text, id, "2026-07-15T09:00:00".parse().unwrap())
             .schema(DirectDebitSchema::ALL[pick])
             .add_group(
                 sepa::DirectDebitGroup::new(text, &iban, &ci, date)
@@ -76,7 +76,7 @@ fuzz_target!(|data: (&str, &str, i64, u8)| {
         // out of the collection objects, so it sees everything the builders do.
         let group = sepa::DirectDebitGroup::new(text, &iban, &ci, date);
         let entry = sepa::DirectDebitEntry::new(id, date, text, iban.clone(), amount, id);
-        let rvsl = sepa::Pain007Builder::new(text, id, id)
+        let rvsl = sepa::Pain007Builder::new(text, id, "2026-07-15T09:00:00".parse().unwrap(), id)
             .add_group(sepa::ReversalGroup::new(id).add_entry(sepa::ReversalEntry::reverse(
                 &group,
                 &entry,
@@ -99,6 +99,7 @@ fuzz_target!(|data: (&str, &str, i64, u8)| {
         };
         let recall = sepa::Camt055Builder::new(
             id,
+            "2026-07-15T09:00:00".parse().unwrap(),
             text,
             bank,
             sepa::OriginalMessage::from_direct_debit(&sdd),

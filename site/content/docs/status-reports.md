@@ -4,9 +4,9 @@ description = "Parse pain.002 status reports in Rust: Verification of Payee outc
 weight = 7
 +++
 
-`pain.002` requires strict resolved identity and supports 001.10, 001.03, 002.03
-and 003.03. Identity is not full XSD validation. See
-[reader contracts](@/docs/reader-contracts.md) for finite limits and evidence boundaries.
+`parse_pain002` reads `pain.002` 001.10, 001.03, 002.03 and 003.03; see
+[reader contracts](@/docs/reader-contracts.md) for limits. Parsing is not XSD
+validation.
 
 ## Acceptance and rejection
 
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 settlement completed. `PaymentStatus::is_final` tells the two apart when you
 need to wait for a terminal state.
 
-## Inspect Every Reported Level
+## Inspect every level
 
 Reasons can appear at group, payment-information or transaction level.
 `rejected_transactions()` only covers transaction rows; `reason_codes()` gathers
@@ -67,18 +67,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`DUPL` is not one of the codes the `ReasonCode` enum names, and is carried
-through as `ReasonCode::Other` rather than dropped — the reason you need must
-not depend on whether the enum happens to know the code.
+`DUPL` has no named `ReasonCode` variant and is carried as `ReasonCode::Other`.
 
 ## Verification of Payee
 
-DK Anlage 3 V3.9 section 2.2.6 (12 March 2025; printed page 234) defines these
-VoP outcomes in pain.002.001.10. They are **DK customer-profile semantics**, not
-a universal EPC mapping. The EPC103-24 inter-PSP API is separate. Legal deadlines
-depend on PSP category/geography; codes do not establish liability or settlement.
-
-[DK primary archive](https://www.ebics.de/fileadmin/unsecured/anlage3/anlage3_archiv/Anlage3_Archiv_V3_9.zip).
+DK Anlage 3 V3.9 section 2.2.6 (12 March 2025; printed page 234,
+[archive](https://www.ebics.de/fileadmin/unsecured/anlage3/anlage3_archiv/Anlage3_Archiv_V3_9.zip))
+defines these VoP outcomes in pain.002.001.10. They are **DK customer-profile
+semantics**, not a universal EPC mapping, and separate from the EPC103-24
+inter-PSP API. The codes do not establish liability or settlement.
 
 ```rust,no_run
 use sepa::{VerificationOutcome, parse_pain002};
@@ -90,9 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // A file of hundreds reports counts per outcome and itemises only
         // what needs a decision.
         for bucket in &block.status_counts {
-            // `count` is an Option: the bank asserting that a status bucket
-            // exists is worth reporting even when the number beside it is
-            // unreadable, so the row is kept rather than dropped.
+            // `count` is None when the reported number is unreadable.
             match bucket.count {
                 Some(n) => println!("{n} x {:?}", bucket.status),
                 None => println!("? x {:?} (count was {:?})", bucket.status, bucket.count_raw),
@@ -126,14 +121,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `RVNM` | No match | Escalate under the applicable payer-decision process |
 | `RVNA` | Not applicable | No answer, a timeout, or a bank outside the scheme |
 
-> A verification status is deliberately **not** an acceptance. `RCVC` says a
-> name matched, which is a different question from whether the payment was
-> taken — so `is_accepted()` stays `false` for it, and `verification()` answers
-> the other question.
+A verification status is **not** an acceptance: `is_accepted()` is `false` for
+`RCVC`; use `verification()` for the name check.
 
 ## Reason codes
 
 Rejections carry an ISO reason code: `AC01` wrong account, `AC04` closed,
 `AC06` blocked, `AM04` insufficient funds, `MD01` no valid mandate, `MD06`
-debtor revoked. Unknown codes are carried through rather than dropped, so a
-bank-specific value still reaches your logs.
+debtor revoked. Unknown codes are carried through, not dropped.

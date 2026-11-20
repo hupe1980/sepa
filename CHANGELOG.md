@@ -15,6 +15,66 @@ Review the migration notes before upgrading.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-20
+
+Default wire versions and Rust 1.88 remain unchanged. The only emitted-output
+change: `CreDtTm` is always the caller's, never a clock reading.
+
+> **Migration.**
+>
+> 1. The creation timestamp moves into every builder's constructor and the
+>    `created_at(ts)` setters are gone. Pass the value you used to call the
+>    setter with, or `IsoDateTime::now()` where you relied on the default:
+>
+>    | Before | After |
+>    |---|---|
+>    | `Pain001Builder::new(party, msg_id).created_at(ts)` | `Pain001Builder::new(party, msg_id, ts)` |
+>    | `Pain008Builder::new(party, msg_id).created_at(ts)` | `Pain008Builder::new(party, msg_id, ts)` |
+>    | `Pain007Builder::new(party, original_msg_id, msg_id)` | `Pain007Builder::new(party, msg_id, ts, original_msg_id)` |
+>    | `Camt055Builder::new(id, assigner, assignee, original)` | `Camt055Builder::new(id, ts, assigner, assignee, original)` |
+>    | `builder.creation_timestamp()` → `Option<IsoDateTime>` | `builder.created_at()` → `IsoDateTime` |
+>
+>    pain.007's two identifiers swap places so that every pain builder opens
+>    with `(party, msg_id, created_at)`. The timestamp between them is typed,
+>    so a call that only appends it fails to compile instead of silently
+>    swapping the identifiers.
+> 2. Reader account fields are `Option<AccountId>` instead of
+>    `Option<String>`: `pain002::TransactionStatus::{original_debtor_iban,
+>    original_creditor_iban}`, `camt::TransactionDetails::counterparty_iban`,
+>    `camt::AccountRef::{iban, other_id}`; `AccountRef::any_id()` and
+>    `Entry::counterparty_iban()` return `Option<&AccountId>`. `.as_deref()`
+>    still yields `Option<&str>`, and `AccountId` compares with `&str`.
+> 3. `CreditTransferGroup::new` and `DirectDebitGroup::new` take the party name
+>    as `&str`, like the IBAN and creditor identifier beside it. Pass `&name`
+>    where you passed a `String`.
+
+### Breaking Contracts
+
+- **No implicit clock read.** `GrpHdr/CreDtTm` (pain.001, pain.007, pain.008)
+  and `Assgnmt/CreDtTm` (camt.055) are constructor arguments. Identical inputs
+  build byte-identical files, so a billing run can be replayed against its own
+  output. `IsoDateTime::now()` and `IsoDate::today()` remain as explicit
+  helpers; nothing in the crate calls them.
+- **`Iban` debug-formats masked**, `Iban(DE…3000)`: the country and last four
+  characters. `Display`, `as_str()` and serde are unchanged. Every builder input
+  holding an IBAN — groups, entries, mandate amendments, builders — inherits it.
+
+### Added
+
+- `AccountId`: an account identifier exactly as a bank reported it — IBAN or
+  proprietary `Othr/Id`, not validated on read — with masked `Debug`, full
+  `Display`/`as_str()`, `iban()` for a checked view, and transparent serde.
+- `created_at()` on all four builders; `message_id()` on `Pain007Builder` and
+  `assignment_id()` on `Camt055Builder`.
+- `OriginalMessage::from_credit_transfer`/`from_direct_debit` always carry
+  `OrgnlCreDtTm`.
+
+### Documentation
+
+- The masking rule and its boundary (names, addresses, remittance text and
+  mandate references stay unmasked; serde is full) are documented in the crate
+  docs, README and the identifiers guide. Guides and rustdoc were tightened.
+
 ## [0.9.0] - 2026-10-13
 
 Default wire versions and Rust 1.88 remain unchanged.

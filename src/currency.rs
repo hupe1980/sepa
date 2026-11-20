@@ -255,8 +255,8 @@ mod tests {
         assert_eq!(serde_json::from_str::<Currency>(&json).unwrap(), usd);
 
         // The constructor runs on the way back in, so the newtype cannot be
-        // forged through a deserialiser. Regression: a `derive` here would
-        // have accepted the placeholder and the raw byte array alike.
+        // forged through a deserialiser. A `derive` here would accept the
+        // placeholder and the raw byte array alike.
         for bad in ["\"XXX\"", "\"EURO\"", "\"\"", "[85,83,68]"] {
             assert!(
                 serde_json::from_str::<Currency>(bad).is_err(),

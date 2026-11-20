@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+  <CstmrPmtStsRpt>
+    <GrpHdr><MsgId>RESP-1</MsgId><CreDtTm>2026-07-21T09:00:00</CreDtTm></GrpHdr>
+    <OrgnlGrpInfAndSts>
+      <OrgnlMsgId>DD-1</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId>
+    </OrgnlGrpInfAndSts>
+    <OrgnlPmtInfAndSts>
+      <OrgnlPmtInfId>DD-1</OrgnlPmtInfId>
+      <TxInfAndSts>
+        <OrgnlEndToEndId>E2E-1</OrgnlEndToEndId>
+        <TxSts>RJCT</TxSts>
+        <OrgnlTxRef>
+          <Dbtr><Pty><Nm>Max</Nm></Pty></Dbtr>
+          <DbtrAcct><Id><IBAN>de89 3704 0044 0532 0130 00</IBAN></Id></DbtrAcct>
+          <Cdtr><Pty><Nm>Acme</Nm></Pty></Cdtr>
+          <CdtrAcct><Id><IBAN>NL91ABNA0417164300</IBAN></Id></CdtrAcct>
+        </OrgnlTxRef>
+      </TxInfAndSts>
+    </OrgnlPmtInfAndSts>
+  </CstmrPmtStsRpt>
+</Document>

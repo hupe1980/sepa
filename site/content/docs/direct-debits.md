@@ -4,17 +4,15 @@ description = "Build SEPA Direct Debit files (pain.008) in Rust: CORE and B2B, F
 weight = 4
 +++
 
-A direct debit is money you collect. The message is `pain.008`, and the crate
-defaults to `pain.008.001.08`.
-
-Every collection needs a **mandate** — the debtor's authorisation — and a
-**Creditor Identifier**, which is why `DirectDebitGroup::new` takes one up
-front rather than letting you forget it.
+A direct debit is money you collect. The message is `pain.008`, defaulting to
+`pain.008.001.08`. Every collection needs a **mandate** (the debtor's
+authorisation) and a **Creditor Identifier**, which `DirectDebitGroup::new`
+takes as an argument.
 
 ## A realistic collection run
 
-`SeqTp` sits at payment-group level, so first collections and recurring ones
-each need their own group. That is what lets one file carry a whole run.
+`SeqTp` sits at payment-group level, so first and recurring collections go in
+separate groups of the same file.
 
 ```rust
 use sepa::{
@@ -27,7 +25,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("NL91ABNA0417164300")?;
     let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 
-    let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
+    let xml = Pain008Builder::new(
+        "Stadtwerke GmbH",
+        "DD-2026-07-001",
+        "2026-07-15T09:00:00".parse()?,
+    )
         .add_group(
             DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, IsoDate::new(2026, 7, 20)?)
                 .sequence_type(SequenceType::Frst)
@@ -74,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `Core` | Consumers and businesses | Default. Eight-week no-reason refund for authorised collections |
 | `B2b` | Businesses only | No no-reason refund for authorised collections; the debtor's bank verifies the mandate |
 
-Both can appear in the same file, again as separate groups:
+Both can appear in one file, as separate groups:
 
 ```rust
 use sepa::pain008::DirectDebitScheme;
@@ -123,13 +125,11 @@ The other cases are `creditor_id_changed`, `creditor_name_changed`,
 `mandate_id_changed` and `debtor_iban_changed`. The crate rejects an amendment
 carrying no actual change.
 
-> **`SMNDA` moved.** *Same mandate, new debtor account* went in
-> `OrgnlDbtrAgt` before November 2016 and in `OrgnlDbtrAcct` after. The crate
-> emits the current placement, and automatically switches to the old one when
-> you select the legacy German schema, whose type system only allows the old
-> form. An amendment cannot both state the previous IBAN and mark it `SMNDA` —
-> they fill the same element, and setting both is an error rather than a silent
-> drop.
+> **`SMNDA` placement.** *Same mandate, new debtor account* goes in
+> `OrgnlDbtrAcct` (EPC placement since November 2016); the legacy German schema
+> only allows `OrgnlDbtrAgt`, which the crate uses when that schema is
+> selected. Stating the previous IBAN and marking `SMNDA` fill the same
+> element, so setting both is an error.
 
 An amendment does **not** reset the sequence type to `FRST`. Carry on with
 `RCUR` if that is where the mandate was.

@@ -7,7 +7,7 @@ weight = 9
 Address presence depends on scheme, participants and legal case. Schema
 optionality alone does not permit omission of required information.
 
-## Current EPC Guidance
+## EPC guidance
 
 EPC153-22 v2.2, dated 30 September 2026, describes three address forms:
 
@@ -15,16 +15,15 @@ EPC153-22 v2.2, dated 30 September 2026, describes three address forms:
 |---|---|---|
 | **Structured** | Dedicated elements only — street, building number, post code, town, country | Preferred |
 | **Hybrid** | Town and country in their own elements, plus up to two free-text lines | Permitted |
-| **Unstructured** | Free-text address lines | Still permitted; no replacement cutoff set |
+| **Unstructured** | Free-text address lines | Permitted; the guidance sets no cutoff |
 
-No unstructured-address replacement cutoff is set by this guidance.
-Town/country are required for structured/hybrid, not every EPC-permitted format.
+Town and country are required for structured and hybrid addresses.
 
 [Primary EPC guidance](https://www.europeanpaymentscouncil.eu/document-library/guidance-documents/epc-guidance-document-provision-addresses-under-epc-payment).
 
-## Unstructured addresses are unrepresentable
+## Structured and hybrid only
 
-`PostalAddress::new` takes the town and the country, so the free-text-only form
+`PostalAddress::new` takes the town and the country, so the unstructured form
 cannot be built:
 
 ```rust
@@ -49,8 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Serde restoration uses the same town/country checks. Optional lengths, line count
-and charset are checked at message validation, not all at initial construction.
+Serde restoration applies the same town/country checks. Lengths, line count and
+charset are checked when the message is validated.
 
 ## Attaching an address
 
@@ -80,21 +79,18 @@ Direct debits mirror this: `DirectDebitGroup::creditor_address` and
 
 ## Which elements
 
-Only the elements common to both generations of the ISO address type are
-exposed — department, sub-department, street, building number, post code, town,
-country subdivision, country and address lines. Message validation checks these
-fields against the selected schema and charset policy.
+The elements common to both ISO address-type generations are exposed:
+department, sub-department, street, building number, post code, town, country
+subdivision, country and address lines.
 
-At most two address lines are permitted; a third is an error rather than being
-silently dropped. Lengths are checked *after* transliteration, because
-`Straße` grows a character on its way to `Strasse`.
+At most two address lines are permitted; a third is an error. Lengths are
+checked *after* transliteration (`Straße` → `Strasse`).
 
-The legacy German schemas have no structured address type at all — theirs holds
-only a country and two free-text lines — so selecting one and then setting an
-address is rejected rather than emitting something that schema forbids.
+The legacy German schemas have no structured address type, so setting an address
+with one of them selected is rejected.
 
 ## If all you have is free text
 
-It is outside this library's emitted scope. Obtain required structured information
-or use an implementation supporting the applicable permitted format. Omit only
-when the applicable obligations permit it; never invent a town to pass construction.
+Unstructured addresses are out of scope. Obtain the structured information, or
+use a tool that emits the unstructured form. Omit the address only where your
+obligations permit; never invent a town to pass construction.

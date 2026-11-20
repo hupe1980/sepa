@@ -4,9 +4,8 @@ description = "Send a settled SEPA direct debit back with pain.007 in Rust: reve
 weight = 5
 +++
 
-A **reversal** is you, the creditor, undoing a collection that already settled.
-It is your own correction, and it is not the same thing as the two debtor-side
-events people often confuse it with:
+A **reversal** is the creditor undoing a collection that already settled. It
+differs from a reject or a return:
 
 | What happened | Who starts it | Message you see |
 |---|---|---|
@@ -14,19 +13,17 @@ events people often confuse it with:
 | The debtor claims the money back | The debtor | `camt.054` return |
 | **You collected in error** | **You** | **`pain.007`** |
 
-A reversal concerns a settled collection. A
-[recall](@/docs/recalls.md) — `camt.055` — asks the bank to cancel a submitted
-payment. Availability, deadlines and fees depend on the bank and scheme.
-An `ARDT` refusal reports an existing return, not permission to send another one.
-
-Only `pain.007.001.09` is defined for SEPA, so there is no version to choose.
+A [recall](@/docs/recalls.md) (`camt.055`) instead asks the bank to cancel a
+payment before it settles. Availability, deadlines and fees depend on the bank
+and scheme; an `ARDT` recall refusal reports an existing return, not permission
+to reverse. SEPA defines only `pain.007.001.09`, so there is no version to
+choose.
 
 ## Reversing what you sent
 
-A reversal has to restate the collection it undoes — the mandate, the creditor
-identifier, the scheme, the sequence type, the dates and both parties. Rather
-than retyping a dozen fields and risking a mismatch, hand it the objects you
-already built:
+A reversal restates the collection it undoes — mandate, creditor identifier,
+scheme, sequence type, dates and both parties. `ReversalEntry::reverse` takes
+them from the group and entry you already built:
 
 ```rust
 use sepa::{
@@ -50,7 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "E2E-1",
     );
 
-    let xml = Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-2026-07-001")
+    let xml = Pain007Builder::new(
+        "Stadtwerke GmbH",
+        "RVSL-2026-07-001",
+        "2026-07-15T09:00:00".parse()?,
+        "DD-2026-07-001",
+    )
         .add_group(
             ReversalGroup::new("DD-2026-07-001")
                 .add_entry(ReversalEntry::reverse(&group, &entry, ReversalReason::Ms02)),
@@ -69,9 +71,8 @@ single-group collection that identifier is the message's own `MsgId`.
 
 ## Partial reversals
 
-Give back less than you took by setting the reversed amount. Reversing *more*
-than was collected is rejected — that would credit the debtor money you never
-took.
+Set the reversed amount to give back less than was collected. Reversing *more*
+than was collected is rejected.
 
 ```rust
 use sepa::{OriginalCollection, ReversalEntry, ReversalReason};
@@ -90,21 +91,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Why the original reference is required
+## The original reference is required
 
-ISO says a reversal may refer to the original *"by means of references only or
-by means of references and a set of elements from the original instruction"* —
-so in plain ISO, `OrgnlTxRef` is optional.
+ISO makes `OrgnlTxRef` optional; the German validation subset makes it
+mandatory, including the mandate reference and signature date. So
+`OriginalCollection` is a required argument.
 
-The German validation subset makes it mandatory, along with the mandate
-reference and signature date inside it. A references-only reversal is therefore
-not something a German bank accepts, and `OriginalCollection` is a required
-argument here rather than an `Option` you could forget.
-
-Its fields are set in pairs for the same reason: the subset makes
-`SvcLvl`/`LclInstrm`/`SeqTp` all mandatory once payment-type information is
-present, and a party needs both a name and an account. Building them together
-means a half-filled block cannot be expressed.
+Its fields are set together: once payment-type information is present the subset
+requires `SvcLvl`, `LclInstrm` and `SeqTp`, and a party needs both a name and an
+account.
 
 ```rust
 use sepa::{DirectDebitScheme, OriginalCollection, SequenceType, validate_iban};
@@ -124,11 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Reasons
 
-`MS02` — no reason given by the customer — is the ordinary choice for
-"collected in error", and is what the German banking industry's own example
-uses. `AM05` covers a duplicate, `FRAD` a fraudulent original, `TECH` a
-technical fault. Unrecognised codes are carried through rather than rejected,
-because ISO revises the list quarterly.
+`MS02` (no reason given by the customer) is the usual choice for "collected in
+error" and the one in the German banking industry's example. `AM05` covers a
+duplicate, `FRAD` a fraudulent original, `TECH` a technical fault. Unrecognised
+codes are carried through, since ISO revises the list quarterly.
 
 ## See also
 

@@ -4,13 +4,12 @@ description = "Build credit transfer files (pain.001) in Rust: SCT, SCT Instant,
 weight = 3
 +++
 
-A credit transfer is money you send. The message is `pain.001`, and the crate
-defaults to `pain.001.001.09` — the version the EPC rulebooks mandate.
+A credit transfer is money you send. The message is `pain.001`, defaulting to
+`pain.001.001.09`, the version the EPC rulebooks mandate.
 
-**Three schemes share that one message.** SCT, SCT Instant and One-Leg Out
-Instant all use `pain.001.001.09` and get the same `pain.002` back. What
-differs is a handful of coded values, and a wrong one passes `xmllint` and is
-rejected on ingestion. `CreditTransferKind` selects between them:
+SCT, SCT Instant and One-Leg Out Instant share that message and differ in a few
+coded values — a wrong one passes `xmllint` and is rejected by the bank.
+`CreditTransferKind` selects the scheme:
 
 | Scheme | `CreditTransferKind` | `SvcLvl` | `LclInstrm` | `ChrgBr` |
 |---|---|---|---|---|
@@ -18,8 +17,8 @@ rejected on ingestion. `CreditTransferKind` selects between them:
 | SCT Instant | `Instant` | `SEPA` | `INST` | `SLEV` |
 | OCT Inst | `OneLegOutInstant` | `EOLO` | `INST` | `CRED`/`DEBT`/`SHAR` |
 
-The scheme and the *schema version* are separate choices. All three schemes are
-specified against `pain.001.001.09`; see [schema versions](/docs/schema-versions/).
+The scheme and the schema version are separate choices; see
+[schema versions](/docs/schema-versions/).
 
 ## Ordinary transfers
 
@@ -30,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("DE89370400440532013000")?;
     let creditor = validate_iban("NL91ABNA0417164300")?;
 
-    let xml = Pain001Builder::new("Acme GmbH", "CT-2026-07-001")
+    let xml = Pain001Builder::new("Acme GmbH", "CT-2026-07-001", "2026-07-15T09:00:00".parse()?)
         .add_group(
             CreditTransferGroup::new("Acme GmbH", &debtor, IsoDate::new(2026, 7, 20)?)
                 .add_entry(CreditTransferEntry::new(
@@ -47,8 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Several groups in one message let a single file carry **different execution
-dates** or debtor accounts, instead of forcing a separate submission for each.
+Add several groups to carry different execution dates or debtor accounts in
+one file.
 
 ## SCT Instant
 
@@ -62,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("DE89370400440532013000")?;
     let creditor = validate_iban("NL91ABNA0417164300")?;
 
-    let xml = Pain001Builder::new("Acme GmbH", "CT-INST-001")
+    let xml = Pain001Builder::new("Acme GmbH", "CT-INST-001", "2026-07-15T09:00:00".parse()?)
         .add_group(
             CreditTransferGroup::new("Acme GmbH", &debtor, IsoDate::new(2026, 7, 20)?)
                 .kind(CreditTransferKind::Instant)
@@ -75,19 +74,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The scheme-wide 100 000 EUR cap on instant transfers was removed on
-5 October 2025, so the crate enforces the ordinary SEPA ceiling of
-999 999 999.99 EUR for every instrument. A lower limit is now a policy your PSP
-sets, not a scheme rule.
+The EPC removed the 100 000 EUR scheme cap on instant transfers on
+5 October 2025, so the crate applies the ordinary SEPA ceiling of
+999 999 999.99 EUR to every instrument. Any lower limit is your PSP's policy.
 
 ## One-leg-out instant transfers (OCT Inst)
 
-OCT Inst is the euro leg of an instant payment whose other leg leaves SEPA. It
-is an EPC payment scheme in its own right — rulebook EPC158-22, customer-to-PSP
-guidelines EPC250-22, in force since 5 October 2025 — and it is the one scheme
-here that is **not euro-only**.
-
-Three things change, and the crate enforces all three:
+OCT Inst is the euro leg of an instant payment whose other leg leaves SEPA
+(rulebook EPC158-22, customer-to-PSP guidelines EPC250-22, in force since
+5 October 2025). It is the one scheme here that is **not euro-only**.
 
 ```rust
 use sepa::pain001::CreditTransferKind;
@@ -97,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("DE89370400440532013000")?;
     let payee = validate_iban("NL91ABNA0417164300")?;
 
-    let xml = Pain001Builder::new("Acme GmbH", "OCT-2026-001")
+    let xml = Pain001Builder::new("Acme GmbH", "OCT-2026-001", "2026-07-15T09:00:00".parse()?)
         .add_group(
             CreditTransferGroup::new("Acme GmbH", &debtor, IsoDate::new(2026, 7, 20)?)
                 .kind(CreditTransferKind::OneLegOutInstant)
@@ -121,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Four things to know:
+The crate enforces its rules:
 
 - **There is no `OCTI` code.** The scheme is implied by `SvcLvl/Cd=EOLO` plus
   `LclInstrm/Cd=INST` — a rule no XSD can express.
@@ -132,17 +127,15 @@ Four things to know:
 - **`pain.001.001.09` only.** `EOLO` on an older schema is a
   `ValidationError::UnsupportedBySchema`.
 
-Amounts use integer hundredths, not a general currency minor-unit scale; the
-supported profile caps fractions at two digits. Ultimate parties, purpose codes and structured
-references work unchanged; a transfer back carries `Purp` = `RRCT`, and one
-answering a Request-to-Pay `RRTP`.
+Amounts use integer hundredths (at most two fraction digits). Ultimate
+parties, purpose codes and structured references work as for SCT; a transfer
+back carries `Purp` = `RRCT`, one answering a Request-to-Pay `RRTP`.
 
 ## Scheduled instant transfers
 
 `pain.001.001.09` types `ReqdExctnDt` as a date **or** a date-time. The timed
-form is what the German banking industry calls a *terminierte
-Echtzeitüberweisung*: an instant transfer due at a stated moment rather than
-some time during the day.
+form — the German *terminierte Echtzeitüberweisung* — is an instant transfer
+due at a stated moment.
 
 ```rust
 use sepa::pain001::CreditTransferKind;
@@ -154,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A time of day only names an instant once it says which zone it is in.
     let due: IsoDateTime = "2026-07-20T11:00:00Z".parse()?;
 
-    let xml = Pain001Builder::new("Acme GmbH", "CT-TIMED")
+    let xml = Pain001Builder::new("Acme GmbH", "CT-TIMED", "2026-07-15T09:00:00".parse()?)
         .add_group(
             CreditTransferGroup::new("Acme GmbH", &debtor, due)
                 .kind(CreditTransferKind::Instant)   // required for a timed execution
@@ -167,11 +160,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Two rules travel with the timed form, neither of which any XSD can express —
-so a file that breaks them validates cleanly and is rejected on ingestion. The
-DK validation subset annotates `DtTm` *"Only allowed for SCTinst"*, with the
-usage rule *"Only UTC time format or local time with UTC offset format can be
-used"*. `build()` enforces both:
+The DK validation subset adds two rules no XSD expresses: `DtTm` is *"Only
+allowed for SCTinst"*, and *"Only UTC time format or local time with UTC offset
+format can be used"*. `build()` enforces both:
 
 ```rust
 # use sepa::pain001::CreditTransferKind;
@@ -179,7 +170,7 @@ used"*. `build()` enforces both:
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 # let debtor = validate_iban("DE89370400440532013000")?;
 # let creditor = validate_iban("NL91ABNA0417164300")?;
-let err = Pain001Builder::new("Acme GmbH", "CT-TIMED")
+let err = Pain001Builder::new("Acme GmbH", "CT-TIMED", "2026-07-15T09:00:00".parse()?)
     .add_group(
         // No local instrument: an ordinary SCT settles some time during the
         // banking day, so a time of day on one instructs nothing.
@@ -200,15 +191,13 @@ assert_eq!(
 # }
 ```
 
-> The older schema versions type `ReqdExctnDt` as a bare date and have no
-> date-time branch at all. Asking for a timed execution on one of those is
-> rejected rather than quietly reduced to the day — a payment meant to leave at
-> 11:00 must not silently become "some time on the 20th".
+The older schema versions type `ReqdExctnDt` as a bare date, so a timed
+execution on one of them is rejected rather than reduced to the day.
 
 ## Structured references
 
-An ISO 11649 RF reference has check digits and can support automatic invoice
-matching when the bank returns it in the statement.
+An ISO 11649 RF reference carries check digits and comes back on the statement,
+which supports automatic invoice matching.
 
 ```rust
 use sepa::{CreditTransferEntry, RfReference, validate_iban};
@@ -230,10 +219,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Purpose codes and ultimate parties
 
-`Purp` and `CtgyPurp` are **two different code sets** that are easy to confuse.
-`RENT` is a purpose and not a category purpose; `DIVD` and `DIVI` both mean
-dividend but belong to different sets. The crate models them as separate types,
-so one cannot be passed where the other belongs.
+`Purp` and `CtgyPurp` are **different code sets**: `RENT` is a purpose but not
+a category purpose; `DIVD` and `DIVI` both mean dividend but belong to different
+sets. They are separate types (`Purpose`, `CategoryPurpose`).
 
 ```rust
 use sepa::{CreditTransferEntry, Party, Purpose, validate_iban};

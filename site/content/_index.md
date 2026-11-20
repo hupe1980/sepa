@@ -16,11 +16,12 @@ facts. It does not execute payments or certify a bank's acceptance.
 
 <ul class="feature-grid">
 <li><strong>Checked value types</strong><p>An <code>Iban</code> has passed mod-97 <em>and</em> the recorded national BBAN structure. An <code>IsoDate</code> is a real calendar day. Structured/hybrid addresses require town and country; optional content is validated when building.</p></li>
+<li><strong>Log-safe accounts</strong><p><code>Debug</code> prints <code>Iban(DE…3000)</code>, never the full account — in builder inputs and parsed bank reports alike. Errors carry no input values.</p></li>
 <li><strong>Integer money</strong><p>Monetary values use integer hundredths. Currency and direction remain explicit; no floating-point rounding.</p></li>
 <li><strong>Faithful observations</strong><p>Unreadable amounts and directions remain visible. Signing returns <code>None</code> when the reported facts do not support a figure.</p></li>
 <li><strong>Errors name the row</strong><p>A failure reports the ISO element <em>and</em> the group and transaction index — actionable in a collection run of ten thousand.</p></li>
 <li><strong>Independent schema fixtures</strong><p>The generated fixture matrix is checked in CI against pinned ISO schemas and German GBIC 5 subsets. This is test evidence, not certification of every possible document.</p></li>
-<li><strong>No transport or runtime</strong><p>Build strings or stream to your own writer. Storage and transport stay yours. Supply message IDs and payment dates; pin <code>created_at()</code> for reproducible output.</p></li>
+<li><strong>No transport or runtime</strong><p>Build strings or stream to your own writer. Storage and transport stay yours. Supply message IDs, creation timestamps and payment dates: the crate never reads the clock, so the same inputs rebuild the same file.</p></li>
 <li><strong>Two required dependencies</strong><p><code>thiserror</code> and <code>quick-xml</code>. Serde, <code>time</code> and <code>chrono</code> are opt-in features.</p></li>
 </ul>
 
@@ -40,7 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debtor = validate_iban("NL91ABNA0417164300")?;
     let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 
-    let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
+    let created_at = "2026-07-15T09:00:00".parse()?; // recorded with the run
+
+    let xml = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001", created_at)
         .add_group(
             DirectDebitGroup::new("Stadtwerke GmbH", &creditor, &ci, IsoDate::new(2026, 7, 20)?)
                 .sequence_type(SequenceType::Frst)

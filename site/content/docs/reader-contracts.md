@@ -4,7 +4,7 @@ description = "Strict identity, finite intake limits and faithful monetary obser
 weight = 12
 +++
 
-## Strict Identity
+## Strict identity
 
 Every reader requires one ISO `Document` with exactly one matching body. Scoped
 bindings resolve prefix spellings. Foreign namespaces cannot supply standard
@@ -22,7 +22,7 @@ trailing input are refused. There is no permissive compatibility mode.
 Parsing does not perform inbound XSD validation or establish bank acceptance,
 execution or settlement.
 
-## Finite Intake
+## Finite intake
 
 All `parse_*` functions use shared `ParseLimits`. Matching `parse_*_with_limits`
 functions accept positive finite overrides; depth cannot exceed 256. Zero never
@@ -43,7 +43,7 @@ Sizes are UTF-8 bytes. Checks precede retained-tree growth, but tokenizer/decodi
 allocations and caller-owned input still exist. Limits are not absolute process-RSS
 or CPU guarantees. The reader remains buffered.
 
-## Financial Observations
+## Financial observations
 
 Amount, currency and direction are independent facts. Missing currency is not EUR;
 missing charge direction is not debit. Decoded monetary raw text retains padding
@@ -61,7 +61,7 @@ overflow never saturates. Currency syntax checks do not prove registry membershi
 or PSP support. Equivalent amounts and transfer currencies remain independent,
 and status-less money/count buckets remain visible.
 
-## Located Financial Diagnostics
+## Located financial diagnostics
 
 All five document types expose `financial_diagnostics()`. Each
 `FinancialDiagnostic` contains a logical field path, a typed `FinancialIssue`

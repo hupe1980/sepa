@@ -29,10 +29,10 @@
 //! [`PostalAddress`]: crate::PostalAddress
 //!
 //! The amount ceiling is uniform across SCT, SCT Inst, SDD Core and SDD B2B.
-//! The old 100,000 EUR SCT Inst cap was removed from the scheme on
-//! 5 October 2025 (2025 SCT Inst Rulebook, following Art 5a(6) of the amended
-//! SEPA Regulation), so it is deliberately not enforced here — a lower ceiling
-//! is now a PSP or user policy limit, not a scheme rule.
+//! SCT Inst has no separate scheme cap since 5 October 2025 (2025 SCT Inst
+//! Rulebook, following Art 5a(6) of the amended SEPA Regulation), so none is
+//! enforced here — a lower ceiling is a PSP or user policy limit, not a scheme
+//! rule.
 
 use crate::charset::{Transliteration, first_invalid_char, transliterate};
 
@@ -475,7 +475,7 @@ impl std::fmt::Display for Location {
 /// let ci = validate_creditor_id("DE98ZZZ09999999999")?;
 /// let date = IsoDate::new(2026, 7, 20)?;
 ///
-/// let err = Pain008Builder::new("Stadtwerke GmbH", "DD-1")
+/// let err = Pain008Builder::new("Stadtwerke GmbH", "DD-1", "2026-07-15T09:00:00".parse()?)
 ///     .add_group(
 ///         DirectDebitGroup::new("Stadtwerke GmbH", &iban, &ci, date)
 ///             .add_entry(DirectDebitEntry::new(
@@ -955,7 +955,8 @@ mod tests {
 
     #[test]
     fn truncation_never_splits_a_character() {
-        // Regression: `&desc[..140]` panicked when byte 140 fell inside 'ü'.
+        // Byte-slicing (`&desc[..140]`) would panic when byte 140 falls inside
+        // 'ü'.
         let s = format!("{}ü", "A".repeat(139));
         assert_eq!(s.len(), 141, "141 bytes, 140 characters");
         let out = truncate_chars(&s, 140);

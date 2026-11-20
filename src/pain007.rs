@@ -61,7 +61,12 @@
 //! );
 //!
 //! // …was collected in error. Send it back.
-//! let xml = Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-2026-07-001")
+//! let xml = Pain007Builder::new(
+//!     "Stadtwerke GmbH",
+//!     "RVSL-2026-07-001",
+//!     "2026-07-15T09:00:00".parse()?,
+//!     "DD-2026-07-001",
+//! )
 //!     .add_group(
 //!         ReversalGroup::new("DD-2026-07-001").add_entry(ReversalEntry::reverse(
 //!             &group,
@@ -626,7 +631,7 @@ impl ReversalGroup {
 pub struct Pain007Builder {
     initiating_party: String,
     msg_id: String,
-    created_at: Option<IsoDateTime>,
+    created_at: IsoDateTime,
     creditor_agent: Option<Bic>,
     original_msg_id: String,
     original_msg_name_id: String,
@@ -635,21 +640,25 @@ pub struct Pain007Builder {
 }
 
 impl Pain007Builder {
-    /// A reversal of the message `original_msg_id`, sent by `initiating_party`
-    /// and identified by `msg_id`.
+    /// A reversal sent by `initiating_party`, identified by `msg_id` and
+    /// created at `created_at`, of the pain.008 `original_msg_id`.
     ///
-    /// `original_msg_id` is the `GrpHdr/MsgId` of the pain.008 whose
-    /// collections are being reversed; both identifiers are mandatory in the
-    /// schema, which is why they are constructor arguments rather than setters.
+    /// The first three arguments are this message's own group header, in the
+    /// same order as [`Pain008Builder::new`](crate::Pain008Builder::new);
+    /// `original_msg_id` is the `GrpHdr/MsgId` of the collection being
+    /// reversed. All are mandatory in the schema, which is why they are
+    /// constructor arguments rather than setters. `created_at` is emitted as
+    /// `GrpHdr/CreDtTm` exactly as given — the crate never reads the clock.
     pub fn new(
         initiating_party: impl Into<String>,
-        original_msg_id: impl Into<String>,
         msg_id: impl Into<String>,
+        created_at: IsoDateTime,
+        original_msg_id: impl Into<String>,
     ) -> Self {
         Self {
             initiating_party: initiating_party.into(),
             msg_id: msg_id.into(),
-            created_at: None,
+            created_at,
             creditor_agent: None,
             original_msg_id: original_msg_id.into(),
             original_msg_name_id: crate::pain008::DirectDebitSchema::default()
@@ -660,11 +669,16 @@ impl Pain007Builder {
         }
     }
 
-    /// Pin the creation timestamp (`CreDtTm`), making output reproducible.
+    /// The `GrpHdr/MsgId` this message will carry.
     #[must_use]
-    pub fn created_at(mut self, timestamp: IsoDateTime) -> Self {
-        self.created_at = Some(timestamp);
-        self
+    pub fn message_id(&self) -> &str {
+        &self.msg_id
+    }
+
+    /// The `GrpHdr/CreDtTm` this message will carry, exactly as supplied.
+    #[must_use]
+    pub const fn created_at(&self) -> IsoDateTime {
+        self.created_at
     }
 
     /// Set `OrgnlMsgNmId` — which pain.008 version the original was.
@@ -839,7 +853,7 @@ impl Pain007Builder {
     }
 
     fn write_xml_to<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
-        let now = self.created_at.unwrap_or_else(IsoDateTime::now);
+        let now = self.created_at;
         let initiating = self.charset.render(&self.initiating_party);
 
         w.write_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
@@ -929,15 +943,19 @@ mod tests {
     }
 
     fn reversal() -> Pain007Builder {
-        Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-001")
-            .created_at("2026-07-25T10:00:00".parse().unwrap())
-            .add_group(
-                ReversalGroup::new("DD-2026-07-001").add_entry(ReversalEntry::reverse(
-                    &original_group(),
-                    &original_entry(),
-                    ReversalReason::Ms02,
-                )),
-            )
+        Pain007Builder::new(
+            "Stadtwerke GmbH",
+            "RVSL-001",
+            "2026-07-25T10:00:00".parse().unwrap(),
+            "DD-2026-07-001",
+        )
+        .add_group(
+            ReversalGroup::new("DD-2026-07-001").add_entry(ReversalEntry::reverse(
+                &original_group(),
+                &original_entry(),
+                ReversalReason::Ms02,
+            )),
+        )
     }
 
     #[test]
@@ -976,15 +994,20 @@ mod tests {
     fn a_hand_built_reference_carries_the_mandate_the_dk_requires() {
         // The minimum the DK subset accepts: OrgnlTxRef present, with MndtId
         // and DtOfSgntr inside it. Everything else in the block is optional.
-        let xml = Pain007Builder::new("Stadtwerke GmbH", "DD-1", "RVSL-REF")
-            .add_group(ReversalGroup::new("DD-1").add_entry(ReversalEntry::new(
-                "E2E-9",
-                1_000,
-                ReversalReason::Am05,
-                OriginalCollection::new("MND-9", d("2024-01-01")),
-            )))
-            .build()
-            .unwrap();
+        let xml = Pain007Builder::new(
+            "Stadtwerke GmbH",
+            "RVSL-REF",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "DD-1",
+        )
+        .add_group(ReversalGroup::new("DD-1").add_entry(ReversalEntry::new(
+            "E2E-9",
+            1_000,
+            ReversalReason::Am05,
+            OriginalCollection::new("MND-9", d("2024-01-01")),
+        )))
+        .build()
+        .unwrap();
         assert!(xml.contains("<OrgnlEndToEndId>E2E-9</OrgnlEndToEndId>"));
         assert!(xml.contains("<Cd>AM05</Cd>"));
         assert!(
@@ -998,19 +1021,24 @@ mod tests {
     #[test]
     fn a_partial_reversal_may_not_exceed_what_was_collected() {
         let build = |reversed| {
-            Pain007Builder::new("Stadtwerke GmbH", "DD-1", "RVSL-PART")
-                .add_group(
-                    ReversalGroup::new("DD-1").add_entry(
-                        ReversalEntry::new(
-                            "E2E-1",
-                            7_500,
-                            ReversalReason::Ms02,
-                            OriginalCollection::new("MND-1", d("2024-01-01")),
-                        )
-                        .reversed_amount(reversed),
-                    ),
-                )
-                .build()
+            Pain007Builder::new(
+                "Stadtwerke GmbH",
+                "RVSL-PART",
+                "2026-07-15T09:00:00".parse().unwrap(),
+                "DD-1",
+            )
+            .add_group(
+                ReversalGroup::new("DD-1").add_entry(
+                    ReversalEntry::new(
+                        "E2E-1",
+                        7_500,
+                        ReversalReason::Ms02,
+                        OriginalCollection::new("MND-1", d("2024-01-01")),
+                    )
+                    .reversed_amount(reversed),
+                ),
+            )
+            .build()
         };
 
         let xml = build(2_500).unwrap();
@@ -1034,21 +1062,26 @@ mod tests {
         // so two blocks naming one group leave the reversal unattributable —
         // the same rule `PmtInfId` gets in pain.001 and pain.008, which this
         // builder was missing.
-        let err = Pain007Builder::new("Acme", "REV-1", "DD-ORIG")
-            .add_group(ReversalGroup::new("PMT-1").add_entry(ReversalEntry::new(
-                "E2E-1",
-                5_000,
-                ReversalReason::Ms02,
-                OriginalCollection::new("MND-1", d("2024-01-01")),
-            )))
-            .add_group(ReversalGroup::new("PMT-1").add_entry(ReversalEntry::new(
-                "E2E-2",
-                5_000,
-                ReversalReason::Ms02,
-                OriginalCollection::new("MND-2", d("2024-01-01")),
-            )))
-            .build()
-            .unwrap_err();
+        let err = Pain007Builder::new(
+            "Acme",
+            "DD-ORIG",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "REV-1",
+        )
+        .add_group(ReversalGroup::new("PMT-1").add_entry(ReversalEntry::new(
+            "E2E-1",
+            5_000,
+            ReversalReason::Ms02,
+            OriginalCollection::new("MND-1", d("2024-01-01")),
+        )))
+        .add_group(ReversalGroup::new("PMT-1").add_entry(ReversalEntry::new(
+            "E2E-2",
+            5_000,
+            ReversalReason::Ms02,
+            OriginalCollection::new("MND-2", d("2024-01-01")),
+        )))
+        .build()
+        .unwrap_err();
         assert_eq!(err.location, Location::group(1));
         assert!(matches!(
             err.kind,
@@ -1061,29 +1094,34 @@ mod tests {
 
     #[test]
     fn two_groups_may_not_share_a_reversal_id_either() {
-        let err = Pain007Builder::new("Acme", "REV-1", "DD-ORIG")
-            .add_group(
-                ReversalGroup::new("PMT-1")
-                    .reversal_payment_info_id("SAME")
-                    .add_entry(ReversalEntry::new(
-                        "E2E-1",
-                        5_000,
-                        ReversalReason::Ms02,
-                        OriginalCollection::new("MND-1", d("2024-01-01")),
-                    )),
-            )
-            .add_group(
-                ReversalGroup::new("PMT-2")
-                    .reversal_payment_info_id("SAME")
-                    .add_entry(ReversalEntry::new(
-                        "E2E-2",
-                        5_000,
-                        ReversalReason::Ms02,
-                        OriginalCollection::new("MND-2", d("2024-01-01")),
-                    )),
-            )
-            .build()
-            .unwrap_err();
+        let err = Pain007Builder::new(
+            "Acme",
+            "DD-ORIG",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "REV-1",
+        )
+        .add_group(
+            ReversalGroup::new("PMT-1")
+                .reversal_payment_info_id("SAME")
+                .add_entry(ReversalEntry::new(
+                    "E2E-1",
+                    5_000,
+                    ReversalReason::Ms02,
+                    OriginalCollection::new("MND-1", d("2024-01-01")),
+                )),
+        )
+        .add_group(
+            ReversalGroup::new("PMT-2")
+                .reversal_payment_info_id("SAME")
+                .add_entry(ReversalEntry::new(
+                    "E2E-2",
+                    5_000,
+                    ReversalReason::Ms02,
+                    OriginalCollection::new("MND-2", d("2024-01-01")),
+                )),
+        )
+        .build()
+        .unwrap_err();
         assert!(matches!(
             err.kind,
             ValidationError::Duplicate {
@@ -1097,7 +1135,12 @@ mod tests {
     fn several_groups_get_distinct_reversal_ids_within_max35text() {
         let msg_id = "R".repeat(35);
         let b = (0..3).fold(
-            Pain007Builder::new("Stadtwerke GmbH", "DD-1", &msg_id),
+            Pain007Builder::new(
+                "Stadtwerke GmbH",
+                &msg_id,
+                "2026-07-15T09:00:00".parse().unwrap(),
+                "DD-1",
+            ),
             |b, i| {
                 b.add_group(
                     ReversalGroup::new(format!("DD-1-{i}")).add_entry(ReversalEntry::new(
@@ -1128,37 +1171,53 @@ mod tests {
     #[test]
     fn an_empty_reversal_is_rejected() {
         assert_eq!(
-            Pain007Builder::new("Stadtwerke GmbH", "DD-1", "R").build(),
+            Pain007Builder::new(
+                "Stadtwerke GmbH",
+                "R",
+                "2026-07-15T09:00:00".parse().unwrap(),
+                "DD-1"
+            )
+            .build(),
             Err(BuildError::message(ValidationError::EmptyBatch))
         );
         assert_eq!(
-            Pain007Builder::new("Stadtwerke GmbH", "DD-1", "R")
-                .add_group(ReversalGroup::new("DD-1"))
-                .build(),
+            Pain007Builder::new(
+                "Stadtwerke GmbH",
+                "R",
+                "2026-07-15T09:00:00".parse().unwrap(),
+                "DD-1"
+            )
+            .add_group(ReversalGroup::new("DD-1"))
+            .build(),
             Err(BuildError::group(0, ValidationError::EmptyBatch))
         );
     }
 
     #[test]
     fn errors_name_the_group_and_transaction() {
-        let err = Pain007Builder::new("Stadtwerke GmbH", "DD-1", "RVSL-LOC")
-            .add_group(
-                ReversalGroup::new("DD-1")
-                    .add_entry(ReversalEntry::new(
-                        "E2E-1",
-                        100,
-                        ReversalReason::Ms02,
-                        OriginalCollection::new("MND-1", d("2024-01-01")),
-                    ))
-                    .add_entry(ReversalEntry::new(
-                        "E2E-2",
-                        0,
-                        ReversalReason::Ms02,
-                        OriginalCollection::new("MND-2", d("2024-01-01")),
-                    )),
-            )
-            .build()
-            .unwrap_err();
+        let err = Pain007Builder::new(
+            "Stadtwerke GmbH",
+            "RVSL-LOC",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "DD-1",
+        )
+        .add_group(
+            ReversalGroup::new("DD-1")
+                .add_entry(ReversalEntry::new(
+                    "E2E-1",
+                    100,
+                    ReversalReason::Ms02,
+                    OriginalCollection::new("MND-1", d("2024-01-01")),
+                ))
+                .add_entry(ReversalEntry::new(
+                    "E2E-2",
+                    0,
+                    ReversalReason::Ms02,
+                    OriginalCollection::new("MND-2", d("2024-01-01")),
+                )),
+        )
+        .build()
+        .unwrap_err();
         assert_eq!(err.location, Location::transaction(0, 1));
         assert!(err.to_string().starts_with("PmtInf[0]/Tx[1]: "));
     }
@@ -1195,14 +1254,19 @@ mod tests {
             100,
             "E2E-1",
         );
-        let xml = Pain007Builder::new("Müller & Söhne", "DD-1", "RVSL-UML")
-            .add_group(ReversalGroup::new("DD-1").add_entry(ReversalEntry::reverse(
-                &group,
-                &entry,
-                ReversalReason::Ms02,
-            )))
-            .build()
-            .unwrap();
+        let xml = Pain007Builder::new(
+            "Müller & Söhne",
+            "RVSL-UML",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "DD-1",
+        )
+        .add_group(ReversalGroup::new("DD-1").add_entry(ReversalEntry::reverse(
+            &group,
+            &entry,
+            ReversalReason::Ms02,
+        )))
+        .build()
+        .unwrap();
         assert!(xml.contains("Mueller + Soehne"));
         assert!(xml.contains("Joerg Gross"));
     }
@@ -1216,9 +1280,14 @@ mod tests {
 
         let mut empty: Vec<u8> = Vec::new();
         assert!(
-            Pain007Builder::new("X", "DD-1", "RVSL-EMPTY")
-                .write_to(&mut empty)
-                .is_err()
+            Pain007Builder::new(
+                "X",
+                "RVSL-EMPTY",
+                "2026-07-15T09:00:00".parse().unwrap(),
+                "DD-1"
+            )
+            .write_to(&mut empty)
+            .is_err()
         );
         assert_eq!(empty.len(), 0);
     }
@@ -1236,10 +1305,14 @@ mod tests {
     fn a_reversal_round_trips_the_payment_info_id_a_collection_emitted() {
         // The reversal has to name the PmtInfId the collection actually used,
         // which for a single-group message is the MsgId.
-        let collection = Pain008Builder::new("Stadtwerke GmbH", "DD-2026-07-001")
-            .add_group(original_group().add_entry(original_entry()))
-            .build()
-            .unwrap();
+        let collection = Pain008Builder::new(
+            "Stadtwerke GmbH",
+            "DD-2026-07-001",
+            "2026-07-15T09:00:00".parse().unwrap(),
+        )
+        .add_group(original_group().add_entry(original_entry()))
+        .build()
+        .unwrap();
         let pmt_inf_id = collection
             .split("<PmtInfId>")
             .nth(1)
@@ -1249,16 +1322,21 @@ mod tests {
             .unwrap();
         assert_eq!(pmt_inf_id, "DD-2026-07-001");
 
-        let xml = Pain007Builder::new("Stadtwerke GmbH", "DD-2026-07-001", "RVSL-1")
-            .add_group(
-                ReversalGroup::new(pmt_inf_id).add_entry(ReversalEntry::reverse(
-                    &original_group(),
-                    &original_entry(),
-                    ReversalReason::Ms02,
-                )),
-            )
-            .build()
-            .unwrap();
+        let xml = Pain007Builder::new(
+            "Stadtwerke GmbH",
+            "RVSL-1",
+            "2026-07-15T09:00:00".parse().unwrap(),
+            "DD-2026-07-001",
+        )
+        .add_group(
+            ReversalGroup::new(pmt_inf_id).add_entry(ReversalEntry::reverse(
+                &original_group(),
+                &original_entry(),
+                ReversalReason::Ms02,
+            )),
+        )
+        .build()
+        .unwrap();
         assert!(xml.contains("<OrgnlPmtInfId>DD-2026-07-001</OrgnlPmtInfId>"));
     }
 }

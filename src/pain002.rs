@@ -180,7 +180,7 @@ pub enum PaymentStatus {
 /// `VoP` has been mandatory for euro credit transfers since 9 October 2025 under
 /// the Instant Payments Regulation. The payer's PSP checks the payee name
 /// against the account before execution and reports the result back in the
-/// pain.002 — so a `pain.002` is no longer only about acceptance and rejection.
+/// pain.002 — so a `pain.002` is about more than acceptance and rejection.
 ///
 /// Read it with [`PaymentStatus::verification`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -630,12 +630,12 @@ pub struct TransactionStatus {
     pub original_transfer_currency: Option<String>,
     /// Original debtor name, if echoed back.
     pub original_debtor_name: Option<String>,
-    /// Original debtor IBAN, if echoed back.
-    pub original_debtor_iban: Option<String>,
+    /// Original debtor IBAN, if echoed back — exactly as reported; `Debug` masks it.
+    pub original_debtor_iban: Option<crate::AccountId>,
     /// Original creditor name, if echoed back.
     pub original_creditor_name: Option<String>,
-    /// Original creditor IBAN, if echoed back.
-    pub original_creditor_iban: Option<String>,
+    /// Original creditor IBAN, if echoed back — exactly as reported; `Debug` masks it.
+    pub original_creditor_iban: Option<crate::AccountId>,
 }
 
 // ── PaymentInfoStatus ─────────────────────────────────────────────────────────
@@ -1128,10 +1128,10 @@ fn parse_payment_info_status(block: &Node) -> PaymentInfoStatus {
 }
 
 fn parse_transaction_status(tx: &Node) -> TransactionStatus {
-    // Both are `0..1` in the schema. The previous stand-ins — `"NOTPROVIDED"`
-    // for the reference and `Other("UNKNOWN")` for the status — were
-    // indistinguishable from a bank genuinely sending those values, and the
-    // reference is what a rejection is matched back to a transaction with.
+    // Both are `0..1` in the schema, so absence is `None`. A stand-in such as
+    // `"NOTPROVIDED"` or `Other("UNKNOWN")` would be indistinguishable from a
+    // bank genuinely sending that value, and the reference is what a
+    // rejection is matched back to a transaction with.
     let original_end_to_end_id = tx.text_of("OrgnlEndToEndId").map(str::to_owned);
     let original_instruction_id = tx.text_of("OrgnlInstrId").map(str::to_owned);
     let status = tx.text_of("TxSts").map(PaymentStatus::from_code);
@@ -1153,11 +1153,12 @@ fn parse_transaction_status(tx: &Node) -> TransactionStatus {
         .map(|reference| crate::camt::ReportedAmount::parse(reference, "InstdAmt"));
     let equivalent = orig_tx_ref.and_then(|reference| reference.path(&["Amt", "EqvtAmt"]));
 
-    let party = |tags: [&str; 2]| -> (Option<String>, Option<String>) {
+    let party = |tags: [&str; 2]| -> (Option<String>, Option<crate::AccountId>) {
         orig_tx_ref.map_or((None, None), |r| {
             (
                 party_name(r, tags[0]),
-                r.text_at(&[tags[1], "Id", "IBAN"]).map(str::to_owned),
+                r.text_at(&[tags[1], "Id", "IBAN"])
+                    .map(crate::AccountId::from),
             )
         })
     };
@@ -1207,10 +1208,9 @@ mod tests {
 
     #[test]
     fn a_rejection_explains_itself_at_whichever_level_it_happened() {
-        // Regression: `StsRsnInf` was parsed on a transaction and nowhere else.
-        // A file refused outright has no transaction blocks at all, so its
-        // reason — the only thing an operator can act on — was discarded; and a
-        // rejected `PmtInf` explained itself to nobody either.
+        // `StsRsnInf` is read at group, payment-information and transaction
+        // level. A file refused outright has no transaction blocks at all, and
+        // its reason is the only thing an operator can act on.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
  <CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr>
@@ -1266,10 +1266,9 @@ mod tests {
 
     #[test]
     fn a_report_that_states_no_status_is_not_an_acceptance() {
-        // Regression: `reported` counted an `OrgnlPmtInfAndSts` *block*, not an
-        // actual status, so a report carrying neither `PmtInfSts` nor `TxSts`
-        // came back fully accepted — the exact silence the check exists to
-        // catch.
+        // Only an actual status counts, not an `OrgnlPmtInfAndSts` *block*: a
+        // report carrying neither `PmtInfSts` nor `TxSts` is the exact silence
+        // the check exists to catch.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
  <CstmrPmtStsRpt><GrpHdr><MsgId>M</MsgId><CreDtTm>2026-07-21T23:59:00</CreDtTm></GrpHdr>
@@ -1442,9 +1441,9 @@ mod tests {
     #[test]
     fn omitted_optional_fields_read_as_absent_not_as_a_stand_in() {
         // `OrgnlEndToEndId` and `TxSts` are both 0..1 in every pain.002
-        // version. They used to be filled with "NOTPROVIDED" and
-        // Other("UNKNOWN") — values a bank can also send for real, so a caller
-        // could not tell an unattributable rejection from an attributed one.
+        // version. A stand-in such as "NOTPROVIDED" or Other("UNKNOWN") is a
+        // value a bank can also send for real, so a caller could not tell an
+        // unattributable rejection from an attributed one.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
   <CstmrPmtStsRpt>
@@ -1515,9 +1514,8 @@ mod tests {
                 .is_fully_accepted()
         );
 
-        // The case the old implementation got wrong: it asked only whether any
-        // status was *rejected*, so a payment-information block that was
-        // merely pending or partially accepted counted as fully accepted.
+        // Not being *rejected* is not enough: a payment-information block that
+        // is merely pending or partially accepted is not fully accepted.
         for not_yet in ["PDNG", "PART", "ZZZZ"] {
             assert!(
                 !parse_pain002(&report("ACTC", not_yet))
